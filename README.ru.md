@@ -84,6 +84,8 @@ uses
 
 begin
   FastCanvasBackend := TFastCanvasBackend.D3D12;
+  // По желанию: сглаживание текста, Grayscale (по умолчанию, как у FMX), ClearType, Aliased или System (как в Windows).
+  FastCanvasTextAntialias := TFastTextAntialias.ClearType;
   InstallFastCanvas;
   InstallFastContext3D12;
   Application.Initialize;
@@ -134,6 +136,7 @@ msbuild Examples.groupproj /p:Config=Release /p:Platform=Win64
 | `FastCanvasPresentation` | `Composition` | Вывод окон через DirectComposition (прозрачные места формы показывают то, что под окном, как у Direct2D-канваса FMX) или `Flip` (swap chain самого окна, непрозрачный); скорость одинаковая |
 | `FastCanvasPartialFrames` | `True` | Direct3D 12: перерисовывать только изменившиеся прямоугольники |
 | `FastCanvasRenderThread` | `True` | Исполнять команды в потоке рендера |
+| `FastCanvasTextAntialias` | `Grayscale` | Сглаживание текста: `Grayscale` (как у Direct2D-канваса FMX), `ClearType` (субпиксельное, с настройками ClearType системы), `Aliased` (без сглаживания), `System` (как рисует Windows: ClearType, если он включён, без сглаживания, если выключено сглаживание шрифтов); можно менять во время работы |
 | `FastCanvasHdr` (`FastCanvas.Hdr`) | `Off` | HDR-вывод окон на HDR-мониторах (`Auto`) |
 | `FastContext3DRayTracing` (`FastCanvas.Context3D12`) | всё выключено | Тени, мягкие тени, ambient occlusion, отражения в 3D-сценах |
 | `FastContext3DDlssMode` (`FastCanvas.Context3D12`) | `Off` | DLSS Super Resolution новых окон `TForm3D` (NVIDIA RTX); у контекста во время работы — `DlssMode` |

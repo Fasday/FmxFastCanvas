@@ -80,6 +80,8 @@ uses
 
 begin
   FastCanvasBackend := TFastCanvasBackend.D3D12;
+  // Optional: text antialiasing, Grayscale (default, as FMX), ClearType, Aliased or System (as Windows).
+  FastCanvasTextAntialias := TFastTextAntialias.ClearType;
   InstallFastCanvas;
   InstallFastContext3D12;
   Application.Initialize;
@@ -130,6 +132,7 @@ Global variables, set before `Application.Initialize`; all of them in [docs/USAG
 | `FastCanvasPresentation` | `Composition` | Windows shown by DirectComposition (transparent parts of a form show what is behind it, as with FMX's Direct2D canvas) or `Flip` (a swap chain of the window, shown opaque); the same speed |
 | `FastCanvasPartialFrames` | `True` | Direct3D 12: repaint only the rectangles that changed |
 | `FastCanvasRenderThread` | `True` | Execute the commands on a render thread |
+| `FastCanvasTextAntialias` | `Grayscale` | Text antialiasing: `Grayscale` (as FMX's Direct2D canvas), `ClearType` (subpixel, with the system's ClearType settings), `Aliased` (none), `System` (as Windows draws text: ClearType when it is on, aliased when font smoothing is off); can be changed at run time |
 | `FastCanvasHdr` (`FastCanvas.Hdr`) | `Off` | HDR output of windows on HDR displays (`Auto`) |
 | `FastContext3DRayTracing` (`FastCanvas.Context3D12`) | all off | Shadows, soft shadows, ambient occlusion, reflections in 3D scenes |
 | `FastContext3DDlssMode` (`FastCanvas.Context3D12`) | `Off` | DLSS Super Resolution of new `TForm3D` windows (NVIDIA RTX); `DlssMode` of a context at run time |
