@@ -1,7 +1,7 @@
 # DelphiDX12 provenance
 
 A subset of the Direct3D 12 / DXGI translations of DelphiDX12, vendored with a few local patches for Delphi 37
-(Delphi 13) on Win64.
+(Delphi 13) on Win64 and Win32.
 
 - Upstream: https://github.com/CMCHTPC/DelphiDX12
 - Revision: `900c20e7be0d51c3543a9cd6c9afda788cd2429d`
@@ -34,7 +34,9 @@ Minimal; upstream copyright and license headers are kept.
   descriptors in Delphi builds instead of relying on FPC-only managed-record initializers. Pass CPU descriptor
   handles by value in device methods, matching the Win64 D3D12 ABI instead of Delphi `const` record-by-reference
   semantics. Match Delphi's official Win64 COM declarations for descriptor-handle and resource-desc aggregate returns
-  by using `out` procedures rather than invalid function-result combinations.
+  by using `out` procedures rather than invalid function-result combinations. `ID3D12Device.CreateComputePipelineState`
+  takes its description `const` (by reference, as D3D12 takes a pointer): declared by value, Win32 pushed the record
+  onto the stack (Win64 passes records of more than 8 bytes by reference anyway), and the device read garbage.
 - Every unit: `{$WARNINGS OFF}` and `{$HINTS OFF}` after its `unit` line (the translation produces W1012 subrange
   warnings in Delphi 37; the FastCanvas build is kept free of warnings).
 

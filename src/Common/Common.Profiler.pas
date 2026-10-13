@@ -4,8 +4,8 @@ unit Common.Profiler;
 
   A sampler thread wakes every IntervalUs microseconds (high-resolution waitable timer), suspends the target
   thread, reads its context and walks the stack with RtlLookupFunctionEntry / RtlVirtualUnwind (Win64 unwind
-  data: Delphi emits .pdata for its code), resumes the thread and keeps the return addresses. Nothing is
-  allocated while the target is suspended: it may hold the heap lock.
+  data: Delphi emits .pdata for its code; Win32: the chain of frame pointers), resumes the thread and keeps the
+  return addresses. Nothing is allocated while the target is suspended: it may hold the heap lock.
 
   ProfilerSave writes the loaded modules and the stacks; tools\profile-report.ps1 resolves the addresses of the
   executable with its detailed .map file and reports self and inclusive time per routine and per unit.
@@ -42,11 +42,13 @@ const
 function OpenThread(dwDesiredAccess: DWORD; bInheritHandle: BOOL; dwThreadId: DWORD): THandle; stdcall;
   external kernel32 name 'OpenThread';
 
+{$IFDEF CPUX64}
 function RtlLookupFunctionEntry(ControlPc: UInt64; out ImageBase: UInt64; HistoryTable: Pointer): Pointer; stdcall;
   external kernel32 name 'RtlLookupFunctionEntry';
 function RtlVirtualUnwind(HandlerType: Cardinal; ImageBase: UInt64; ControlPc: UInt64; FunctionEntry: Pointer;
   ContextRecord: PContext; out HandlerData: Pointer; out EstablisherFrame: UInt64;
   ContextPointers: Pointer): Pointer; stdcall; external kernel32 name 'RtlVirtualUnwind';
+{$ENDIF}
 
 type
   TSampler = class(TThread)
@@ -100,9 +102,13 @@ type
 /// aligned CONTEXT. Allocates nothing while the thread is suspended.</summary>
 function WalkThread(const AThread: THandle; const AContext: PContext; var AFrames: TFrames): Integer;
 var
+{$IFDEF CPUX64}
   ImageBase, Establisher: UInt64;
   Entry, Handler: Pointer;
   Rsp: UInt64;
+{$ELSE}
+  Ebp, Next, Ret: NativeUInt;
+{$ENDIF}
 begin
   Result := 0;
   if SuspendThread(AThread) = DWORD(-1) then
@@ -110,6 +116,29 @@ begin
   try
     FillChar(AContext^, SizeOf(TContext), 0);
     AContext.ContextFlags := CONTEXT_FULL;
+{$IFNDEF CPUX64}
+    // Win32: the instruction pointer, then the chain of frame pointers (routines without a frame are left out).
+    if GetThreadContext(AThread, AContext^) then
+      try
+        AFrames[0] := AContext.Eip;
+        Result := 1;
+        Ebp := AContext.Ebp;
+        while (Result < MaxFrames) and (Ebp <> 0) and not IsBadReadPtr(Pointer(Ebp), 8) do
+        begin
+          Ret := PNativeUInt(Ebp + SizeOf(Pointer))^;
+          if Ret = 0 then
+            Break;
+          AFrames[Result] := Ret;
+          Inc(Result);
+          Next := PNativeUInt(Ebp)^;
+          if Next <= Ebp then
+            Break;
+          Ebp := Next;
+        end;
+      except
+        // A frame pointing into nowhere: keep what was collected.
+      end;
+{$ELSE}
     if GetThreadContext(AThread, AContext^) then
       try
         while (Result < MaxFrames) and (AContext.Rip <> 0) do
@@ -132,6 +161,7 @@ begin
       except
         // A frame pointing into nowhere: keep what was collected.
       end;
+{$ENDIF}
   finally
     ResumeThread(AThread);
   end;

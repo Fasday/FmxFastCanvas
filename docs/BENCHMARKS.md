@@ -14,7 +14,7 @@ meaningful).
   the tables use `medium` and `heavy`.
 - Order: for each repeat and scene all canvases run back to back, so slow drift affects all of them equally; 3
   repeats, the tables show the median of the three medians.
-- Release build, no debugger, primary monitor, nothing else running.
+- Win64 release build, no debugger, primary monitor, nothing else running.
 - Each run records the environment (OS, CPU, GPU and driver, monitor, DPI, compiler, commit, every FMX global flag)
   in `runs.csv`; screenshots of every scene and canvas check that all canvases draw the same picture.
 
@@ -180,7 +180,7 @@ Everything that produced the tables is in the repository:
 | `tools/compare-shots.ps1` | Compares every canvas's screenshot of a scene with `d2d`'s |
 | `tools/run-aa.ps1`, `tools/compare-aa.ps1` | Antialiasing of the canvases against `AaReference` |
 | `tools/profile-report.ps1` | Resolves the stacks sampled with `--profile` |
-| `build.ps1`, `res` | Command-line build with dcc64 (Win64, release, per-monitor DPI manifest; copies `sk4d.dll` for the Skia canvases) |
+| `build.ps1`, `res` | Command-line build with dcc64 (Win64; `-Platform Win32`: dcc32), release, per-monitor DPI manifest; copies `sk4d.dll` for the Skia canvases |
 
 Build and run (PowerShell, RAD Studio 37.0 at its default path, `build.ps1` has it in `$Bds`):
 

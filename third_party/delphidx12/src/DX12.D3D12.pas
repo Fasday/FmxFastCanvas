@@ -3700,7 +3700,7 @@ type
         function CreateCommandQueue(const pDesc: TD3D12_COMMAND_QUEUE_DESC; const riid: TGUID; out ppCommandQueue): HResult; stdcall;
         function CreateCommandAllocator(_type: TD3D12_COMMAND_LIST_TYPE; const riid: TGUID; out ppCommandAllocator): HResult; stdcall;
         function CreateGraphicsPipelineState({const} pDesc: PD3D12_GRAPHICS_PIPELINE_STATE_DESC; const riid: TGUID; out ppPipelineState): HResult; stdcall;
-        function CreateComputePipelineState(pDesc: TD3D12_COMPUTE_PIPELINE_STATE_DESC; const riid: TGUID; out ppPipelineState): HResult; stdcall;
+        function CreateComputePipelineState(const pDesc: TD3D12_COMPUTE_PIPELINE_STATE_DESC; const riid: TGUID; out ppPipelineState): HResult; stdcall;
         function CreateCommandList(nodeMask: UINT; _type: TD3D12_COMMAND_LIST_TYPE; pCommandAllocator: ID3D12CommandAllocator; pInitialState: ID3D12PipelineState; const riid: TGUID; out ppCommandList): HResult; stdcall;
         function CheckFeatureSupport(Feature: TD3D12_FEATURE; pFeatureSupportData: pointer; FeatureSupportDataSize: UINT): HResult; stdcall;
         function CreateDescriptorHeap(const pDescriptorHeapDesc: PD3D12_DESCRIPTOR_HEAP_DESC; const riid: TGUID;

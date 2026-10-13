@@ -48,7 +48,7 @@ Skia и Skia Vulkan.
 
 ## Требования
 
-- Delphi 13 (RAD Studio 37.0) или новее, FireMonkey, **Win64** (Win32 не поддерживается).
+- Delphi 13 (RAD Studio 37.0) или новее, FireMonkey, **Win64** или Win32 (Win64 быстрее на стороне процессора).
 - Windows 10 или 11.
 - GPU с уровнем Direct3D 10_0 для бэкенда Direct3D 11 (без видеокарты — WARP), 11_0 для Direct3D 12.
 - Для трассировки лучей — DirectX Raytracing tier 1.1 (NVIDIA RTX 20 и новее, AMD RX 6000 и новее, Intel Arc); без
@@ -56,7 +56,7 @@ Skia и Skia Vulkan.
 
 ## Подключение
 
-Добавьте в пути поиска проекта (Win64) две папки:
+Добавьте в пути поиска проекта две папки:
 
 ```
 src\Canvas
@@ -103,7 +103,7 @@ FastCanvas устанавливается в `.dpr`. В заголовке ок�
   тени, ambient occlusion и отражения трассировкой лучей, пол и HDR-вывод: на мониторе в режиме HDR лампа светит ярче
   белого SDR (`DrawIntensity`), остальное выглядит как в SDR.
 
-Откройте в RAD Studio `Examples.groupproj` (или один из проектов) и запустите: проекты собираются под Win64, пути
+Откройте в RAD Studio `Examples.groupproj` (или один из проектов) и запустите: проекты собираются под Win64 (и Win32), пути
 поиска (`..\src\Canvas;..\third_party\delphidx12\src`) уже прописаны. Из командной строки:
 
 ```
@@ -144,7 +144,7 @@ msbuild Examples.groupproj /p:Config=Release /p:Platform=Win64
 
 ## Ограничения
 
-- Только Windows и Win64; нет канваса печати (`TPrinter`).
+- Только Windows (Win64 и Win32); нет канваса печати (`TPrinter`).
 - Текст сглаживается в оттенках серого (как у Direct2D-канваса FMX), не ClearType.
 - Частичная перерисовка и HDR-вывод — только на Direct3D 12; окна с HDR-выводом непрозрачны.
 - Окна, выводящие кадры с tearing (`AllowTearing`), выводятся через `Flip`.

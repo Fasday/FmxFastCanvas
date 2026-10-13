@@ -414,6 +414,7 @@ procedure TClipScene.Setup;
 var
   Rnd: TBenchRandom;
   I, J: Integer;
+  Angle: Single;
 begin
   inherited;
   GenerateMovingItems(FMoves, N, 30, 70, 170);
@@ -426,7 +427,12 @@ begin
     else
       FPanels[I].Opacity := 1;
     if Rnd.NextFloat < 0.25 then
-      FPanels[I].Angle := Rnd.Range(0.1, 0.5) * (2 * Rnd.RangeInt(0, 1) - 1)
+    begin
+      // Two statements: the compilers order the calls of one expression differently (Win32 and Win64 drew other
+      // angles).
+      Angle := Rnd.Range(0.1, 0.5);
+      FPanels[I].Angle := Angle * (2 * Rnd.RangeInt(0, 1) - 1);
+    end
     else
       FPanels[I].Angle := 0;
     // Light background, darker header, saturated content.

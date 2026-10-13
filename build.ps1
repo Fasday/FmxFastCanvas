@@ -1,10 +1,10 @@
 <#
 .SYNOPSIS
-  Command-line build of a Delphi (FMX) program for Win64 with dcc64.
+  Command-line build of a Delphi (FMX) program for Win64 (dcc64) or Win32 (dcc32).
 
 .DESCRIPTION
-  - Output exe/map:  bin\Win64\<Config>\
-  - DCU:             dcu\Win64\<Config>\<ProjectName>\
+  - Output exe/map:  bin\<Platform>\<Config>\
+  - DCU:             dcu\<Platform>\<Config>\<ProjectName>\
   - Compiles res\WinApp.rc (PerMonitorV2 manifest) to dcu\WinApp.res; add {$R WinApp.res} to the .dpr.
   - Copies sk4d.dll (Skia) next to the exe, required for the Skia canvases.
   - Always a full build (-B) so that changed compiler switches are never mixed with stale DCUs.
@@ -14,10 +14,12 @@
 .EXAMPLE
   .\build.ps1 -Project src\Bench\FmxCanvasBench.dpr
   .\build.ps1 -Project src\Bench\FmxCanvasBench.dpr -Config Debug -SearchPath src\Common -Define BENCH_TRACE
+  .\build.ps1 -Project src\Bench\FmxCanvasBench.dpr -SearchPath src\Common,src\Canvas -Platform Win32
 #>
 param(
   [Parameter(Mandatory = $true)] [string] $Project,
   [ValidateSet('Release', 'Debug')] [string] $Config = 'Release',
+  [ValidateSet('Win64', 'Win32')] [string] $Platform = 'Win64',
   [string[]] $SearchPath = @(),
   [string[]] $Define = @(),
   # Output root instead of bin\ (e.g. bin-dev to build while a benchmark run uses bin\).
@@ -27,14 +29,15 @@ param(
 $ErrorActionPreference = 'Stop'
 
 $Bds = 'C:\Program Files (x86)\Embarcadero\Studio\37.0'   # Delphi 13.2 (37.0.60952.8797)
-$Dcc = Join-Path $Bds 'bin\dcc64.exe'
+$DccName = if ($Platform -eq 'Win32') { 'dcc32' } else { 'dcc64' }
+$Dcc = Join-Path $Bds "bin\$DccName.exe"
 $Brcc = Join-Path $Bds 'bin\brcc32.exe'
 $Root = $PSScriptRoot
 
 $ProjectPath = (Resolve-Path $Project).Path
 $Name = [IO.Path]::GetFileNameWithoutExtension($ProjectPath)
-$OutDir = Join-Path $Root "$OutRoot\Win64\$Config"
-$DcuDir = Join-Path $Root "dcu\$OutRoot\Win64\$Config\$Name"
+$OutDir = Join-Path $Root "$OutRoot\$Platform\$Config"
+$DcuDir = Join-Path $Root "dcu\$OutRoot\$Platform\$Config\$Name"
 $ResDir = Join-Path $Root 'dcu'
 New-Item -ItemType Directory -Force -Path $OutDir, $DcuDir | Out-Null
 
@@ -105,12 +108,12 @@ if ($Config -eq 'Release') {
 $flags += '-D' + ($defines -join ';')
 
 # 4. Compile
-Write-Host "dcc64 $Name [$Config] commit $commit dirty=$dirty"
+Write-Host "$DccName $Name [$Config] commit $commit dirty=$dirty"
 & $Dcc @flags $ProjectPath
-if ($LASTEXITCODE -ne 0) { throw "dcc64 failed ($LASTEXITCODE)" }
+if ($LASTEXITCODE -ne 0) { throw "$DccName failed ($LASTEXITCODE)" }
 
 # 5. Runtime dependencies
-$Sk4d = Join-Path $Bds 'Redist\win64\sk4d.dll'
+$Sk4d = Join-Path $Bds "Redist\$($Platform.ToLower())\sk4d.dll"
 Copy-Item $Sk4d $OutDir -Force
 
 Write-Host "OK -> $(Join-Path $OutDir "$Name.exe")"

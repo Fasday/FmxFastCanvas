@@ -45,7 +45,7 @@ repository (`src/Bench`, `tools`, `results`): the numbers can be checked and mea
 
 ## Requirements
 
-- Delphi 13 (RAD Studio 37.0) or later, FireMonkey, **Win64** (Win32 is not supported).
+- Delphi 13 (RAD Studio 37.0) or later, FireMonkey, **Win64** or Win32 (Win64 is faster on the CPU side).
 - Windows 10 or 11.
 - A GPU with Direct3D feature level 10_0 for the Direct3D 11 back end (WARP without one), 11_0 for Direct3D 12.
 - DirectX Raytracing tier 1.1 for the ray-traced effects (NVIDIA RTX 20 and later, AMD RX 6000 and later, Intel Arc);
@@ -53,7 +53,7 @@ repository (`src/Bench`, `tools`, `results`): the numbers can be checked and mea
 
 ## Use
 
-Add two folders to the project's search path (Win64):
+Add two folders to the project's search path:
 
 ```
 src\Canvas
@@ -100,7 +100,7 @@ the designer; FastCanvas is installed in the `.dpr`. The window title tells what
   ray-traced shadows, soft shadows, ambient occlusion and reflections, the floor, and HDR output: on a display in HDR
   mode the lamp shines brighter than SDR white (`DrawIntensity`), the rest looks as in SDR.
 
-Open `Examples.groupproj` (or one of the projects) in RAD Studio and run: the projects target Win64 and already have
+Open `Examples.groupproj` (or one of the projects) in RAD Studio and run: the projects target Win64 (Win32 too) and already have
 the search path (`..\src\Canvas;..\third_party\delphidx12\src`). From the command line:
 
 ```
@@ -141,7 +141,7 @@ Global variables, set before `Application.Initialize`; all of them in [docs/USAG
 
 ## Limitations
 
-- Windows and Win64 only; no printing canvas (`TPrinter`).
+- Windows only (Win64 and Win32); no printing canvas (`TPrinter`).
 - Grayscale text antialiasing (as FMX's Direct2D canvas), not ClearType.
 - Partial repaints and HDR output on Direct3D 12 only; windows with HDR output are opaque.
 - Windows presenting with tearing (`AllowTearing`) take `Flip`.

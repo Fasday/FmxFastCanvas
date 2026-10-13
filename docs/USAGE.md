@@ -2,7 +2,9 @@
 
 ## Requirements
 
-- Delphi 13 (RAD Studio 37.0) or later, FireMonkey, Win64. Win32 is not supported.
+- Delphi 13 (RAD Studio 37.0) or later, FireMonkey, Win64 or Win32. Win64 is faster on the CPU side (Delphi's 32-bit
+  code: about 1.4 to 1.9 times the frame time on scenes with many shapes, strings or controls, measured 2026-10-13);
+  the GPU work is the same.
 - Windows 10 or 11.
 - Direct3D 11 back end: a GPU with feature level 10_0 or higher (WARP when there is none).
 - Direct3D 12 back end: a GPU with feature level 11_0 or higher.
@@ -292,7 +294,7 @@ measured at 1920x1080, 4–13 µs per frame (3–7 % on scenes running at 6000�
 
 ## Limitations
 
-- Windows only, Win64 only.
+- Windows only (Win64 and Win32).
 - Printing (`TPrinter` canvases) is not supported.
 - Text is grayscale antialiased (as FMX's stock Direct2D canvas draws it), not ClearType.
 - Ray-traced effects need a depth buffer and DXR tier 1.1; they do not trace transparent objects.
