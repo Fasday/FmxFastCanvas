@@ -1,0 +1,18 @@
+# Delphi build output
+*.dcu
+*.exe
+*.map
+*.res
+*.rsm
+*.drc
+*.dsk
+*.identcache
+*.local
+*.stat
+*.tvsconfig
+__history/
+__recovery/
+bin/
+dcu/
+Win32/
+Win64/

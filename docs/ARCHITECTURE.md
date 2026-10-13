@@ -1,0 +1,205 @@
+# How FastCanvas works
+
+FastCanvas replaces the canvas and the 3D context of FireMonkey on Windows. It is written from scratch on
+Direct3D 11 or Direct3D 12; FMX itself (forms, controls, styles, layout, animations) is unchanged.
+
+## Units
+
+| Unit | What it does |
+|---|---|
+| `FastCanvas.Canvas` | `TFastCanvas`: records canvas calls as commands, owns bitmaps (`TFastBitmap`), window targets, the player that executes the commands on the render thread, device loss, partial frames. |
+| `FastCanvas.RenderQueue` | The command stream (chunks) and the render thread. |
+| `FastCanvas.Gpu` | The renderer that does not depend on the graphics API: instanced runs of primitives, clip/paint/edge tables, gradient ramps, glyph atlas. |
+| `FastCanvas.Gpu11`, `FastCanvas.Gpu12` | The Direct3D 11 and Direct3D 12 back ends of the renderer: surfaces, swap chains, pipelines. |
+| `Shaders/FastCanvas.hlsl` → `FastCanvas.Shaders.inc` | The canvas shaders (vs_4_0 / ps_4_0, DXBC, used by both back ends). |
+| `FastCanvas.Text` | `TFastTextLayout` on DirectWrite: layouts analysed into glyph runs, the glyph atlas. |
+| `FastCanvas.Device` | The device of the process (Direct3D 11 or 12), DXGI, Direct2D factory (CPU geometry), DirectWrite. |
+| `FastCanvas.Hdr`, `Shaders/FastOutput.hlsl` | HDR output: the setting, what the display of a window can show (DXGI outputs, SDR white level), the pass that turns a window's frame into scRGB. |
+| `FastCanvas.Service` | Installs the canvas class and the 3D context class into FMX (`IFMXCanvasService`, `IFMXContextService`). |
+| `FastCanvas.Bridge` | What a 3D context needs from the canvas: device, lock, bitmap textures, a way into the command stream. |
+| `FastCanvas.Context3D` | The part of the 3D contexts that does not depend on the API: shaders and their variables, pipeline state, vertex layouts. |
+| `FastCanvas.Context3D11`, `FastCanvas.Context3D12` | The 3D contexts (`TContext3D`) for `TViewport3D`, `TForm3D` and the effects. |
+| `FastCanvas.Context3D12.Ray.inc`, `Shaders/FastRay.hlsl` → `FastCanvas.RayShaders.inc` | Ray-traced effects (DXR 1.1, shader model 6.5). |
+| `FastCanvas.D2D1Ext`, `FastCanvas.DWriteExt`, `FastCanvas.DCompExt` | Headers of Direct2D 1.1+, DirectWrite 2 and DirectComposition that Delphi's RTL lacks. |
+
+The shaders are compiled offline by `tools/compile-shaders.ps1` (fxc and dxc from the Windows SDK) into Pascal byte
+arrays; building FastCanvas needs neither compiler.
+
+## Recording and the render thread
+
+Every canvas call of the main thread appends a compact command to the current chunk of the command stream and returns:
+nothing is drawn on the main thread, and no driver is called there. `EndScene` of a window hands the chunk to the render
+thread, which executes chunks in submission order, so the stream order is the program order: a bitmap drawn into and
+then drawn onto a form needs no synchronization. The main thread records frame N + 1 while the render thread draws
+frame N (`FastCanvasFramesInFlight`). Objects that commands refer to (bitmaps, text layouts) are kept alive by the
+chunk until it has run.
+
+Waits of the main thread (a frame in flight, `TBitmap.Map`) dispatch messages sent to its windows and nothing else,
+so a wait inside a paint does not re-enter FMX. Without a render thread (`FastCanvasRenderThread := False`) the same
+stream is executed on the recording thread at `EndScene`.
+
+## The renderer
+
+- **One instance per shape.** A rectangle (with rounded corners per corner), a rectangle outline (miter, round or bevel
+  joins), an ellipse and its outline, a line (flat, square or round caps, dashes), an image and a glyph are each one
+  84-byte instance record: the shape rectangle in local space, a 2x3 matrix, radii, texture coordinates, color, flags,
+  clip index, paint index, stroke width. The main thread writes the records straight into the stream; the render
+  thread copies runs of them into a vertex buffer and draws each run with one instanced draw call. A new run starts
+  only for a new render target or a ninth texture.
+- **Coverage is analytic.** The pixel shader computes the signed distance to the shape's edge in local space; the
+  antialiasing width is the size of a pixel taken from the derivatives of the local position. Shapes are smooth at any
+  rotation and scale, with no MSAA and no tessellation.
+- **Clips do not split draws.** A clip is an entry of a table (a pixel box and up to two rotated rectangles, the
+  inverse kind for `ExcludeClipRect`); instances carry its index and the shader tests the pixel center.
+- **Paints** (a table too): linear and radial gradients (256-texel ramps in a shared texture), bitmap brushes (sampled
+  in the shader, tile modes included), dash patterns.
+- **Paths** are polygons: the render thread flattens a path once with the Direct2D factory (`Simplify` for fills,
+  `Widen` for strokes, so joins, caps and dashes are exactly Direct2D's), splits the edges into horizontal bands and
+  stores them in an edge table; the shader computes the exact area of the pixel square inside the polygon from the
+  edges of its band (even-odd for FMX fills, non-zero for strokes). Results are cached by path and scale; shapes that
+  move keep their edges (the offset goes into the instance matrix). The table keeps a persistent part and a per-frame
+  part, so geometry that changes every frame does not evict the geometry that stays.
+- **Text.** `TFastTextLayout` builds a DirectWrite text layout, analyses it once into glyph runs (cached by text and
+  parameters), and the canvas draws glyph quads that sample an R8 glyph atlas (2048 x 2048, shelf-packed; glyphs
+  rasterized by DirectWrite in grayscale at 4 horizontal subpixel positions). The blending follows DirectWrite's own
+  grayscale contrast and gamma correction (formulas of Microsoft Terminal, `THIRD_PARTY_NOTICES.md`). Color fonts
+  (emoji) are rasterized once into images; rotated and very large text is drawn from glyph outlines.
+- **No Direct2D drawing.** Direct2D only serves the CPU geometry; everything is drawn by the shaders above.
+
+## Windows and present
+
+- Direct3D 11: a flip-model swap chain with two buffers (`FLIP_DISCARD`). FMX repaints the whole form every frame.
+- Direct3D 12: three buffers (`FLIP_SEQUENTIAL`; two cost 10 % on light scenes, sequential costs nothing over discard).
+  The canvas reports `TCanvasStyle.SupportClipRects` (`FastCanvasPartialFrames`): FMX repaints only the rectangles
+  that changed, the frame starts from a copy of the buffer shown last and draws inside a clip around the rectangles,
+  testing each pixel against them when there are several. The rectangles hold only while the window is the target:
+  scenes of bitmap canvases that run in the middle of the window's frame (image lists, effects) draw everywhere, and
+  the window's draws after them are tested again. A frame with nothing to start from (a new or resized swap chain) is
+  not presented, and the forms repaint in full.
+- `FastCanvasPresentation`: `Flip` gives every window a swap chain of its own (`CreateSwapChainForHwnd`,
+  alpha ignored: DWM shows it opaque). `Composition` (default) makes a composition swap chain (`CreateSwapChainForComposition`,
+  premultiplied alpha, same buffers and partial frames) that one DirectComposition visual shows in the window
+  (`FastCanvas.DCompExt`: a device made with `DCompositionCreateDevice2` without a rendering device, a target on the
+  window below its child windows). Transparent pixels show what is under the frame: a DWM backdrop (Mica, Acrylic)
+  with the frame extended into the client area, as with the stock Direct2D canvas, whose blt-model swap chain DWM
+  composes with alpha. The window's own GDI surface under the visual is filled with black when the swap chain is made
+  or resized (a new surface is white; GDI black has alpha 0, transparent over the backdrop). DWM keeps showing the last
+  frame of a window's own swap chain after it is gone (GDI drawing, resizing, hiding the window or making it layered
+  do not clear it), so a form that switches from `Flip` to `Composition` at run time gets a new window
+  (`TCommonCustomForm.Recreate`). Same speed as `Flip` (listbox, controls, effects, rects, text on both back ends,
+  measured 2026-10-13).
+- Transparent forms draw into a texture that is read back into the layered window after every frame.
+- `AllowTearing` presents with `DXGI_PRESENT_ALLOW_TEARING` (throughput measurements); only a swap chain of the window
+  can, so such windows take `Flip` also when `Composition` is set.
+
+### HDR output (Direct3D 12)
+
+With `FastCanvasHdr` on, every window frame starts by asking which display the window is on (`MonitorFromWindow`) and
+what that display shows, from a cache of the DXGI outputs (`IDXGIOutput6.GetDesc1`: color space, luminances) and the
+display configuration (`DisplayConfigGetDeviceInfo`: the SDR white level). The cache is read again when
+`IDXGIFactory1.IsCurrent` turns false (a display added or removed, a mode change, Windows HDR switched), for a monitor it
+does not know, and on `FastHdrRefresh`; SDR white levels of displays in HDR mode once a second. A window whose display is
+in HDR mode (or every window with `Force`) gets its swap chain buffers as `R16G16B16A16_FLOAT` with the color space
+`RGB_FULL_G10_NONE_P709` (scRGB; `ResizeBuffers` and `SetColorSpace1` when it changes, a new swap chain when DXGI refuses).
+
+The frame is drawn as before, only into an RGBA16F surface of the window instead of the buffer: the same sRGB-encoded,
+premultiplied colors, blended the same way (pipeline states for RGBA16F targets are made on first use), with room above
+1.0. At `Present` one full-window pass (`FastOutput.hlsl`) decodes it with the sRGB curve and multiplies by the SDR white
+level / 80 nits into the swap chain buffer, which is what Windows does with the 8-bit buffers of other programs: SDR
+content keeps its look, and blending, text and antialiasing are unchanged (blending in linear light would change them,
+see `USAGE.md`). The surface keeps the frame, so a partial frame starts from it, as from the shown buffer in SDR.
+
+HDR content comes from 3D: a context with `Hdr` draws into an RGBA16F target (same encoding, values above 1), and its
+`CopyToBitmap` puts the image into the bitmap's second, RGBA16F surface, which canvases then draw from. The bitmap goes
+back to its 8-bit surface (values clipped at 1) when the CPU maps it, a canvas draws into it, or a 3D context renders into
+it. On an 8-bit target such values clip; on an HDR window's surface they pass through to the display.
+
+## The Direct3D 12 back end
+
+One recording context per device: a direct command list per executed chunk of the stream (2D and 3D work share it),
+submitted before `Present` and whenever the CPU needs results. Command allocators, upload pages and blocks of the
+shader-visible descriptor heap are reused once the fence of the submission that used them has passed; released
+resources wait for that fence too. Resource states are tracked per resource and changed by batched barriers. The
+canvas pipeline has one root signature (8 root constants, a table of eight textures, a table of the shared resources,
+three static samplers) and two pipeline states.
+
+## The 3D contexts
+
+FMX's 3D context (`TContext3D`) renders `TViewport3D`, `TForm3D` and the filters of `FMX.Effects`. FastCanvas has its
+own for each back end, on the canvas's device:
+
+- **Shared part** (`FastCanvas.Context3D`): FMX passes a shader's bytecode with its variables by name on every
+  draw; variables are found by comparing the string pointer first (FMX passes the same string constants every time;
+  the stock context searches with `SameText` on every variable of every draw, a third of the frame of a simple 3D
+  scene). Constant buffers are kept with dirty flags; the pipeline state FMX sets is a small record that serves as a
+  cache key.
+- **Direct3D 11**: every 3D command goes into a deferred context; its command list enters the canvas's command stream
+  before the canvas's next command, so 3D work runs in program order with the 2D work, on the render thread.
+- **Direct3D 12**: the main thread records compact commands (target, clear, draw with its vertices, indices and
+  changed constants, copy, resolve, texture upload, present) into the canvas's command stream; the render thread
+  replays them into the canvas's command list. Pipeline state objects are cached by shaders, vertex layout, state and
+  target format. With `Hdr` the target of a viewport is RGBA16F (see "HDR output").
+- Bitmaps of the canvas are used in place as textures and render targets: a `TViewport3D` renders and copies its image
+  into the form's bitmap on the GPU (the stock contexts read it back through the CPU), and the effects filter canvas
+  bitmaps without leaving the GPU.
+
+### Ray-traced effects (Direct3D 12, DXR 1.1)
+
+While a scene with effects is recorded, every opaque object (triangles, depth test and write, float3 positions, drawn
+in world space) is announced to the render thread with its matrix and, for reflections, its vertex layout and material
+(read from the constants FMX's standard materials set: `MaterialDiffuse`, `MaterialSpecular`, `MaterialOpts`, ...).
+The render thread builds a bottom-level acceleration structure once per geometry (identified by its vertex arrays and
+a sample of positions; released after 300 passes unused) and, at the end of the scene, the top-level structure of
+its instances. Full-screen passes then work from the depth buffer, with inline ray queries (shader model 6.5):
+
+- **Shadows**: rays from each pixel's surface to every light (`TLightDescription`: directional, point, spot); hard
+  shadows in one full-resolution pass, soft shadows with several rays per light over the light's disc.
+- **Ambient occlusion**: rays over the hemisphere of the surface, up to a radius. Soft shadows and occlusion are traced
+  at half resolution and smoothed and upsampled within surfaces (the depth buffer tells them apart).
+- **Reflections**: a ray from the camera finds the object of the pixel, its material says how much it reflects, and a
+  mirrored ray finds what it reflects, shaded as FMX shades its material (lights, shadows, textures; the scene's clear
+  color where the ray leaves the scene). Each geometry keeps a copy of its vertices and indices for the normals and
+  texture coordinates of the surfaces the rays hit.
+
+The results multiply (shadows, occlusion) or blend (reflections) into the color FMX has drawn, so FMX's materials and
+shaders are untouched. Off, the effects cost nothing: nothing is recorded or built.
+
+**Application ray passes** use the same machinery: with `RayScene` on, the draws are announced to the render thread
+with the program's attributes (mask, 24-bit user value in `InstanceContributionToHitGroupIndex`, optional geometry
+key and version). `RayDispatch` and `RayDraw` record a command at their point of the stream; the render thread
+builds the top-level structure if instances were added since the last pass, puts a UAV barrier, binds a fixed root
+signature (frame constants, the program's constants, the structure, the depth buffer, the program's SRV and UAV
+tables, four static samplers) and runs the program's compute or pixel shader, whose pipeline it made once and keeps.
+Program buffers and images are GPU resources of the render thread; their writes are commands too, and after a device
+loss they get new zeroed memory and a new `Generation`. Instances get `TRIANGLE_FRONT_COUNTERCLOCKWISE` when their
+transform keeps orientation, so that a ray sees the same front face as the raster.
+
+## Device loss
+
+The render thread only records that the device is gone (`DXGI_ERROR_DEVICE_REMOVED` or `RESET` from `Present`, or an
+exception on a removed device). The next scene that is not nested in another waits for the render thread, sends
+`TContextLostMessage`, releases everything made on the old device, creates a new device, recreates the bitmap textures
+(bitmaps the CPU wrote get their pixels back), sends `TContextResetMessage`, and repaints the forms. The 3D contexts
+make their buffers again on the main thread before their next scene. `FastCanvasSimulateDeviceLoss` exercises this
+path.
+
+## Shutdown
+
+FMX frees the forms, and with them canvases, bitmaps, text layouts and 3D contexts, after the unit finalizations
+(`FinalizeForms` in the finalization of `FMX.Platform`), then unregisters the canvas classes, finalizes the shaders
+and unregisters the context classes. The canvas service shuts the canvas down then (render thread, renderer, text
+cache, the back end's recording context, the device), the context service the 3D contexts' shared objects; the
+registries of live bitmaps go with their last entry when something outlives the service. The device and the
+factories live on the heap, not in class variables: the finalization of `FastCanvas.Device` would release those
+before the forms that still use them. With `ReportMemoryLeaksOnShutdown` nothing is reported (Direct3D 11 and 12, flip
+and DirectComposition, 3D with ray-traced effects, a window recreated at run time).
+
+## Locks
+
+- FMX's global canvas lock (`TCanvas.Lock`, from `BeginScene` to `EndScene`) serializes recording; the command
+  stream relies on it.
+- The device lock (the Direct2D multithread lock) guards the immediate context (Direct3D 11) or the open command list
+  (Direct3D 12) against other threads that need them (`TBitmap.Map`, texture uploads).
+- `TContextResetMessage` is sent from whichever thread found the device loss; paths taken in its handlers (texture
+  uploads) take the device lock only, never `TCanvas.Lock` (that deadlocked with a main thread holding it while
+  waiting for FMX's message manager).

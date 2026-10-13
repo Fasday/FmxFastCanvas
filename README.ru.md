@@ -1,0 +1,141 @@
+# FastCanvas для Delphi FireMonkey
+
+FastCanvas заменяет канвас и 3D-контекст FireMonkey (FMX) на Windows собственным GPU-рендерером на Direct3D 11 или
+Direct3D 12. Программа остаётся обычной FMX-программой: формы, контролы, стили, `TBitmap`, `TTextLayout`,
+`TViewport3D`, `TForm3D` и эффекты работают как раньше; переключение — несколько строк перед `Application.Initialize`.
+
+[English version](README.md)
+
+- **Скорость.** Каждая фигура, глиф и картинка — один экземпляр instanced-отрисовки; сглаживание считается
+  аналитически в пиксельном шейдере; текст берётся из атласа глифов; команды записываются в главном потоке и
+  исполняются в потоке рендера. В 5–60 раз быстрее канваса FMX по умолчанию на фигурах, тексте и картинках, в 2–4 раза —
+  на реальных формах.
+- **Свои 3D-контексты** на том же устройстве: `TViewport3D` рисует прямо в форму на GPU, эффекты (тень, свечение,
+  размытие) фильтруют битмапы, не покидая GPU, накладные расходы FMX на каждый вызов отрисовки исчезают.
+- **Трассировка лучей** (Direct3D 12, DXR 1.1): тени, мягкие тени, ambient occlusion и отражения поверх любой 3D-сцены
+  FMX, с её штатными материалами и источниками света; прикладные проходы лучей (свои compute- и пиксельные шейдеры над
+  сценой).
+- **Выглядит как FMX.** Текст сглаживается в оттенках серого с контрастом и гаммой DirectWrite, как его рисует
+  Direct2D-канвас FMX; окна выводятся через DirectComposition, поэтому формы, нарисованные прозрачными поверх Mica или
+  Acrylic, выглядят как со штатным канвасом.
+- **HDR-вывод** (Direct3D 12) на HDR-мониторах: SDR-содержимое не меняется, 3D — ярче белого SDR.
+- **Надёжность.** Потеря устройства (обновление драйвера, сброс GPU) восстанавливается, битмапы сохраняют содержимое;
+  частичная перерисовка на Direct3D 12; стресс-тесты и отладочный слой Direct3D 12 проходят чисто; при завершении
+  ничего не утекает.
+
+## Скорость
+
+Время кадра одних и тех же сцен в окне 1920 x 1080 (мс, меньше — лучше; AMD Radeon RX 9070 XT, Ryzen 5 7500F).
+`d2d` — канвас FMX по умолчанию; «лучший штатный» — самый быстрый в этой сцене из канвасов FMX Direct2D, GPU, GDI+,
+Skia и Skia Vulkan.
+
+| Сцена | FMX по умолчанию (`d2d`) | Лучший штатный | FastCanvas D3D11 | FastCanvas D3D12 |
+|---|---:|---:|---:|---:|
+| 16000 прямоугольников | 8.43 | 2.02 (`gpu`) | 1.54 | 1.43 |
+| 250 строк, `FillText` | 7.84 | 5.19 (`gpu`) | 0.335 | 0.296 |
+| 700 эллипсов | 7.42 | 6.52 (`skiavk`) | 0.130 | 0.131 |
+| 330 путей | 7.40 | 5.03 (`skiavk`) | 0.518 | 0.520 |
+| 11500 битмапов | 9.23 | 9.23 (`d2d`) | 1.27 | 1.27 |
+| 190 контролов со стилями | 8.56 | 4.12 (`skiavk`) | 1.93 | 1.88 |
+| 112 контролов с эффектами тени, свечения, размытия | 7.70 | 5.85 (`skiavk`) | 0.678 | 0.349 |
+| `TListBox`, 4000 элементов, прокрутка | 6.43 | 5.47 (`skiavk`) | 2.68 | 2.29 |
+| `TViewport3D`, 160 освещённых объектов | 8.53 | 7.64 (`skiavk`) | 0.562 | 0.519 |
+
+Все 26 сцен, два размера, методика и стоимость трассировки лучей: [docs/BENCHMARKS.md](docs/BENCHMARKS.md)
+(на английском).
+
+## Требования
+
+- Delphi 13 (RAD Studio 37.0) или новее, FireMonkey, **Win64** (Win32 не поддерживается).
+- Windows 10 или 11.
+- GPU с уровнем Direct3D 10_0 для бэкенда Direct3D 11 (без видеокарты — WARP), 11_0 для Direct3D 12.
+- Для трассировки лучей — DirectX Raytracing tier 1.1 (NVIDIA RTX 20 и новее, AMD RX 6000 и новее, Intel Arc); без
+  него эффекты просто не рисуются.
+
+## Подключение
+
+Добавьте в пути поиска проекта (Win64) две папки:
+
+```
+src\Canvas
+third_party\delphidx12\src
+```
+
+и установите FastCanvas до `Application.Initialize`:
+
+```pascal
+program MyApp;
+
+uses
+  System.StartUpCopy,
+  FMX.Forms,
+  FastCanvas.Device,       // FastCanvasBackend
+  FastCanvas.Canvas,       // InstallFastCanvas и настройки канваса
+  FastCanvas.Context3D12,  // 3D-контекст Direct3D 12
+  Main in 'Main.pas' {MainForm};
+
+{$R *.res}
+
+begin
+  FastCanvasBackend := TFastCanvasBackend.D3D12;
+  InstallFastCanvas;
+  InstallFastContext3D12;
+  Application.Initialize;
+  Application.CreateForm(TMainForm, MainForm);
+  Application.Run;
+end.
+```
+
+Для Direct3D 11 оставьте `FastCanvasBackend` по умолчанию и подключите `FastCanvas.Context3D11` /
+`InstallFastContext3D11`: 3D-контекст должен быть того же API, что и канвас. Больше в программе ничего не меняется.
+
+## Пример
+
+[example/HelloFastCanvas.dpr](example/HelloFastCanvas.dpr) — программа в одном файле (форма создаётся в коде):
+анимированная 2D-графика, кнопка с эффектом тени, освещённый 3D-куб над полом и переключатель теней трассировкой
+лучей. В заголовке окна написано, чем оно рисуется. Открыть в IDE (Win64, пути поиска как выше) или собрать из
+командной строки:
+
+```
+cd example
+dcc64 -B -NSSystem;Winapi;FMX;System.Win -U..\src\Canvas;..\third_party\delphidx12\src HelloFastCanvas.dpr
+```
+
+Переменные окружения примера: `FC_BACKEND=11` (Direct3D 11), `FC_PRESENT=flip` (вывод окон без DirectComposition),
+`FC_STOCK=1` (штатный канвас FMX для сравнения).
+
+## Главные настройки
+
+Глобальные переменные, задаются до `Application.Initialize`; все — в [docs/USAGE.md](docs/USAGE.md) (на английском).
+
+| Переменная | По умолчанию | Что делает |
+|---|---|---|
+| `FastCanvasBackend` | `D3D11` | API: `D3D11` или `D3D12` |
+| `FastCanvasPresentation` | `Composition` | Вывод окон через DirectComposition (прозрачные места формы показывают то, что под окном, как у Direct2D-канваса FMX) или `Flip` (swap chain самого окна, непрозрачный); скорость одинаковая |
+| `FastCanvasPartialFrames` | `True` | Direct3D 12: перерисовывать только изменившиеся прямоугольники |
+| `FastCanvasRenderThread` | `True` | Исполнять команды в потоке рендера |
+| `FastCanvasHdr` (`FastCanvas.Hdr`) | `Off` | HDR-вывод окон на HDR-мониторах (`Auto`) |
+| `FastContext3DRayTracing` (`FastCanvas.Context3D12`) | всё выключено | Тени, мягкие тени, ambient occlusion, отражения в 3D-сценах |
+
+## Репозиторий
+
+| Путь | Содержимое |
+|---|---|
+| `src/Canvas` | FastCanvas: канвас, рендерер, бэкенды Direct3D 11/12, 3D-контексты, шейдеры (HLSL и скомпилированные) |
+| `third_party/delphidx12` | Заголовки Direct3D 12 / DXGI (DelphiDX12, Apache 2.0) |
+| `example` | `HelloFastCanvas` — самая короткая проверка |
+| `docs` | [USAGE.md](docs/USAGE.md) (настройки, трассировка лучей, HDR, потоки), [ARCHITECTURE.md](docs/ARCHITECTURE.md) (как устроено), [BENCHMARKS.md](docs/BENCHMARKS.md) — на английском |
+| `tools` | `compile-shaders.ps1`: HLSL в Pascal-включения (нужен только после изменения шейдеров) |
+
+## Ограничения
+
+- Только Windows и Win64; нет канваса печати (`TPrinter`).
+- Текст сглаживается в оттенках серого (как у Direct2D-канваса FMX), не ClearType.
+- Частичная перерисовка и HDR-вывод — только на Direct3D 12; окна с HDR-выводом непрозрачны.
+- Окна, выводящие кадры с tearing (`AllowTearing`), выводятся через `Flip`.
+- Трассировка лучей не учитывает прозрачные объекты.
+
+## Лицензия
+
+MIT, см. [LICENSE](LICENSE). Сторонний код и формулы: [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). FastCanvas не
+содержит кода FireMonkey от Embarcadero; для сборки нужна лицензия Delphi.
