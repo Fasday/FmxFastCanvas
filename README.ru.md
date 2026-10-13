@@ -21,6 +21,9 @@ Direct3D 12. Программа остаётся обычной FMX-програ
   штатным канвасом.
 - **HDR-вывод** (Direct3D 12) на HDR-мониторах, для форм и `TForm3D`: SDR-содержимое не меняется, 3D — ярче белого SDR
   (`DrawIntensity`: лампы, экраны, небо ярче белого без шейдеров; прикладные проходы лучей).
+- **DLSS Super Resolution** (экспериментально; Direct3D 12, NVIDIA RTX, Win64): 3D-сцена `TForm3D` рисуется в
+  уменьшенном размере и восстанавливается NVIDIA DLSS, 2D-панель поверх — в полном размере. Выигрыш — на тяжёлых
+  сценах; на лёгких DLSS стоит дороже, чем экономит (около 0.9 мс на кадр при 2560 x 1400 на RTX 3090).
 - **Надёжность.** Потеря устройства (обновление драйвера, сброс GPU) восстанавливается, битмапы сохраняют содержимое;
   частичная перерисовка на Direct3D 12; стресс-тесты и отладочный слой Direct3D 12 проходят чисто; при завершении
   ничего не утекает.
@@ -102,7 +105,9 @@ FastCanvas устанавливается в `.dpr`. В заголовке ок�
 - [HelloForm3D.dproj](example/HelloForm3D.dproj) — `TForm3D`, всё окно — одна 3D-сцена: анимированные объекты на
   отражающем полу, лампа, качающаяся камера и панель (`TLayer3D` со штатными контролами), которая включает тени, мягкие
   тени, ambient occlusion и отражения трассировкой лучей, пол и HDR-вывод: на мониторе в режиме HDR лампа светит ярче
-  белого SDR (`DrawIntensity`), остальное выглядит как в SDR.
+  белого SDR (`DrawIntensity`), остальное выглядит как в SDR; на картах NVIDIA RTX — DLSS Super Resolution
+  (`nvngx_dlss.dll` из [DLSS SDK](https://github.com/NVIDIA/DLSS), положенный в `third_party\nvidia_dlss\bin\win64`,
+  копируется к программе при сборке).
 
 Откройте в RAD Studio `Examples.groupproj` (или один из проектов) и запустите: проекты собираются под Win64 (и Win32), пути
 поиска (`..\src\Canvas;..\third_party\delphidx12\src`) уже прописаны. Из командной строки:
@@ -116,7 +121,8 @@ msbuild Examples.groupproj /p:Config=Release /p:Platform=Win64
 (программы — в `example\Win64\Release`). Переменные окружения примеров: `FC_BACKEND=11` (Direct3D 11, без трассировки
 лучей и HDR), `FC_PRESENT=flip` (вывод окон без DirectComposition), `FC_TEXT=cleartype|aliased|system`
 (`HelloFastCanvas`: сглаживание текста), `FC_STOCK=1` (штатные канвас и 3D-контекст FMX для сравнения), `FC_HDR=force`
-(`HelloForm3D`: HDR-вывод и на SDR-мониторе).
+(`HelloForm3D`: HDR-вывод и на SDR-мониторе), `FC_DRED=0|1`, `FC_DLSS_JITTER`, `FC_DLSS_VIEW=input|motion`
+(`HelloForm3D`: метки DRED и диагностика DLSS).
 
 ## Главные настройки
 
@@ -130,6 +136,7 @@ msbuild Examples.groupproj /p:Config=Release /p:Platform=Win64
 | `FastCanvasRenderThread` | `True` | Исполнять команды в потоке рендера |
 | `FastCanvasHdr` (`FastCanvas.Hdr`) | `Off` | HDR-вывод окон на HDR-мониторах (`Auto`) |
 | `FastContext3DRayTracing` (`FastCanvas.Context3D12`) | всё выключено | Тени, мягкие тени, ambient occlusion, отражения в 3D-сценах |
+| `FastContext3DDlssMode` (`FastCanvas.Context3D12`) | `Off` | DLSS Super Resolution новых окон `TForm3D` (NVIDIA RTX); у контекста во время работы — `DlssMode` |
 
 ## Репозиторий
 
@@ -138,7 +145,7 @@ msbuild Examples.groupproj /p:Config=Release /p:Platform=Win64
 | `src/Canvas` | FastCanvas: канвас, рендерер, бэкенды Direct3D 11/12, 3D-контексты, шейдеры (HLSL и скомпилированные) |
 | `third_party/delphidx12` | Заголовки Direct3D 12 / DXGI (DelphiDX12, Apache 2.0) |
 | `example` | `HelloFastCanvas` и `HelloForm3D` — самые короткие проверки (проекты RAD Studio) |
-| `docs` | [USAGE.md](docs/USAGE.md) (настройки, трассировка лучей, HDR, потоки), [ARCHITECTURE.md](docs/ARCHITECTURE.md) (как устроено), [BENCHMARKS.md](docs/BENCHMARKS.md) — на английском |
+| `docs` | [USAGE.md](docs/USAGE.md) (настройки, трассировка лучей, HDR, DLSS, потоки), [ARCHITECTURE.md](docs/ARCHITECTURE.md) (как устроено), [BENCHMARKS.md](docs/BENCHMARKS.md) — на английском |
 | `src/Bench`, `src/Common` | Бенчмарк `FmxCanvasBench` (сцены, канвасы, замер) и вспомогательные модули |
 | `results` | Сводки замеров (`.md`, `.csv`), в `raw` — каждый их прогон |
 | `tools` | `run-bench.ps1`, `summarize-bench.ps1` и помощники: запуск и сводка бенчмарка; `compile-shaders.ps1`: HLSL в Pascal-включения (нужен только после изменения шейдеров) |
@@ -152,6 +159,8 @@ msbuild Examples.groupproj /p:Config=Release /p:Platform=Win64
 - Частичная перерисовка и HDR-вывод — только на Direct3D 12; окна с HDR-выводом непрозрачны.
 - Окна, выводящие кадры с tearing (`AllowTearing`), выводятся через `Flip`.
 - Трассировка лучей не учитывает прозрачные объекты.
+- DLSS: только окна `TForm3D`, без мультисэмплинга; векторы движения — только у непрозрачных объектов, которые движутся
+  своими матрицами.
 
 ## Лицензия
 

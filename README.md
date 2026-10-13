@@ -18,6 +18,9 @@ Direct3D 11 or Direct3D 12. Programs stay standard FMX programs: forms, controls
   DirectComposition, so forms drawn transparent over Mica or Acrylic look as with the stock canvas.
 - **HDR output** (Direct3D 12) on HDR displays, for forms and `TForm3D`: SDR content unchanged, 3D content above SDR
   white (`DrawIntensity`: lamps, screens, the sky brighter than white without shaders; application passes).
+- **DLSS Super Resolution** (experimental; Direct3D 12, NVIDIA RTX, Win64): the 3D scene of a `TForm3D` drawn at a
+  lower resolution and reconstructed by NVIDIA DLSS, the 2D panel on top at full resolution. It pays off on heavy scenes;
+  on light ones DLSS costs more than it saves (about 0.9 ms per frame at 2560 x 1400 on an RTX 3090).
 - **Robust.** Device loss (driver update, GPU reset) is recovered and bitmaps keep their pixels; partial repaints on
   Direct3D 12; stress runs and the Direct3D 12 debug layer stay clean; nothing leaks at shutdown.
 
@@ -98,7 +101,9 @@ the designer; FastCanvas is installed in the `.dpr`. The window title tells what
 - [HelloForm3D.dproj](example/HelloForm3D.dproj): a `TForm3D`, the whole window one 3D scene: animated objects on a
   reflective floor, a lamp, a swinging camera, and a panel (a `TLayer3D` with standard controls) that switches the
   ray-traced shadows, soft shadows, ambient occlusion and reflections, the floor, and HDR output: on a display in HDR
-  mode the lamp shines brighter than SDR white (`DrawIntensity`), the rest looks as in SDR.
+  mode the lamp shines brighter than SDR white (`DrawIntensity`), the rest looks as in SDR; on NVIDIA RTX cards, DLSS
+  Super Resolution (`nvngx_dlss.dll` of the [DLSS SDK](https://github.com/NVIDIA/DLSS) in
+  `third_party\nvidia_dlss\bin\win64` is copied next to the program when it is built).
 
 Open `Examples.groupproj` (or one of the projects) in RAD Studio and run: the projects target Win64 (Win32 too) and already have
 the search path (`..\src\Canvas;..\third_party\delphidx12\src`). From the command line:
@@ -112,7 +117,8 @@ msbuild Examples.groupproj /p:Config=Release /p:Platform=Win64
 (the programs are in `example\Win64\Release`). Environment variables of the examples: `FC_BACKEND=11` (Direct3D 11:
 no ray tracing, no HDR), `FC_PRESENT=flip` (windows without DirectComposition), `FC_TEXT=cleartype|aliased|system`
 (`HelloFastCanvas`: text antialiasing), `FC_STOCK=1` (FMX's own canvas and 3D context, to compare), `FC_HDR=force`
-(`HelloForm3D`: HDR output also on an SDR display).
+(`HelloForm3D`: HDR output also on an SDR display), `FC_DRED=0|1`, `FC_DLSS_JITTER`, `FC_DLSS_VIEW=input|motion`
+(`HelloForm3D`: DRED breadcrumbs and DLSS diagnostics).
 
 ## Main settings
 
@@ -126,6 +132,7 @@ Global variables, set before `Application.Initialize`; all of them in [docs/USAG
 | `FastCanvasRenderThread` | `True` | Execute the commands on a render thread |
 | `FastCanvasHdr` (`FastCanvas.Hdr`) | `Off` | HDR output of windows on HDR displays (`Auto`) |
 | `FastContext3DRayTracing` (`FastCanvas.Context3D12`) | all off | Shadows, soft shadows, ambient occlusion, reflections in 3D scenes |
+| `FastContext3DDlssMode` (`FastCanvas.Context3D12`) | `Off` | DLSS Super Resolution of new `TForm3D` windows (NVIDIA RTX); `DlssMode` of a context at run time |
 
 ## Repository
 
@@ -134,7 +141,7 @@ Global variables, set before `Application.Initialize`; all of them in [docs/USAG
 | `src/Canvas` | FastCanvas: canvas, renderer, Direct3D 11/12 back ends, 3D contexts, shaders (HLSL and compiled) |
 | `third_party/delphidx12` | Direct3D 12 / DXGI headers (DelphiDX12, Apache 2.0) |
 | `example` | `HelloFastCanvas` and `HelloForm3D`, the smallest checks (RAD Studio projects) |
-| `docs` | [USAGE.md](docs/USAGE.md) (settings, ray tracing, HDR, threads), [ARCHITECTURE.md](docs/ARCHITECTURE.md) (how it works), [BENCHMARKS.md](docs/BENCHMARKS.md) |
+| `docs` | [USAGE.md](docs/USAGE.md) (settings, ray tracing, HDR, DLSS, threads), [ARCHITECTURE.md](docs/ARCHITECTURE.md) (how it works), [BENCHMARKS.md](docs/BENCHMARKS.md) |
 | `src/Bench`, `src/Common` | The benchmark `FmxCanvasBench` (scenes, canvases, measurement) and its helpers |
 | `results` | Benchmark summaries (`.md`, `.csv`) and, in `raw`, every run of them |
 | `tools` | `run-bench.ps1`, `summarize-bench.ps1` and helpers: running and summarizing the benchmark; `compile-shaders.ps1`: the HLSL into the Pascal includes (only after changing the shaders) |
@@ -148,6 +155,7 @@ Global variables, set before `Application.Initialize`; all of them in [docs/USAG
 - Partial repaints and HDR output on Direct3D 12 only; windows with HDR output are opaque.
 - Windows presenting with tearing (`AllowTearing`) take `Flip`.
 - The ray-traced effects do not trace transparent objects.
+- DLSS: `TForm3D` windows only, no multisampling; motion vectors only for opaque objects moved by their matrices.
 
 ## License
 
