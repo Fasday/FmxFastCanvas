@@ -58,8 +58,9 @@ type
   end;
 
 var
-  /// <summary>HDR output of windows (FastCanvasBackend = D3D12; ignored on Direct3D 11). Read at every window frame,
-  /// can be changed at run time. Transparent forms and TForm3D windows stay SDR.</summary>
+  /// <summary>HDR output of windows (FastCanvasBackend = D3D12; ignored on Direct3D 11): the windows of 2D forms
+  /// drawn by FastCanvas, and of TForm3D drawn by its Direct3D 12 3D context. Read at every window frame, can be
+  /// changed at run time. Transparent forms stay SDR.</summary>
   FastCanvasHdr: TFastCanvasHdr = TFastCanvasHdr.Off;
   /// <summary>Testing aid: above 0, the SDR white level (nits) of every display, also of displays in SDR mode (with
   /// FastCanvasHdr = Force: the scaling of SDR content can be checked on an SDR display).</summary>

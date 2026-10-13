@@ -1408,10 +1408,12 @@ begin
   H := WindowHandleToPlatform(AForm.Handle);
   Result := FastHdrDisplayOf(H.Wnd);
   // As TFastTarget.Prepare decides for the next frame: windows of 2D forms drawn by FastCanvas on Direct3D 12, not
-  // transparent ones (layered windows take 8-bit pixels), not TForm3D (its 3D context draws the window).
-  Result.Output := (FastCanvasHdr <> TFastCanvasHdr.Off) and (AForm is TCustomForm) and not H.Transparency and
-    (TCustomForm(AForm).Canvas is TFastCanvas) and (TFastDevice.Backend = TFastCanvasBackend.D3D12) and
-    ((FastCanvasHdr = TFastCanvasHdr.Force) or Result.DisplayHdr);
+  // transparent ones (layered windows take 8-bit pixels); as the Direct3D 12 3D context decides for a TForm3D whose
+  // window it draws.
+  Result.Output := (FastCanvasHdr <> TFastCanvasHdr.Off) and not H.Transparency and
+    (((AForm is TCustomForm) and (TCustomForm(AForm).Canvas is TFastCanvas)) or
+    (Assigned(FastBridge.DrawsWindow) and FastBridge.DrawsWindow(AForm))) and
+    (TFastDevice.Backend = TFastCanvasBackend.D3D12) and ((FastCanvasHdr = TFastCanvasHdr.Force) or Result.DisplayHdr);
 end;
 
 function FastCanvasCaptureWindow(const AForm: TCommonCustomForm; out ACapture: TFastWindowCapture): Boolean;

@@ -45,6 +45,9 @@ type
     DeviceLost: procedure;
     /// <summary>Set by the 3D context. The canvas has a new device; TContextResetMessage has been sent.</summary>
     DeviceReset: procedure;
+    /// <summary>Set by the Direct3D 12 3D context: AForm is a TForm3D whose window it draws (and outputs in HDR as
+    /// the canvas does the windows of 2D forms: FastCanvasHdrInfo).</summary>
+    DrawsWindow: function(const AForm: TObject): Boolean;
     /// <summary>Runs AProc where the canvas executes its commands (render thread, or the recording thread), in stream
     /// order, with the device lock held and the canvas's own drawing so far submitted to the immediate context: the
     /// Direct3D 12 3D context executes its command lists and copies between its textures and canvas bitmaps here.

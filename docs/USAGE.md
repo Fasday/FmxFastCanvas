@@ -204,9 +204,25 @@ begin
 | `FastCanvasHdrTestWhite` | `0` | Testing: above 0, the SDR white level (nits) of every display, also in SDR mode (with `Force`, the scaling of SDR content can be checked on an SDR display). |
 
 HDR output needs `FastCanvasBackend = D3D12`; on Direct3D 11 the setting is ignored. Transparent forms (layered windows
-take 8-bit pixels) and `TForm3D` windows stay SDR.
+take 8-bit pixels) stay SDR. A `TForm3D` drawn by the Direct3D 12 3D context (`InstallFastContext3D12`) outputs HDR the
+same way: its 3D context then draws into an RGBA16F target, so values above SDR white (`DrawIntensity`, application
+passes) reach the display, and SDR content (FMX's materials, `TLayer3D`) looks as before.
 
-**HDR content from 3D.** A `TViewport3D` produces values above SDR white when its 3D context has an HDR target:
+**HDR content from 3D.** FMX's materials never go above SDR white. Brighter content comes from draws with
+`DrawIntensity` (lamps, screens, the sky: no shader needed) or from application passes, on an HDR target: the 3D
+context of a `TForm3D` whose window outputs HDR, or of a `TViewport3D` with `Hdr`:
+
+```pascal
+// Around the draw of a lamp (for example in the OnRender of a TDummy that holds it, and of the lamp itself):
+Ctx := Context as TFastContext3D12;
+Ctx.DrawIntensity := FastCanvasHdrInfo(Form).Headroom;   // at the display's peak; 1 on SDR output
+Ctx.RayInclude := False;                                 // a lamp casts no shadow
+// ... the lamp draws ...
+Ctx.DrawIntensity := 1;
+Ctx.RayInclude := True;
+```
+
+A `TViewport3D` needs `Hdr` on its 3D context for such values:
 
 ```pascal
 uses FastCanvas.Canvas, FastCanvas.Context3D12, FastCanvas.Hdr;
@@ -230,7 +246,8 @@ return float4(FastSrgbEncode(c), 1);
 |---|---|
 | `FastCanvasHdrInfo(Form): TFastHdrInfo` (`FastCanvas.Canvas`) | Whether the form's window outputs HDR (`Output`, from its next frame on), and its display's levels: `DisplayHdr` (Windows HDR on), `SdrWhiteNits` (what SDR white is shown as: Windows' SDR content brightness in HDR mode, 80 in SDR mode), `SdrWhiteSettingNits` (that setting, read in either mode), `PeakNits`, `MaxFullFrameNits`, `MinNits` (as the display reports them, `IDXGIOutput6.GetDesc1`). `Headroom`: `PeakNits / SdrWhiteNits` with HDR output on an HDR display, else 1. `WhiteScale`: the scRGB value of SDR white. |
 | `FastHdrDisplayOf(Wnd)`, `FastHdrRefresh` (`FastCanvas.Hdr`) | The same for any window handle (`Output` is False); `FastHdrRefresh` makes the next call read the displays again (FastCanvas notices changes itself, through `IDXGIFactory1.IsCurrent`; the SDR white level of displays in HDR mode is read again every second). |
-| `TFastContext3D12.Hdr` | The context of a `TViewport3D` draws into an RGBA16F target: FMX's materials draw there as on an 8-bit one, application passes may write more than 1. The image goes into the viewport's bitmap as its HDR content: an HDR window shows it unclipped, an SDR window clipped at 1, `TBitmap.Map` reads it clipped. Ignored by `TForm3D`. |
+| `TFastContext3D12.Hdr` | The context of a `TViewport3D` draws into an RGBA16F target: FMX's materials draw there as on an 8-bit one, application passes may write more than 1. The image goes into the viewport's bitmap as its HDR content: an HDR window shows it unclipped, an SDR window clipped at 1, `TBitmap.Map` reads it clipped. Ignored by `TForm3D`, whose target is RGBA16F exactly while its window outputs HDR. |
+| `TFastContext3D12.DrawIntensity` | Default 1: the colors of the next draws times this, in linear light (exact for white, close for other colors: the factor applies to the sRGB-encoded color, through the blend factor). Above 1 on an HDR target: brighter than SDR white; on an 8-bit target they clip at 1. |
 | `FastSrgbEncode`, `FastSrgbDecode` (`FastRayApp.hlsli`) | The encoding of 3D targets (the sRGB curve, continued above 1). |
 | `FastCanvasCaptureWindow(Form, Capture)` | Diagnostics: the frame the window presented last, as floats (scRGB for HDR output, sRGB values for SDR). |
 | `TFastCanvasOption.HdrLinearBlend` | Measurement aid: HDR windows draw and blend in linear light (see below). |
@@ -280,4 +297,4 @@ measured at 1920x1080, 4–13 µs per frame (3–7 % on scenes running at 6000�
 - Text is grayscale antialiased (as FMX's stock Direct2D canvas draws it), not ClearType.
 - Ray-traced effects need a depth buffer and DXR tier 1.1; they do not trace transparent objects.
 - Partial frames are Direct3D 12 only.
-- HDR output is Direct3D 12 only, and not for transparent forms and `TForm3D` windows.
+- HDR output is Direct3D 12 only, and not for transparent forms.

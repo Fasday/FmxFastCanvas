@@ -27,7 +27,12 @@ unit FastCanvas.Context3D12;
   and its own buffers (TFastRayBuffer), images (TFastRayImage) and FMX textures, with a fixed root signature
   (Shaders\FastRayApp.hlsli). Threads as for everything else: recorded on the thread that draws, in its order with
   the draws; executed on the render thread. They need a 3D target without multisampling: an application that uses
-  them asks TFastContext3D12.RayTracingSupported and then turns multisampling off. }
+  them asks TFastContext3D12.RayTracingSupported and then turns multisampling off.
+
+  HDR: a context that draws into a texture (TViewport3D) has an RGBA16F target with Hdr; a window context (TForm3D)
+  outputs HDR as the canvas does the windows of 2D forms (FastCanvas.Hdr.FastCanvasHdr, the window's display): an FP16
+  scRGB swap chain, the scene in an RGBA16F target, the output pass of the canvas at Present. DrawIntensity takes
+  draws above SDR white. }
 
 interface
 
@@ -191,7 +196,14 @@ type
     FBuffers: TArray<IInterface>;
     FBuffer: IInterface;
     FTearing: Boolean;
+    /// <summary>Window (TForm3D): HDR output asked for when the swap chain was made (FastCanvasHdr, the window's
+    /// display), and whether the swap chain is FP16 scRGB (the scene then ends in FHdrColor, which goes to the buffer
+    /// at Present); the scRGB value of SDR white for the next Present.</summary>
+    FWindowHdrAsked, FWindowHdr: Boolean;
+    FWhiteScale: Single;
+    FDrawIntensity: Single;
     procedure CreateTargets;
+    function WindowHdrWanted(out AWhiteScale: Single): Boolean;
     procedure RecordRay;
     procedure RecordRayObject(const AVertices, AIndices: Pointer; const AVertexSize, AVertexCount, AIndexSize,
       AIndexCount, APosition, ANormal, ATexCoord: Integer);
@@ -293,10 +305,11 @@ type
     /// one more for every scene with passes after it.</summary>
     property RayFrameIndex: Cardinal read FRayFrameIndex;
     /// <summary>An SRV entry of RayDispatch meaning the 3D target as drawn so far in the scene (Texture2D<float4>:
-    /// what FMX's materials and earlier passes wrote, sRGB-encoded, premultiplied; above 1 only with Hdr). It is the
-    /// texture the context draws into now: the RGBA16F target with Hdr, the swap chain buffer of a TForm3D, else the
-    /// viewport's texture. The context's own Texture as an SRV entry means the same (with Hdr, Texture holds the image
-    /// only after the scene). Not a UAV entry; RayDraw reads it as white.</summary>
+    /// what FMX's materials and earlier passes wrote, sRGB-encoded, premultiplied; above 1 only on an HDR target). It
+    /// is the texture the context draws into now: the RGBA16F target with Hdr or with the HDR output of a TForm3D, the
+    /// swap chain buffer of a TForm3D otherwise, else the viewport's texture. The context's own Texture as an SRV entry
+    /// means the same (with Hdr, Texture holds the image only after the scene). Not a UAV entry; RayDraw reads it as
+    /// white.</summary>
     property RayTarget: TObject read GetRayTarget;
 
     { HDR }
@@ -306,9 +319,16 @@ type
     /// (sRGB-encoded colors), and application passes may write more than 1 (FastSrgbEncode of FastRayApp.hlsli: the
     /// encoding of linear light, 1.0 = SDR white). The image goes on to the TBitmap the viewport draws (its HDR
     /// content), and a form whose window outputs HDR (FastCanvas.Canvas.FastCanvasHdrInfo) shows it unclipped; on an
-    /// SDR window it clips at 1, and the CPU reads it clipped. Applied at the next BeginScene; ignored by window
-    /// contexts (TForm3D: SDR).</summary>
+    /// SDR window it clips at 1, and the CPU reads it clipped. Applied at the next BeginScene. A window context
+    /// (TForm3D) ignores it: it has an HDR target exactly while its window outputs HDR (FastCanvas.Hdr.FastCanvasHdr,
+    /// as for 2D forms).</summary>
     property Hdr: Boolean read FHdr write FHdr;
+    /// <summary>Default 1. The colors of the next draws times this, in linear light (exact for white, close for other
+    /// colors: the factor applies to the sRGB-encoded color). Above 1 they go above SDR white on an HDR target (a
+    /// TForm3D whose window outputs HDR, a TViewport3D with Hdr), and an HDR window shows them brighter than white:
+    /// lamps, screens, the sky; on an 8-bit target they clip at 1. Read at every draw; a new context starts with 1.
+    /// </summary>
+    property DrawIntensity: Single read FDrawIntensity write FDrawIntensity;
   end;
 
 var
@@ -327,7 +347,7 @@ implementation
 uses
   DX12.D3D12, DX12.D3DCommon, DX12.DXGI, DX12.DXGI1_2, DX12.DXGI1_4,
   Winapi.Windows, FMX.Platform.Win, FastCanvas.Device, FastCanvas.Gpu, FastCanvas.Gpu12, FastCanvas.Bridge,
-  System.Classes, FastCanvas.Service, FastCanvas.Context3D11;
+  System.Classes, FMX.Forms3D, FastCanvas.Service, FastCanvas.Context3D11, FastCanvas.Hdr;
 
 type
   // Winapi.Windows declares a TBitmap too.
@@ -398,7 +418,8 @@ type
     Topology: Byte;
     Samples: Byte;
     Depth: Boolean;
-    Pad: Byte;
+    /// <summary>The color is scaled by the blend factor (DrawIntensity).</summary>
+    Scaled: Boolean;
     Format: Integer;
   end;
 
@@ -462,6 +483,8 @@ type
     UnitCount: Integer;
     Units: array[0..7] of Pointer;   // TTexture12, kept alive by the command
     Samplers: UInt64;
+    /// <summary>The blend factor of a scaled pipeline (DrawIntensity, sRGB-encoded); -1: not scaled.</summary>
+    Factor: Single;
   end;
 
   TRayTransform = array[0..2, 0..3] of Single;
@@ -602,6 +625,13 @@ type
     Footprint: TD3D12_PLACED_SUBRESOURCE_FOOTPRINT;
   end;
 
+  PCmdOutputHdr = ^TCmdOutputHdr;
+  /// <summary>HDR output of a TForm3D window: the RGBA16F target into the FP16 scRGB swap chain buffer.</summary>
+  TCmdOutputHdr = packed record
+    Source, Dest: Pointer;   // TTexture12
+    Scale: Single;
+  end;
+
   PCmdPresent = ^TCmdPresent;
   TCmdPresent = packed record
     Buffer: Pointer;
@@ -624,6 +654,7 @@ type
     UnitIds: array[0..7] of Integer;
     UnitsBound: Boolean;
     Samplers: UInt64;
+    BlendFactor: Single;
     // The constants last recorded, set again after the canvas has used the list.
     VS, PS: TBytes;
     VSLen, PSLen: Integer;
@@ -1100,6 +1131,17 @@ begin
   Desc.BlendState.RenderTarget[0].DestBlendAlpha := D3D12_BLEND_INV_SRC_ALPHA;
   Desc.BlendState.RenderTarget[0].BlendOpAlpha := D3D12_BLEND_OP_ADD;
   Desc.BlendState.RenderTarget[0].LogicOp := D3D12_LOGIC_OP_NOOP;
+  if AKey.Scaled then
+  begin
+    // DrawIntensity: the color times the blend factor, blended as without it (or replacing the target).
+    Desc.BlendState.RenderTarget[0].BlendEnable := True;
+    Desc.BlendState.RenderTarget[0].SrcBlend := D3D12_BLEND_BLEND_FACTOR;
+    if not S.Blend then
+    begin
+      Desc.BlendState.RenderTarget[0].DestBlend := D3D12_BLEND_ZERO;
+      Desc.BlendState.RenderTarget[0].DestBlendAlpha := D3D12_BLEND_ZERO;
+    end;
+  end;
   if S.ColorWrite then
     Desc.BlendState.RenderTarget[0].RenderTargetWriteMask := Ord(D3D12_COLOR_WRITE_ENABLE_ALL);
   Desc.SampleMask := $FFFFFFFF;
@@ -1172,6 +1214,7 @@ begin
     R.Scissor := TRect.Empty;
     R.UnitsBound := False;
     R.Samplers := 0;
+    R.BlendFactor := -1;
     R.VSBound := False;
     R.PSBound := False;
     R.TargetBound := False;
@@ -1287,6 +1330,7 @@ var
   I: Integer;
   U: TTexture12;
   NeedTable: Boolean;
+  Factor: TSingleArray4;
 begin
   C := AData;
   Ctx := Gpu12;
@@ -1329,6 +1373,15 @@ begin
   begin
     R.Pso := ID3D12PipelineState(C.Pso);
     L.SetPipelineState(R.Pso);
+  end;
+  if (C.Factor >= 0) and (C.Factor <> R.BlendFactor) then
+  begin
+    Factor[0] := C.Factor;
+    Factor[1] := C.Factor;
+    Factor[2] := C.Factor;
+    Factor[3] := 1;
+    L.OMSetBlendFactor(Factor);
+    R.BlendFactor := C.Factor;
   end;
   if C.Topology <> R.Topology then
   begin
@@ -1451,6 +1504,21 @@ begin
   Gpu12.List.ResolveSubresource(D.GpuResource, 0, S.GpuResource, 0, C.Format);
 end;
 
+procedure HandleOutputHdr(const AData: Pointer);
+var
+  C: PCmdOutputHdr;
+  S, D: TTexture12;
+begin
+  C := AData;
+  S := C.Source;
+  D := C.Dest;
+  S.Use(StateRead);
+  D.Use(D3D12_RESOURCE_STATE_RENDER_TARGET);
+  Gpu12.OutputHdrViews(S.ShaderView, D.RenderTarget, D.Width, D.Height, C.Scale, False);
+  // The pass bound its own target, root signature and pipeline.
+  R.TargetBound := False;
+end;
+
 /// <summary>Device lock held: every level of a texture into the canvas's open list.</summary>
 procedure HandleUploadData(const T: TTexture12; const B: TBlob; const ABytesPerPixel: Integer);
 var
@@ -1562,6 +1630,7 @@ begin
   FRay := FastContext3DRayTracing;
   FRayInclude := True;
   FRayMask := $FF;
+  FDrawIntensity := 1;
   GContexts.Add(Self);
   CreateBuffer;
 end;
@@ -1573,6 +1642,7 @@ begin
   FRay := FastContext3DRayTracing;
   FRayInclude := True;
   FRayMask := $FF;
+  FDrawIntensity := 1;
   GContexts.Add(Self);
   CreateBuffer;
 end;
@@ -1656,6 +1726,33 @@ begin
   end;
 end;
 
+/// <summary>The buffers of an FP16 swap chain are in the scRGB color space (linear light, BT.709 primaries, 1.0 = 80
+/// nits). False when the swap chain cannot present it.</summary>
+function SetScRgb(const ASwap: IDXGISwapChain3): Boolean;
+var
+  Support: UINT;
+begin
+  Support := 0;
+  Result := Succeeded(ASwap.CheckColorSpaceSupport(DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709, Support)) and
+    ((Support and Ord(DXGI_SWAP_CHAIN_COLOR_SPACE_SUPPORT_FLAG_PRESENT)) <> 0) and
+    Succeeded(ASwap.SetColorSpace1(DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709));
+end;
+
+/// <summary>Window context: its window outputs HDR now (FastCanvasHdr, the display the window is on), as
+/// TFastTarget.Prepare decides for the windows of 2D forms; AWhiteScale: the scRGB value of SDR white there.</summary>
+function TFastContext3D12.WindowHdrWanted(out AWhiteScale: Single): Boolean;
+var
+  Info: TFastHdrInfo;
+begin
+  AWhiteScale := 1;
+  Result := False;
+  if (Texture <> nil) or (Parent = nil) or (FastCanvasHdr = TFastCanvasHdr.Off) then
+    Exit;
+  Info := FastHdrDisplayOf(WindowHandleToPlatform(Parent).Wnd);
+  AWhiteScale := Info.WhiteScale;
+  Result := (FastCanvasHdr = TFastCanvasHdr.Force) or Info.DisplayHdr;
+end;
+
 procedure TFastContext3D12.CreateTargets;
 var
   S: TShared;
@@ -1669,18 +1766,73 @@ var
   Buffer: ID3D12Resource;
   T: TTexture12;
   Wnd: HWND;
+  BufferFormat: TDXGI_FORMAT;
 begin
   S := Shared;
   Px := TargetPixels;
+  FWindowHdr := False;
+  if Texture = nil then
+  begin
+    // A window (TForm3D): flip-model swap chain on the canvas queue; FP16 in the scRGB color space while the window
+    // outputs HDR (FastCanvasHdr and the display it is on, as for the windows of 2D forms).
+    if not Supports(TFastDevice.DXGIFactory, IDXGIFactory2, Factory) then
+      raise EContext3DException.Create('FastContext3D12: DXGI 1.2 is required');
+    Wnd := WindowHandleToPlatform(Parent).Wnd;
+    FWindowHdrAsked := WindowHdrWanted(FWhiteScale);
+    FWindowHdr := FWindowHdrAsked;
+    if FWindowHdr then
+      BufferFormat := DXGI_FORMAT_R16G16B16A16_FLOAT
+    else
+      BufferFormat := DXGI_FORMAT_B8G8R8A8_UNORM;
+    FillChar(Chain, SizeOf(Chain), 0);
+    Chain.Width := Px.Width;
+    Chain.Height := Px.Height;
+    Chain.Format := BufferFormat;
+    Chain.SampleDesc.Count := 1;
+    Chain.BufferUsage := DXGI_USAGE_RENDER_TARGET_OUTPUT;
+    Chain.BufferCount := SwapBuffers;
+    Chain.Scaling := DXGI_SCALING_STRETCH;
+    Chain.SwapEffect := DXGI_SWAP_EFFECT_FLIP_DISCARD;
+    Chain.AlphaMode := DXGI_ALPHA_MODE_IGNORE;
+    FTearing := TFastDevice.TearingSupported;
+    if FTearing then
+      Chain.Flags := Ord(DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING);
+    Check(Factory.CreateSwapChainForHwnd(TFastDevice.Queue, Wnd, @Chain, nil, nil, Swap), 'CreateSwapChainForHwnd');
+    if not Supports(Swap, IDXGISwapChain3, Swap3) then
+      raise EContext3DException.Create('FastContext3D12: DXGI 1.4 is required');
+    Factory.MakeWindowAssociation(Wnd, DXGI_MWA_NO_WINDOW_CHANGES);
+    if FWindowHdr and not SetScRgb(Swap3) then
+    begin
+      // No scRGB on this swap chain: SDR.
+      FWindowHdr := False;
+      BufferFormat := DXGI_FORMAT_B8G8R8A8_UNORM;
+      Check(Swap3.ResizeBuffers(0, Px.Width, Px.Height, BufferFormat, Chain.Flags), 'ResizeBuffers');
+    end;
+    FSwapChain := Swap3;
+    SetLength(FBuffers, SwapBuffers);
+    for I := 0 to SwapBuffers - 1 do
+    begin
+      Check(Swap3.GetBuffer(I, IID_ID3D12Resource, Buffer), 'GetBuffer');
+      T := NewTexture12;
+      T.Resource := Buffer;
+      T.State := D3D12_RESOURCE_STATE_PRESENT;
+      T.Format := BufferFormat;
+      T.Width := Px.Width;
+      T.Height := Px.Height;
+      FBuffers[I] := T;
+      Buffer := nil;
+    end;
+  end;
   if Texture <> nil then
     FFormat := FastDxgiFormat(Texture.PixelFormat)
   else
     FFormat := Ord(DXGI_FORMAT_B8G8R8A8_UNORM);
   if FFormat = 0 then
     FFormat := Ord(DXGI_FORMAT_B8G8R8A8_UNORM);
-  if FHdr and (Texture <> nil) then
+  if (FHdr and (Texture <> nil)) or FWindowHdr then
   begin
-    // HDR: the scene ends in a texture of its own, RGBA16F, copied into the viewport's bitmap as its HDR content.
+    // HDR: the scene ends in a texture of its own, RGBA16F: copied into the viewport's bitmap as its HDR content, or
+    // into the window's buffer at Present (OutputHdr: sRGB-decoded, SDR white at the display's SDR white level).
     FFormat := Ord(DXGI_FORMAT_R16G16B16A16_FLOAT);
     FHdrColor := NewTexture(Px.Width, Px.Height, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT,
       D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET, D3D12_RESOURCE_STATE_RENDER_TARGET);
@@ -1704,44 +1856,6 @@ begin
       Break;
     end;
     Wanted := Wanted div 2;
-  end;
-  if Texture = nil then
-  begin
-    // A window (TForm3D): flip-model swap chain on the canvas queue.
-    if not Supports(TFastDevice.DXGIFactory, IDXGIFactory2, Factory) then
-      raise EContext3DException.Create('FastContext3D12: DXGI 1.2 is required');
-    Wnd := WindowHandleToPlatform(Parent).Wnd;
-    FillChar(Chain, SizeOf(Chain), 0);
-    Chain.Width := Px.Width;
-    Chain.Height := Px.Height;
-    Chain.Format := DXGI_FORMAT_B8G8R8A8_UNORM;
-    Chain.SampleDesc.Count := 1;
-    Chain.BufferUsage := DXGI_USAGE_RENDER_TARGET_OUTPUT;
-    Chain.BufferCount := SwapBuffers;
-    Chain.Scaling := DXGI_SCALING_STRETCH;
-    Chain.SwapEffect := DXGI_SWAP_EFFECT_FLIP_DISCARD;
-    Chain.AlphaMode := DXGI_ALPHA_MODE_IGNORE;
-    FTearing := TFastDevice.TearingSupported;
-    if FTearing then
-      Chain.Flags := Ord(DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING);
-    Check(Factory.CreateSwapChainForHwnd(TFastDevice.Queue, Wnd, @Chain, nil, nil, Swap), 'CreateSwapChainForHwnd');
-    if not Supports(Swap, IDXGISwapChain3, Swap3) then
-      raise EContext3DException.Create('FastContext3D12: DXGI 1.4 is required');
-    Factory.MakeWindowAssociation(Wnd, DXGI_MWA_NO_WINDOW_CHANGES);
-    FSwapChain := Swap3;
-    SetLength(FBuffers, SwapBuffers);
-    for I := 0 to SwapBuffers - 1 do
-    begin
-      Check(Swap3.GetBuffer(I, IID_ID3D12Resource, Buffer), 'GetBuffer');
-      T := NewTexture12;
-      T.Resource := Buffer;
-      T.State := D3D12_RESOURCE_STATE_PRESENT;
-      T.Format := DXGI_FORMAT_B8G8R8A8_UNORM;
-      T.Width := Px.Width;
-      T.Height := Px.Height;
-      FBuffers[I] := T;
-      Buffer := nil;
-    end;
   end;
   if FSamples > 1 then
     FMSColor := NewTexture(Px.Width, Px.Height, 1, FSamples, TDXGI_FORMAT(FFormat),
@@ -1826,9 +1940,22 @@ begin
 end;
 
 function TFastContext3D12.DoBeginScene: Boolean;
+var
+  Scale: Single;
 begin
   RunPendingReset;
-  if (FHdr and (Texture <> nil)) <> (FHdrColor <> nil) then
+  if FSwapChain <> nil then
+  begin
+    // A window: HDR output switched (FastCanvasHdr, the window on another display, Windows HDR switched): a new swap
+    // chain in the other format. The SDR white level of the display may change at any time.
+    if WindowHdrWanted(Scale) <> FWindowHdrAsked then
+    begin
+      FreeBuffer;
+      CreateBuffer;
+    end;
+    FWhiteScale := Scale;
+  end
+  else if (FHdr and (Texture <> nil)) <> (FHdrColor <> nil) then
   begin
     // Hdr changed: the targets in the other format (commands that use the old ones keep them).
     FreeBuffer;
@@ -2352,15 +2479,17 @@ end;
 
 procedure TFastContext3D12.DoEndScene;
 var
-  T: TTexture12;
+  T, B: TTexture12;
   C: PCmdResolve;
+  O: PCmdOutputHdr;
   P: PCmdPresent;
 begin
+  // Where the scene ends: the RGBA16F target (Hdr, a window with HDR output), the window's buffer, the texture.
   T := nil;
-  if FSwapChain <> nil then
-    T := TTexture12(FBuffer as TObject)
-  else if FHdrColor <> nil then
+  if FHdrColor <> nil then
     T := TTexture12(FHdrColor as TObject)
+  else if FSwapChain <> nil then
+    T := TTexture12(FBuffer as TObject)
   else if (Texture <> nil) and (Texture.Handle <> 0) then
     T := TTexture12(Texture.Handle);
   if (FScene <> 0) and (FRayObjects > 0) and ((FRay.Shadows and (Lights.Count > 0)) or FRay.AmbientOcclusion or
@@ -2380,10 +2509,21 @@ begin
     GScenes.Last.RecordTarget;
   if (FSwapChain <> nil) and (BeginSceneCount = 1) then
   begin
+    B := TTexture12(FBuffer as TObject);
+    if FWindowHdr and (T <> nil) and (T <> B) then
+    begin
+      // HDR output: the frame into the FP16 scRGB buffer, SDR white at the display's SDR white level.
+      O := Rec(HandleOutputHdr, SizeOf(TCmdOutputHdr), FBuffer);
+      O.Source := T;
+      O.Dest := B;
+      O.Scale := FWhiteScale;
+      Keep(T);
+    end;
     // Presented where the canvas executes its commands, after them. The next scene needs the index of the next
     // buffer: wait for the present.
     P := Rec(HandlePresent, SizeOf(TCmdPresent), FSwapChain);
-    P.Buffer := T;
+    P.Buffer := B;
+    T := B;
     P.SwapChain := Pointer(FSwapChain);
     if FTearing then
       P.Flags := DXGI_PRESENT_ALLOW_TEARING
@@ -2429,6 +2569,15 @@ begin
   C.Pad := 0;
 end;
 
+/// <summary>The sRGB encoding of linear light, continued above 1 (FastSrgbEncode of FastRayApp.hlsli).</summary>
+function SrgbEncode(const AValue: Single): Single;
+begin
+  if AValue <= 0.0031308 then
+    Result := AValue * 12.92
+  else
+    Result := 1.055 * Power(AValue, 1 / 2.4) - 0.055;
+end;
+
 procedure TFastContext3D12.DoDrawPrimitivesBatch(const AKind: TPrimitivesKind; const Vertices, Indices: Pointer;
   const VertexDeclaration: TVertexDeclaration; const VertexSize, VertexCount, IndexSize, IndexCount: Integer);
 const
@@ -2467,6 +2616,7 @@ begin
   Key.Samples := T.Samples;
   Key.Depth := FDepth <> nil;
   Key.Format := Ord(T.Format);
+  Key.Scaled := FDrawIntensity <> 1;
   VBytes := VertexSize * VertexCount;
   IBytes := IndexSize * IndexCount;
   VSBytes := 0;
@@ -2485,6 +2635,11 @@ begin
       Offsets.TexCoord);
   C := Rec(HandleDraw, SizeOf(TCmdDraw) + VBytes + AlignUp(IBytes, 4) + VSBytes + PSBytes);
   C.Pso := Pointer(S.Pso(Key, Layout));
+  if Key.Scaled then
+    // The target holds sRGB-encoded colors: the encoding of the intensity scales white exactly.
+    C.Factor := SrgbEncode(Max(FDrawIntensity, 0))
+  else
+    C.Factor := -1;
   C.Topology := Topologies[AKind];
   C.StencilRef := FStencilRef;
   if FState.Scissor then
@@ -3163,6 +3318,12 @@ begin
   end;
 end;
 
+/// <summary>FastBridge.DrawsWindow: AForm is a TForm3D whose window a TFastContext3D12 draws.</summary>
+function DrawsWindow(const AForm: TObject): Boolean;
+begin
+  Result := (AForm is TCustomForm3D) and (TCustomForm3D(AForm).Context is TFastContext3D12);
+end;
+
 procedure InstallFastContext3D12;
 begin
   if GContexts = nil then
@@ -3176,6 +3337,7 @@ begin
   InstallContextService(TFastContext3D12, Shutdown);
   FastBridge.DeviceLost := ContextsDeviceLost;
   FastBridge.DeviceReset := ContextsDeviceReset;
+  FastBridge.DrawsWindow := DrawsWindow;
 end;
 
 initialization

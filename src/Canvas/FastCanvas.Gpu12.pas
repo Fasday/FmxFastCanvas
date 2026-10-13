@@ -136,6 +136,11 @@ type
     /// ATarget (its FP16 scRGB swap chain buffer) in linear light, SDR white at AScale (ALinear: the source is linear
     /// already).</summary>
     procedure OutputHdr(const ASource, ATarget: TGpu12Surface; const AScale: Single; const ALinear: Boolean);
+    /// <summary>The same between any RGBA16F texture and FP16 render target of AWidth x AHeight, given by their views
+    /// (the 3D context of a TForm3D window). The caller has put them in the pixel shader resource and render target
+    /// states.</summary>
+    procedure OutputHdrViews(const ASrv, ARtv: TD3D12_CPU_DESCRIPTOR_HANDLE; const AWidth, AHeight: Integer;
+      const AScale: Single; const ALinear: Boolean);
     property Device: ID3D12Device read FDevice;
     property Queue: ID3D12CommandQueue read FQueue;
     /// <summary>Signaled by the queue after every submission (free-threaded: other threads wait on it with their own
@@ -934,6 +939,14 @@ end;
 
 procedure TGpu12Context.OutputHdr(const ASource, ATarget: TGpu12Surface; const AScale: Single;
   const ALinear: Boolean);
+begin
+  ASource.Use(StateRead);
+  ATarget.Use(D3D12_RESOURCE_STATE_RENDER_TARGET);
+  OutputHdrViews(ASource.Srv, ATarget.Rtv, ATarget.Width, ATarget.Height, AScale, ALinear);
+end;
+
+procedure TGpu12Context.OutputHdrViews(const ASrv, ARtv: TD3D12_CPU_DESCRIPTOR_HANDLE; const AWidth,
+  AHeight: Integer; const AScale: Single; const ALinear: Boolean);
 var
   L: ID3D12GraphicsCommandList;
   Table, Rtv: TD3D12_CPU_DESCRIPTOR_HANDLE;
@@ -944,11 +957,9 @@ var
 begin
   if FOutPso = nil then
     CreateOutputPipeline;
-  // First: it may hand the list to the GPU when the descriptor ring is full.
+  // It may hand the list to the GPU when the descriptor ring is full (with the barriers so far).
   Table := AllocTable(1, TableGpu);
-  FDevice.CopyDescriptorsSimple(1, Table, ASource.Srv, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
-  ASource.Use(StateRead);
-  ATarget.Use(D3D12_RESOURCE_STATE_RENDER_TARGET);
+  FDevice.CopyDescriptorsSimple(1, Table, ASrv, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
   FlushBarriers;
   L := List;
   L.SetGraphicsRootSignature(FOutRoot);
@@ -959,16 +970,16 @@ begin
   K[3] := 0;
   L.SetGraphicsRoot32BitConstants(0, 4, @K[0], 0);
   L.SetGraphicsRootDescriptorTable(1, TableGpu);
-  Rtv := ATarget.Rtv;
+  Rtv := ARtv;
   L.OMSetRenderTargets(1, @Rtv, False, nil);
   Viewport.TopLeftX := 0;
   Viewport.TopLeftY := 0;
-  Viewport.Width := ATarget.Width;
-  Viewport.Height := ATarget.Height;
+  Viewport.Width := AWidth;
+  Viewport.Height := AHeight;
   Viewport.MinDepth := 0;
   Viewport.MaxDepth := 1;
   L.RSSetViewports(1, @Viewport);
-  Scissor := TRect.Create(0, 0, ATarget.Width, ATarget.Height);
+  Scissor := TRect.Create(0, 0, AWidth, AHeight);
   L.RSSetScissorRects(1, @Scissor);
   L.IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
   L.DrawInstanced(3, 1, 0, 0);

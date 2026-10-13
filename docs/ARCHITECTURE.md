@@ -114,7 +114,15 @@ see `USAGE.md`). The surface keeps the frame, so a partial frame starts from it,
 HDR content comes from 3D: a context with `Hdr` draws into an RGBA16F target (same encoding, values above 1), and its
 `CopyToBitmap` puts the image into the bitmap's second, RGBA16F surface, which canvases then draw from. The bitmap goes
 back to its 8-bit surface (values clipped at 1) when the CPU maps it, a canvas draws into it, or a 3D context renders into
-it. On an 8-bit target such values clip; on an HDR window's surface they pass through to the display.
+it. On an 8-bit target such values clip; on an HDR window's surface they pass through to the display. Values above 1
+come from application passes and from `DrawIntensity`, which draws with a pipeline state that multiplies the color by the
+blend factor (`OMSetBlendFactor`: the sRGB encoding of the intensity, exact for white).
+
+A `TForm3D` window belongs to its 3D context, which makes its swap chain: at every scene it asks the same question as
+the canvas (`FastCanvasHdr`, the display of the window) and, when the answer changes, makes the swap chain again in the
+other format (FP16 with scRGB, or 8-bit). With HDR output the scene draws into an RGBA16F target (and its multisampled
+buffer, resolved into it), and before `Present` the same output pass writes it into the swap chain buffer with the SDR
+white level of the display.
 
 ## The Direct3D 12 back end
 
