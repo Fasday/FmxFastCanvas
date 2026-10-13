@@ -6,8 +6,15 @@ unit FastCanvas.DeviceVk;
   graphics queue and the device command table, and memory type lookup. Buffer device address, acceleration
   structures and ray query are enabled too where the device has them (the 3D context of a later stage needs them).
 
+  Memory: blocks of VkDeviceMemory per memory type (64 MB device-local, 16 MB host-visible), buffers and images in
+  blocks of their own (no bufferImageGranularity between them), suballocated first fit with merged free ranges;
+  resources larger than half a block get memory of their own. Host-visible blocks stay mapped. An empty block is
+  freed unless it is the last one of its kind. Thread-safe (the 3D context makes textures on the main thread while
+  the render thread draws).
+
   FASTCANVAS_VK_DEBUG=<file>: the Khronos validation layer, whose warnings and errors a VK_EXT_debug_utils messenger
-  appends to that file (as FASTCANVAS_D3D12_DEBUG does for the Direct3D 12 debug layer).
+  appends to that file (as FASTCANVAS_D3D12_DEBUG does for the Direct3D 12 debug layer). FASTCANVAS_VK_STATS=<file>:
+  a line with the peak numbers of memory objects and allocations appended when the device goes.
 
   The loader is held until Destroy: the unit Vulkan frees its handle in its finalization, which runs before FMX frees
   the forms and the canvas shuts the device down (FastCanvas.Service). Thread use as with Direct3D 12: the device is
@@ -16,13 +23,31 @@ unit FastCanvas.DeviceVk;
 interface
 
 uses
-  Winapi.Windows, System.SysUtils, Vulkan;
+  Winapi.Windows, System.SysUtils, System.Generics.Collections, Vulkan;
 
 type
   EFastVulkan = class(Exception);
 
+  /// <summary>The memory of a resource: a range of a block of TFastVulkan, or a memory object of its own.</summary>
+  TFastVkAllocation = class
+  private
+    /// <summary>TFastVkBlock; nil: the memory object is the allocation's own.</summary>
+    FBlock: TObject;
+  public
+    Memory: TVkDeviceMemory;
+    Offset, Size: UInt64;
+    /// <summary>The properties of the memory type.</summary>
+    Flags: TVkMemoryPropertyFlags;
+    /// <summary>Host-visible memory: the address of Offset (mapped while the memory exists); else nil.</summary>
+    Cpu: PByte;
+  end;
+
   TFastVulkan = class
   private
+    FAllocLock: TRTLCriticalSection;
+    /// <summary>Per memory type, for optimal images (False) and buffers (True).</summary>
+    FPools: array[0..VK_MAX_MEMORY_TYPES - 1, Boolean] of TList<TObject>;
+    FMemoryObjects, FPeakMemoryObjects, FAllocations, FPeakAllocations: Integer;
     FLibrary: HMODULE;
     FInstanceVk: TVulkan;
     FVk: TVulkan;
@@ -41,6 +66,12 @@ type
     procedure CreateInstance;
     procedure PickDevice(const APreferSoftware: Boolean);
     procedure CreateDevice;
+    /// <summary>A memory object of ASize bytes of type AType (ADeviceAddress: for buffers with device addresses),
+    /// mapped when host-visible; VK_NULL_HANDLE when the device has no more memory.</summary>
+    function NewMemory(const AType: Integer; const ASize: UInt64; const ADeviceAddress: Boolean;
+      out ACpu: PByte): TVkDeviceMemory;
+    procedure FreeMemory(const AMemory: TVkDeviceMemory);
+    procedure WriteStats;
   public
     /// <summary>Raises EFastVulkan when there is no Vulkan 1.3 device that can present to windows.
     /// APreferSoftware: a CPU implementation first (TFastDevice.UseWarp).</summary>
@@ -54,10 +85,21 @@ type
     /// <summary>A memory type of ATypeBits with ARequired, and with APreferred too when there is one; -1: none.
     /// </summary>
     function MemoryType(const ATypeBits: Cardinal; const ARequired, APreferred: TVkMemoryPropertyFlags): Integer;
-    /// <summary>Memory for ARequirements (see MemoryType); AFlags: the properties of the type taken. Raises when
-    /// there is none.</summary>
+    /// <summary>Memory for a resource with ARequirements, of a type with ARequired (and APreferred when there is one).
+    /// ABuffer: for a buffer (they share blocks with buffers only). Thread-safe. Raises EFastVulkan when there is
+    /// none.</summary>
     function Allocate(const ARequirements: TVkMemoryRequirements; const ARequired, APreferred: TVkMemoryPropertyFlags;
-      out AFlags: TVkMemoryPropertyFlags): TVkDeviceMemory;
+      const ABuffer: Boolean): TFastVkAllocation;
+    /// <summary>Gives the memory back and frees AAllocation (nil: nothing); the GPU must be done with it.
+    /// Thread-safe.</summary>
+    procedure Release(const AAllocation: TFastVkAllocation);
+    /// <summary>Host-visible memory that is not coherent: the CPU sees what the GPU wrote to the allocation.</summary>
+    procedure Invalidate(const AAllocation: TFastVkAllocation);
+    /// <summary>Memory objects there are now, and at most so far; allocations likewise.</summary>
+    property MemoryObjects: Integer read FMemoryObjects;
+    property PeakMemoryObjects: Integer read FPeakMemoryObjects;
+    property Allocations: Integer read FAllocations;
+    property PeakAllocations: Integer read FPeakAllocations;
     /// <summary>Device commands (loaded for the device).</summary>
     property Vk: TVulkan read FVk;
     /// <summary>Instance commands (surfaces and other instance-level functions).</summary>
@@ -83,11 +125,124 @@ type
 
 implementation
 
+uses
+  System.Math;
+
 const
   DebugVariable = 'FASTCANVAS_VK_DEBUG';
+  StatsVariable = 'FASTCANVAS_VK_STATS';
   ValidationLayer: AnsiString = 'VK_LAYER_KHRONOS_validation';
   /// <summary>Messages logged per process at most.</summary>
   MaxMessages = 2000;
+  DeviceBlockSize = 64 * 1024 * 1024;
+  HostBlockSize = 16 * 1024 * 1024;
+
+type
+  TFastVkRange = record
+    Offset, Size: UInt64;
+  end;
+
+  /// <summary>A memory object suballocated by TFastVulkan.</summary>
+  TFastVkBlock = class
+  public
+    Memory: TVkDeviceMemory;
+    Size: UInt64;
+    Cpu: PByte;
+    Flags: TVkMemoryPropertyFlags;
+    /// <summary>Free ranges by offset; no two touch.</summary>
+    Ranges: TArray<TFastVkRange>;
+    FreeCount: Integer;
+    Live: Integer;
+    /// <summary>The list of TFastVulkan the block is in.</summary>
+    Pool: TList<TObject>;
+    /// <summary>The offset of ASize bytes aligned to AAlign taken from the free ranges; False when they have none.
+    /// </summary>
+    function Take(const ASize, AAlign: UInt64; out AOffset: UInt64): Boolean;
+    procedure Give(const AOffset, ASize: UInt64);
+  end;
+
+function TFastVkBlock.Take(const ASize, AAlign: UInt64; out AOffset: UInt64): Boolean;
+var
+  I, J: Integer;
+  R: TFastVkRange;
+  Start, Tail: UInt64;
+begin
+  for I := 0 to FreeCount - 1 do
+  begin
+    R := Ranges[I];
+    Start := (R.Offset + AAlign - 1) and not (AAlign - 1);
+    if Start + ASize > R.Offset + R.Size then
+      Continue;
+    Tail := R.Offset + R.Size - (Start + ASize);
+    if Start > R.Offset then
+    begin
+      // The bytes before the aligned start stay free; the tail too, as a range of its own after them.
+      Ranges[I].Size := Start - R.Offset;
+      if Tail > 0 then
+      begin
+        if FreeCount = Length(Ranges) then
+          SetLength(Ranges, 2 * FreeCount + 4);
+        for J := FreeCount downto I + 2 do
+          Ranges[J] := Ranges[J - 1];
+        Ranges[I + 1].Offset := Start + ASize;
+        Ranges[I + 1].Size := Tail;
+        Inc(FreeCount);
+      end;
+    end
+    else if Tail > 0 then
+    begin
+      Ranges[I].Offset := Start + ASize;
+      Ranges[I].Size := Tail;
+    end
+    else
+    begin
+      for J := I to FreeCount - 2 do
+        Ranges[J] := Ranges[J + 1];
+      Dec(FreeCount);
+    end;
+    AOffset := Start;
+    Inc(Live);
+    Exit(True);
+  end;
+  Result := False;
+end;
+
+procedure TFastVkBlock.Give(const AOffset, ASize: UInt64);
+var
+  I, J: Integer;
+begin
+  Dec(Live);
+  // The first range after the one given back.
+  I := 0;
+  while (I < FreeCount) and (Ranges[I].Offset < AOffset) do
+    Inc(I);
+  if (I > 0) and (Ranges[I - 1].Offset + Ranges[I - 1].Size = AOffset) then
+  begin
+    Inc(Ranges[I - 1].Size, ASize);
+    if (I < FreeCount) and (AOffset + ASize = Ranges[I].Offset) then
+    begin
+      // It closes the gap between two ranges.
+      Inc(Ranges[I - 1].Size, Ranges[I].Size);
+      for J := I to FreeCount - 2 do
+        Ranges[J] := Ranges[J + 1];
+      Dec(FreeCount);
+    end;
+    Exit;
+  end;
+  if (I < FreeCount) and (AOffset + ASize = Ranges[I].Offset) then
+  begin
+    Ranges[I].Offset := AOffset;
+    Inc(Ranges[I].Size, ASize);
+    Exit;
+  end;
+  if FreeCount = Length(Ranges) then
+    SetLength(Ranges, 2 * FreeCount + 4);
+  for J := FreeCount downto I + 1 do
+    Ranges[J] := Ranges[J - 1];
+  Ranges[I].Offset := AOffset;
+  Ranges[I].Size := ASize;
+  Inc(FreeCount);
+end;
 
 var
   /// <summary>Not deleted: the device is destroyed after the unit finalizations, and may still report then.
@@ -158,6 +313,7 @@ end;
 constructor TFastVulkan.Create(const APreferSoftware: Boolean);
 begin
   inherited Create;
+  InitializeCriticalSection(FAllocLock);
   FDebug := GetEnvironmentVariable(DebugVariable) <> '';
   CreateInstance;
   PickDevice(APreferSoftware);
@@ -165,12 +321,28 @@ begin
 end;
 
 destructor TFastVulkan.Destroy;
+var
+  T: Integer;
+  B: Boolean;
+  O: TObject;
 begin
   if FDevice <> VK_NULL_HANDLE then
-  begin
     FVk.DeviceWaitIdle(FDevice);
+  WriteStats;
+  // Blocks still there: empty ones kept for reuse (allocations still alive would be a leak of their owners).
+  for T := 0 to High(FPools) do
+    for B := False to True do
+      if FPools[T, B] <> nil then
+      begin
+        for O in FPools[T, B] do
+        begin
+          FreeMemory(TFastVkBlock(O).Memory);
+          O.Free;
+        end;
+        FreeAndNil(FPools[T, B]);
+      end;
+  if FDevice <> VK_NULL_HANDLE then
     FVk.DestroyDevice(FDevice, nil);
-  end;
   if FMessenger <> VK_NULL_HANDLE then
     FInstanceVk.DestroyDebugUtilsMessengerEXT(FInstance, FMessenger, nil);
   if FInstance <> VK_NULL_HANDLE then
@@ -179,7 +351,34 @@ begin
   FInstanceVk.Free;
   if FLibrary <> 0 then
     FreeLibrary(FLibrary);
+  DeleteCriticalSection(FAllocLock);
   inherited;
+end;
+
+procedure TFastVulkan.WriteStats;
+var
+  Name: string;
+  F: TextFile;
+begin
+  Name := GetEnvironmentVariable(StatsVariable);
+  if Name = '' then
+    Exit;
+  AssignFile(F, Name);
+  try
+    if FileExists(Name) then
+      Append(F)
+    else
+      Rewrite(F);
+    try
+      Writeln(F, Format('memory objects: %d at most, %d left; allocations: %d at most, %d left (limit %u)',
+        [FPeakMemoryObjects, FMemoryObjects, FPeakAllocations, FAllocations,
+        FProperties.limits.maxMemoryAllocationCount]));
+    finally
+      CloseFile(F);
+    end;
+  except
+    // A development aid only.
+  end;
 end;
 
 procedure TFastVulkan.CreateInstance;
@@ -475,22 +674,221 @@ begin
   Result := -1;
 end;
 
-function TFastVulkan.Allocate(const ARequirements: TVkMemoryRequirements; const ARequired,
-  APreferred: TVkMemoryPropertyFlags; out AFlags: TVkMemoryPropertyFlags): TVkDeviceMemory;
+function TFastVulkan.NewMemory(const AType: Integer; const ASize: UInt64; const ADeviceAddress: Boolean;
+  out ACpu: PByte): TVkDeviceMemory;
 var
   Info: TVkMemoryAllocateInfo;
-  Index: Integer;
+  FlagsInfo: TVkMemoryAllocateFlagsInfo;
+  P: Pointer;
+  Res: TVkResult;
+begin
+  ACpu := nil;
+  FillChar(Info, SizeOf(Info), 0);
+  Info.sType := VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+  Info.allocationSize := ASize;
+  Info.memoryTypeIndex := AType;
+  if ADeviceAddress then
+  begin
+    FillChar(FlagsInfo, SizeOf(FlagsInfo), 0);
+    FlagsInfo.sType := VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO;
+    FlagsInfo.flags := Ord(VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT);
+    Info.pNext := @FlagsInfo;
+  end;
+  Result := VK_NULL_HANDLE;
+  Res := Track(FVk.AllocateMemory(FDevice, @Info, nil, @Result));
+  if (Res = VK_ERROR_OUT_OF_DEVICE_MEMORY) or (Res = VK_ERROR_OUT_OF_HOST_MEMORY) then
+    Exit(VK_NULL_HANDLE);
+  Check(Res, 'vkAllocateMemory');
+  if (FMemory.memoryTypes[AType].propertyFlags and Ord(VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT)) <> 0 then
+  begin
+    Res := FVk.MapMemory(FDevice, Result, 0, VK_WHOLE_SIZE, 0, @P);
+    if Res <> VK_SUCCESS then
+    begin
+      FVk.FreeMemory(FDevice, Result, nil);
+      Check(Res, 'vkMapMemory');
+    end;
+    ACpu := P;
+  end;
+  Inc(FMemoryObjects);
+  if FMemoryObjects > FPeakMemoryObjects then
+    FPeakMemoryObjects := FMemoryObjects;
+end;
+
+procedure TFastVulkan.FreeMemory(const AMemory: TVkDeviceMemory);
+begin
+  if AMemory = VK_NULL_HANDLE then
+    Exit;
+  // Freeing memory unmaps it.
+  FVk.FreeMemory(FDevice, AMemory, nil);
+  Dec(FMemoryObjects);
+end;
+
+function TFastVulkan.Allocate(const ARequirements: TVkMemoryRequirements; const ARequired,
+  APreferred: TVkMemoryPropertyFlags; const ABuffer: Boolean): TFastVkAllocation;
+var
+  Index, I: Integer;
+  Flags: TVkMemoryPropertyFlags;
+  Host, Address: Boolean;
+  BlockSize, Align, Offset: UInt64;
+  Pool: TList<TObject>;
+  B: TFastVkBlock;
+  Cpu: PByte;
+  Memory: TVkDeviceMemory;
 begin
   Index := MemoryType(ARequirements.memoryTypeBits, ARequired, APreferred);
   if Index < 0 then
     raise EFastVulkan.Create('FastCanvas: no Vulkan memory type for a resource');
-  AFlags := FMemory.memoryTypes[Index].propertyFlags;
-  FillChar(Info, SizeOf(Info), 0);
-  Info.sType := VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-  Info.allocationSize := ARequirements.size;
-  Info.memoryTypeIndex := Index;
-  Result := VK_NULL_HANDLE;
-  Check(FVk.AllocateMemory(FDevice, @Info, nil, @Result), 'vkAllocateMemory');
+  Flags := FMemory.memoryTypes[Index].propertyFlags;
+  Host := (Flags and Ord(VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT)) <> 0;
+  // Buffers may take device addresses (acceleration structures): their memory allows them.
+  Address := ABuffer and FBufferDeviceAddress;
+  if Host then
+    BlockSize := HostBlockSize
+  else
+    BlockSize := DeviceBlockSize;
+  if BlockSize > FMemory.memoryHeaps[FMemory.memoryTypes[Index].heapIndex].size div 8 then
+    BlockSize := FMemory.memoryHeaps[FMemory.memoryTypes[Index].heapIndex].size div 8;
+  Align := Max(ARequirements.alignment, 1);
+  // Ranges of non-coherent memory are flushed and invalidated in whole atoms: no two allocations share one.
+  if Host and ((Flags and Ord(VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)) = 0) then
+    Align := Max(Align, FProperties.limits.nonCoherentAtomSize);
+  Result := TFastVkAllocation.Create;
+  EnterCriticalSection(FAllocLock);
+  try
+    try
+      Result.Flags := Flags;
+      if ARequirements.size > BlockSize div 2 then
+      begin
+        // Large: memory of its own.
+        Result.Memory := NewMemory(Index, ARequirements.size, Address, Cpu);
+        if Result.Memory = VK_NULL_HANDLE then
+          raise EFastVulkan.CreateFmt('FastCanvas: out of Vulkan memory (%d MB)', [ARequirements.size shr 20]);
+        Result.Size := ARequirements.size;
+        Result.Cpu := Cpu;
+      end
+      else
+      begin
+        if FPools[Index, ABuffer] = nil then
+          FPools[Index, ABuffer] := TList<TObject>.Create;
+        Pool := FPools[Index, ABuffer];
+        B := nil;
+        for I := 0 to Pool.Count - 1 do
+          if TFastVkBlock(Pool[I]).Take(ARequirements.size, Align, Offset) then
+          begin
+            B := TFastVkBlock(Pool[I]);
+            Break;
+          end;
+        if B = nil then
+        begin
+          Memory := NewMemory(Index, BlockSize, Address, Cpu);
+          if Memory = VK_NULL_HANDLE then
+          begin
+            // No room for a block: memory of its own may still fit.
+            Result.Memory := NewMemory(Index, ARequirements.size, Address, Cpu);
+            if Result.Memory = VK_NULL_HANDLE then
+              raise EFastVulkan.CreateFmt('FastCanvas: out of Vulkan memory (%d KB)', [ARequirements.size shr 10]);
+            Result.Size := ARequirements.size;
+            Result.Cpu := Cpu;
+          end
+          else
+          begin
+            B := TFastVkBlock.Create;
+            B.Memory := Memory;
+            B.Size := BlockSize;
+            B.Cpu := Cpu;
+            B.Flags := Flags;
+            SetLength(B.Ranges, 4);
+            B.Ranges[0].Offset := 0;
+            B.Ranges[0].Size := BlockSize;
+            B.FreeCount := 1;
+            B.Pool := Pool;
+            Pool.Add(B);
+            B.Take(ARequirements.size, Align, Offset);
+          end;
+        end;
+        if B <> nil then
+        begin
+          Result.FBlock := B;
+          Result.Memory := B.Memory;
+          Result.Offset := Offset;
+          Result.Size := ARequirements.size;
+          if B.Cpu <> nil then
+            Result.Cpu := B.Cpu + Offset;
+        end;
+      end;
+      Inc(FAllocations);
+      if FAllocations > FPeakAllocations then
+        FPeakAllocations := FAllocations;
+    except
+      Result.Free;
+      raise;
+    end;
+  finally
+    LeaveCriticalSection(FAllocLock);
+  end;
+end;
+
+procedure TFastVulkan.Release(const AAllocation: TFastVkAllocation);
+var
+  B: TFastVkBlock;
+  Pool: TList<TObject>;
+  I, Empty: Integer;
+begin
+  if AAllocation = nil then
+    Exit;
+  EnterCriticalSection(FAllocLock);
+  try
+    Dec(FAllocations);
+    B := TFastVkBlock(AAllocation.FBlock);
+    if B = nil then
+      FreeMemory(AAllocation.Memory)
+    else
+    begin
+      B.Give(AAllocation.Offset, AAllocation.Size);
+      if B.Live = 0 then
+      begin
+        // An empty block goes unless it is the only empty one of its pool (a resource made and freed again and
+        // again does not make and free a block each time).
+        Pool := B.Pool;
+        Empty := 0;
+        for I := 0 to Pool.Count - 1 do
+          if TFastVkBlock(Pool[I]).Live = 0 then
+            Inc(Empty);
+        if Empty > 1 then
+        begin
+          Pool.Remove(B);
+          FreeMemory(B.Memory);
+          B.Free;
+        end;
+      end;
+    end;
+  finally
+    LeaveCriticalSection(FAllocLock);
+  end;
+  AAllocation.Free;
+end;
+
+procedure TFastVulkan.Invalidate(const AAllocation: TFastVkAllocation);
+var
+  Range: TVkMappedMemoryRange;
+  Atom, Limit: UInt64;
+begin
+  if (AAllocation = nil) or (AAllocation.Cpu = nil) or
+    ((AAllocation.Flags and Ord(VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)) <> 0) then
+    Exit;
+  Atom := Max(FProperties.limits.nonCoherentAtomSize, 1);
+  FillChar(Range, SizeOf(Range), 0);
+  Range.sType := VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE;
+  Range.memory := AAllocation.Memory;
+  Range.offset := AAllocation.Offset div Atom * Atom;
+  Range.size := (AAllocation.Offset + AAllocation.Size - Range.offset + Atom - 1) div Atom * Atom;
+  if AAllocation.FBlock <> nil then
+    Limit := TFastVkBlock(AAllocation.FBlock).Size
+  else
+    Limit := AAllocation.Size;
+  if Range.offset + Range.size > Limit then
+    Range.size := VK_WHOLE_SIZE;
+  FVk.InvalidateMappedMemoryRanges(FDevice, 1, @Range);
 end;
 
 initialization

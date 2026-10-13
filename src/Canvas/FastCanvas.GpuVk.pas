@@ -43,7 +43,8 @@ type
   /// wait for and make visible.</summary>
   TGpuVkUse = (Undefined, ShaderRead, ColorTarget, TransferSrc, TransferDst);
 
-  /// <summary>Kinds of Vulkan objects that Retire keeps until the GPU is done with them.</summary>
+  /// <summary>Kinds of Vulkan objects that Retire keeps until the GPU is done with them (Memory: a TFastVkAllocation).
+  /// </summary>
   TGpuVkObject = (Image, ImageView, Memory, Buffer, BufferView, Pipeline, PipelineLayout, SetLayout, Sampler,
     ShaderModule, Semaphore);
   {$SCOPEDENUMS OFF}
@@ -52,7 +53,7 @@ type
   TGpuVkPage = class
   public
     Buffer: TVkBuffer;
-    Memory: TVkDeviceMemory;
+    Memory: TFastVkAllocation;
     Cpu: PByte;
     Size, Used: NativeInt;
     /// <summary>The last submission that uses the page (InList: the open command buffer).</summary>
@@ -159,12 +160,14 @@ type
       const ASize: NativeInt);
     /// <summary>Fills a whole image with one color (the image is left in TransferDst).</summary>
     procedure ClearImage(const AImage: TVkImage; var AUse: TGpuVkUse; const AColor: TVkClearColorValue);
-    /// <summary>A device-local image with a view of all of it.</summary>
+    /// <summary>A device-local image with a view of all of it (of AAspect).</summary>
     function NewImage(const AFormat: TVkFormat; const AWidth, AHeight: Integer; const AUsage: TVkImageUsageFlags;
-      out AMemory: TVkDeviceMemory; out AView: TVkImageView): TVkImage;
-    /// <summary>A buffer with its own memory (ARequired, APreferred: see TFastVulkan.MemoryType).</summary>
+      out AMemory: TFastVkAllocation; out AView: TVkImageView; const AMips: Integer = 1; const ASamples: Integer = 1;
+      const AAspect: TVkImageAspectFlags = Ord(VK_IMAGE_ASPECT_COLOR_BIT)): TVkImage;
+    /// <summary>A buffer and its memory (ARequired, APreferred: see TFastVulkan.MemoryType; host-visible memory is mapped:
+    /// AMemory.Cpu).</summary>
     function NewBuffer(const ASize: UInt64; const AUsage: TVkBufferUsageFlags; const ARequired,
-      APreferred: TVkMemoryPropertyFlags; out AMemory: TVkDeviceMemory; out AFlags: TVkMemoryPropertyFlags): TVkBuffer;
+      APreferred: TVkMemoryPropertyFlags; out AMemory: TFastVkAllocation): TVkBuffer;
     /// <summary>A descriptor set of ALayout for the open command buffer.</summary>
     function AllocSet(const ALayout: TVkDescriptorSetLayout): TVkDescriptorSet;
     /// <summary>Rendering into ATarget (begun if it is not the current one, after the barriers so far); AClear: the
@@ -187,13 +190,12 @@ type
   TGpuVkSurface = class(TGpuSurface)
   private
     FImage: TVkImage;
-    FMemory: TVkDeviceMemory;
+    FMemory: TFastVkAllocation;
     FView: TVkImageView;
     FUse: TGpuVkUse;
     FReadback: TVkBuffer;
-    FReadbackMemory: TVkDeviceMemory;
+    FReadbackMemory: TFastVkAllocation;
     FReadbackData: PByte;
-    FReadbackCoherent: Boolean;
     /// <summary>The read-back copy holds the current content (no GPU write since it was taken).</summary>
     FReadbackValid: Boolean;
     /// <summary>Destroys the Vulkan objects at once: the context shuts down (the GPU is idle) while the surface
@@ -259,7 +261,7 @@ type
   /// <summary>A texture of the renderer (atlas, ramps, the empty slot texture).</summary>
   TGpuVkImage = record
     Image: TVkImage;
-    Memory: TVkDeviceMemory;
+    Memory: TFastVkAllocation;
     View: TVkImageView;
     Use: TGpuVkUse;
   end;
@@ -267,7 +269,7 @@ type
   /// <summary>A table of the renderer: a buffer read as a uniform texel buffer of float4.</summary>
   TGpuVkTable = record
     Buffer: TVkBuffer;
-    Memory: TVkDeviceMemory;
+    Memory: TFastVkAllocation;
     View: TVkBufferView;
     Use: TGpuVkUse;
   end;
@@ -340,6 +342,8 @@ type
 function GpuVk: TGpuVkContext;
 /// <summary>The recording context, nil when there is none (not made here).</summary>
 function GpuVkCurrent: TGpuVkContext;
+/// <summary>The handle TGpuVkContext.Retire and DestroyObject take for memory (TGpuVkObject.Memory).</summary>
+function MemoryHandle(const AMemory: TFastVkAllocation): UInt64; inline;
 
 implementation
 
@@ -414,6 +418,11 @@ end;
 function AlignUp(const AValue: NativeInt; const AAlign: Integer): NativeInt; inline;
 begin
   Result := (AValue + AAlign - 1) and not NativeInt(AAlign - 1);
+end;
+
+function MemoryHandle(const AMemory: TFastVkAllocation): UInt64;
+begin
+  Result := UInt64(NativeUInt(Pointer(AMemory)));
 end;
 
 function ColorRange: TVkImageSubresourceRange;
@@ -537,7 +546,7 @@ begin
   case AKind of
     TGpuVkObject.Image: FVk.DestroyImage(FDevice, AHandle, nil);
     TGpuVkObject.ImageView: FVk.DestroyImageView(FDevice, AHandle, nil);
-    TGpuVkObject.Memory: FVk.FreeMemory(FDevice, AHandle, nil);
+    TGpuVkObject.Memory: FFast.Release(TFastVkAllocation(NativeUInt(AHandle)));
     TGpuVkObject.Buffer: FVk.DestroyBuffer(FDevice, AHandle, nil);
     TGpuVkObject.BufferView: FVk.DestroyBufferView(FDevice, AHandle, nil);
     TGpuVkObject.Pipeline: FVk.DestroyPipeline(FDevice, AHandle, nil);
@@ -728,8 +737,7 @@ procedure TGpuVkContext.FreePage(const APage: TGpuVkPage);
 begin
   if APage.Buffer <> VK_NULL_HANDLE then
     FVk.DestroyBuffer(FDevice, APage.Buffer, nil);
-  if APage.Memory <> VK_NULL_HANDLE then
-    FVk.FreeMemory(FDevice, APage.Memory, nil);
+  FFast.Release(APage.Memory);
   APage.Free;
 end;
 
@@ -930,8 +938,6 @@ end;
 function TGpuVkContext.TakePage(const ASize: NativeInt): TGpuVkPage;
 var
   I, Best: Integer;
-  Flags: TVkMemoryPropertyFlags;
-  P: Pointer;
 begin
   Collect;
   // The smallest free page that fits: a small request does not take the page a large one needs next.
@@ -951,9 +957,8 @@ begin
     Result.Buffer := NewBuffer(Result.Size, Ord(VK_BUFFER_USAGE_TRANSFER_SRC_BIT) or
       Ord(VK_BUFFER_USAGE_VERTEX_BUFFER_BIT) or Ord(VK_BUFFER_USAGE_INDEX_BUFFER_BIT) or
       Ord(VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT), Ord(VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) or
-      Ord(VK_MEMORY_PROPERTY_HOST_COHERENT_BIT), 0, Result.Memory, Flags);
-    Check(FVk.MapMemory(FDevice, Result.Memory, 0, VK_WHOLE_SIZE, 0, @P), 'vkMapMemory (upload)');
-    Result.Cpu := P;
+      Ord(VK_MEMORY_PROPERTY_HOST_COHERENT_BIT), 0, Result.Memory);
+    Result.Cpu := Result.Memory.Cpu;
   except
     FreePage(Result);
     raise;
@@ -1057,15 +1062,15 @@ begin
 end;
 
 function TGpuVkContext.NewImage(const AFormat: TVkFormat; const AWidth, AHeight: Integer;
-  const AUsage: TVkImageUsageFlags; out AMemory: TVkDeviceMemory; out AView: TVkImageView): TVkImage;
+  const AUsage: TVkImageUsageFlags; out AMemory: TFastVkAllocation; out AView: TVkImageView; const AMips: Integer;
+  const ASamples: Integer; const AAspect: TVkImageAspectFlags): TVkImage;
 var
   Info: TVkImageCreateInfo;
   ViewInfo: TVkImageViewCreateInfo;
   Req: TVkMemoryRequirements;
-  Flags: TVkMemoryPropertyFlags;
   Res: TVkResult;
 begin
-  AMemory := VK_NULL_HANDLE;
+  AMemory := nil;
   AView := VK_NULL_HANDLE;
   Result := VK_NULL_HANDLE;
   FillChar(Info, SizeOf(Info), 0);
@@ -1075,9 +1080,9 @@ begin
   Info.extent.width := Max(AWidth, 1);
   Info.extent.height := Max(AHeight, 1);
   Info.extent.depth := 1;
-  Info.mipLevels := 1;
+  Info.mipLevels := Max(AMips, 1);
   Info.arrayLayers := 1;
-  Info.samples := VK_SAMPLE_COUNT_1_BIT;
+  Info.samples := TVkSampleCountFlagBits(Max(ASamples, 1));
   Info.tiling := VK_IMAGE_TILING_OPTIMAL;
   Info.usage := AUsage;
   Info.sharingMode := VK_SHARING_MODE_EXCLUSIVE;
@@ -1088,12 +1093,12 @@ begin
   try
     FVk.GetImageMemoryRequirements(FDevice, Result, @Req);
     try
-      AMemory := FFast.Allocate(Req, Ord(VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT), 0, Flags);
+      AMemory := FFast.Allocate(Req, Ord(VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT), 0, False);
     except
       on E: EFastVulkan do
         raise EFastDevice.Create(E.Message);
     end;
-    Check(FVk.BindImageMemory(FDevice, Result, AMemory, 0), 'vkBindImageMemory');
+    Check(FVk.BindImageMemory(FDevice, Result, AMemory.Memory, AMemory.Offset), 'vkBindImageMemory');
     FillChar(ViewInfo, SizeOf(ViewInfo), 0);
     ViewInfo.sType := VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
     ViewInfo.image := Result;
@@ -1104,26 +1109,27 @@ begin
     ViewInfo.components.b := VK_COMPONENT_SWIZZLE_IDENTITY;
     ViewInfo.components.a := VK_COMPONENT_SWIZZLE_IDENTITY;
     ViewInfo.subresourceRange := ColorRange;
+    ViewInfo.subresourceRange.aspectMask := AAspect;
+    ViewInfo.subresourceRange.levelCount := Max(AMips, 1);
     Check(FVk.CreateImageView(FDevice, @ViewInfo, nil, @AView), 'vkCreateImageView');
   except
     DestroyObject(TGpuVkObject.ImageView, AView);
     DestroyObject(TGpuVkObject.Image, Result);
-    DestroyObject(TGpuVkObject.Memory, AMemory);
+    DestroyObject(TGpuVkObject.Memory, MemoryHandle(AMemory));
     AView := VK_NULL_HANDLE;
-    AMemory := VK_NULL_HANDLE;
+    AMemory := nil;
     Result := VK_NULL_HANDLE;
     raise;
   end;
 end;
 
 function TGpuVkContext.NewBuffer(const ASize: UInt64; const AUsage: TVkBufferUsageFlags; const ARequired,
-  APreferred: TVkMemoryPropertyFlags; out AMemory: TVkDeviceMemory; out AFlags: TVkMemoryPropertyFlags): TVkBuffer;
+  APreferred: TVkMemoryPropertyFlags; out AMemory: TFastVkAllocation): TVkBuffer;
 var
   Info: TVkBufferCreateInfo;
   Req: TVkMemoryRequirements;
 begin
-  AMemory := VK_NULL_HANDLE;
-  AFlags := 0;
+  AMemory := nil;
   Result := VK_NULL_HANDLE;
   FillChar(Info, SizeOf(Info), 0);
   Info.sType := VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
@@ -1134,16 +1140,16 @@ begin
   try
     FVk.GetBufferMemoryRequirements(FDevice, Result, @Req);
     try
-      AMemory := FFast.Allocate(Req, ARequired, APreferred, AFlags);
+      AMemory := FFast.Allocate(Req, ARequired, APreferred, True);
     except
       on E: EFastVulkan do
         raise EFastDevice.Create(E.Message);
     end;
-    Check(FVk.BindBufferMemory(FDevice, Result, AMemory, 0), 'vkBindBufferMemory');
+    Check(FVk.BindBufferMemory(FDevice, Result, AMemory.Memory, AMemory.Offset), 'vkBindBufferMemory');
   except
     DestroyObject(TGpuVkObject.Buffer, Result);
-    DestroyObject(TGpuVkObject.Memory, AMemory);
-    AMemory := VK_NULL_HANDLE;
+    DestroyObject(TGpuVkObject.Memory, MemoryHandle(AMemory));
+    AMemory := nil;
     Result := VK_NULL_HANDLE;
     raise;
   end;
@@ -1320,15 +1326,15 @@ begin
       // Command buffers that are not executed yet may use them.
       GCtx.Retire(TGpuVkObject.ImageView, FView);
       GCtx.Retire(TGpuVkObject.Image, FImage);
-      GCtx.Retire(TGpuVkObject.Memory, FMemory);
+      GCtx.Retire(TGpuVkObject.Memory, MemoryHandle(FMemory));
       GCtx.Retire(TGpuVkObject.Buffer, FReadback);
-      GCtx.Retire(TGpuVkObject.Memory, FReadbackMemory);
+      GCtx.Retire(TGpuVkObject.Memory, MemoryHandle(FReadbackMemory));
     end;
     FView := VK_NULL_HANDLE;
     FImage := VK_NULL_HANDLE;
-    FMemory := VK_NULL_HANDLE;
+    FMemory := nil;
     FReadback := VK_NULL_HANDLE;
-    FReadbackMemory := VK_NULL_HANDLE;
+    FReadbackMemory := nil;
   finally
     TFastDevice.Unlock;
   end;
@@ -1343,14 +1349,14 @@ begin
   C.FSurfaces.Remove(Self);
   C.DestroyObject(TGpuVkObject.ImageView, FView);
   C.DestroyObject(TGpuVkObject.Image, FImage);
-  C.DestroyObject(TGpuVkObject.Memory, FMemory);
+  C.DestroyObject(TGpuVkObject.Memory, MemoryHandle(FMemory));
   C.DestroyObject(TGpuVkObject.Buffer, FReadback);
-  C.DestroyObject(TGpuVkObject.Memory, FReadbackMemory);
+  C.DestroyObject(TGpuVkObject.Memory, MemoryHandle(FReadbackMemory));
   FView := VK_NULL_HANDLE;
   FImage := VK_NULL_HANDLE;
-  FMemory := VK_NULL_HANDLE;
+  FMemory := nil;
   FReadback := VK_NULL_HANDLE;
-  FReadbackMemory := VK_NULL_HANDLE;
+  FReadbackMemory := nil;
   FReadbackData := nil;
   FReadbackValid := False;
 end;
@@ -1380,10 +1386,7 @@ end;
 function TGpuVkSurface.Map(out AData: Pointer; out APitch: Integer): Boolean;
 var
   C: TGpuVkContext;
-  Flags: TVkMemoryPropertyFlags;
   Region: TVkBufferImageCopy;
-  Range: TVkMappedMemoryRange;
-  P: Pointer;
 begin
   Result := False;
   AData := nil;
@@ -1396,10 +1399,8 @@ begin
     // Cached memory: the CPU reads it (and FMX code may change pixels in place).
     FReadback := C.NewBuffer(UInt64(FWidth) * UInt64(FHeight) * 4, Ord(VK_BUFFER_USAGE_TRANSFER_DST_BIT),
       Ord(VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT), Ord(VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) or
-      Ord(VK_MEMORY_PROPERTY_HOST_CACHED_BIT), FReadbackMemory, Flags);
-    FReadbackCoherent := (Flags and Ord(VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)) <> 0;
-    C.Check(C.Vk.MapMemory(C.Device, FReadbackMemory, 0, VK_WHOLE_SIZE, 0, @P), 'vkMapMemory (read back)');
-    FReadbackData := P;
+      Ord(VK_MEMORY_PROPERTY_HOST_CACHED_BIT), FReadbackMemory);
+    FReadbackData := FReadbackMemory.Cpu;
     FReadbackValid := False;
   end;
   if not FReadbackValid then
@@ -1415,14 +1416,7 @@ begin
     C.MemoryBarrier(StageTransfer, AccessTransferWrite, StageHost, AccessHostRead);
     C.Transition(FImage, FUse, TGpuVkUse.ShaderRead);
     C.WaitIdle;
-    if not FReadbackCoherent then
-    begin
-      FillChar(Range, SizeOf(Range), 0);
-      Range.sType := VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE;
-      Range.memory := FReadbackMemory;
-      Range.size := VK_WHOLE_SIZE;
-      C.Vk.InvalidateMappedMemoryRanges(C.Device, 1, @Range);
-    end;
+    C.Fast.Invalidate(FReadbackMemory);
     FReadbackValid := True;
   end;
   AData := FReadbackData;
@@ -1943,7 +1937,7 @@ procedure TGpuVkRenderer.ReleaseTexture(var AImage: TGpuVkImage);
 begin
   GCtx.Retire(TGpuVkObject.ImageView, AImage.View);
   GCtx.Retire(TGpuVkObject.Image, AImage.Image);
-  GCtx.Retire(TGpuVkObject.Memory, AImage.Memory);
+  GCtx.Retire(TGpuVkObject.Memory, MemoryHandle(AImage.Memory));
   AImage := Default(TGpuVkImage);
 end;
 
@@ -1951,7 +1945,7 @@ procedure TGpuVkRenderer.ReleaseTable(var ATable: TGpuVkTable);
 begin
   GCtx.Retire(TGpuVkObject.BufferView, ATable.View);
   GCtx.Retire(TGpuVkObject.Buffer, ATable.Buffer);
-  GCtx.Retire(TGpuVkObject.Memory, ATable.Memory);
+  GCtx.Retire(TGpuVkObject.Memory, MemoryHandle(ATable.Memory));
   ATable := Default(TGpuVkTable);
 end;
 
@@ -1973,14 +1967,13 @@ end;
 function TGpuVkRenderer.NewTable(const AFloat4s: Integer): TGpuVkTable;
 var
   C: TGpuVkContext;
-  Flags: TVkMemoryPropertyFlags;
   Info: TVkBufferViewCreateInfo;
   Elements: UInt64;
 begin
   C := GpuVk;
   Result := Default(TGpuVkTable);
   Result.Buffer := C.NewBuffer(UInt64(AFloat4s) * 16, Ord(VK_BUFFER_USAGE_UNIFORM_TEXEL_BUFFER_BIT) or
-    Ord(VK_BUFFER_USAGE_TRANSFER_DST_BIT), Ord(VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT), 0, Result.Memory, Flags);
+    Ord(VK_BUFFER_USAGE_TRANSFER_DST_BIT), Ord(VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT), 0, Result.Memory);
   // The view reaches as far as the device lets texel buffers reach.
   Elements := Min(UInt64(AFloat4s), UInt64(C.Fast.Properties.limits.maxTexelBufferElements));
   FillChar(Info, SizeOf(Info), 0);
