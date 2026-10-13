@@ -8,21 +8,26 @@ unit FastCanvas.Bridge;
 
   Deferred 3D work: while the canvas records (FastBridge.Recording), the 3D context records into a deferred
   context and sets FastDeferredPending. The canvas calls FastDeferredFlush before it records its next command
-  and before it waits for the render thread, so the command list lands in the stream at the right place. }
+  and before it waits for the render thread, so the command list lands in the stream at the right place.
+
+  Android and Linux: no Direct3D members; the rest (lock, the command stream, bitmap surfaces) is there for a 3D
+  context on the Vulkan device. }
 
 interface
 
 uses
-  System.SysUtils, Winapi.D3DCommon, Winapi.D3D11, FMX.Graphics;
+  System.SysUtils, {$IFDEF MSWINDOWS}Winapi.D3DCommon, Winapi.D3D11, {$ENDIF}FMX.Graphics;
 
 type
   /// <summary>Executes a command recorded with FastBridge.RecordNative (AData: its payload).</summary>
   TFastNativeHandler = procedure(const AData: Pointer);
 
   TFastBridge = record
+{$IFDEF MSWINDOWS}
     Device: function: ID3D11Device;
     ImmediateContext: function: ID3D11DeviceContext;
     FeatureLevel: function: D3D_FEATURE_LEVEL;
+{$ENDIF}
     Hardware: function: Boolean;
     /// <summary>Guards the immediate context against the render thread and Direct2D.</summary>
     Lock: procedure;
@@ -31,10 +36,12 @@ type
     Sync: procedure;
     /// <summary>True when drawing on this thread is recorded for the render thread.</summary>
     Recording: function: Boolean;
+{$IFDEF MSWINDOWS}
     /// <summary>Puts a command list (from a deferred context of the device) into the command stream.</summary>
     ExecuteCommandList: procedure(const AList: ID3D11CommandList);
     /// <summary>The texture of a TBitmap whose handle belongs to the canvas, else nil (Direct3D 11).</summary>
     BitmapTexture: function(const ABitmap: TBitmap): ID3D11Texture2D;
+{$ENDIF}
     /// <summary>The handle object of a TBitmap of the canvas (FastCanvas.Gpu.IGpuTexture: the surface of any backend),
     /// else nil.</summary>
     BitmapSurface: function(const ABitmap: TBitmap): IInterface;

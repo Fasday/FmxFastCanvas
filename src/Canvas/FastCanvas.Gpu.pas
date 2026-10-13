@@ -12,13 +12,18 @@ unit FastCanvas.Gpu;
 
   Surfaces (TGpuSurface) are the premultiplied BGRA textures of TBitmap handles and window buffers; windows
   (TGpuWindow) are swap chains (of the window, or shown by DirectComposition: TGpuComposition) or, for transparent
-  windows, a texture read back after every frame. }
+  windows, a texture read back after every frame. A window is known by a TGpuWindowHandle: a Win32 window, an
+  Android native window or an X11 window (FastCanvas.Platform). }
 
 interface
 
 uses
+{$IFDEF MSWINDOWS}
   Winapi.Windows, Winapi.D2D1, System.SysUtils, System.Types, System.Math, FastCanvas.DWriteExt, FastCanvas.DCompExt,
   FastCanvas.Device;
+{$ELSE}
+  System.SysUtils, System.Types, System.Math, FastCanvas.Device;
+{$ENDIF}
 
 const
   // TGpuInstance.Flags
@@ -187,6 +192,16 @@ type
     Composition: Boolean;
   end;
 
+  /// <summary>A window of the platform as the backends present to it (FastCanvas.Platform makes it).</summary>
+  TGpuWindowHandle = record
+    /// <summary>Windows: the HWND. Android: the ANativeWindow (a reference the canvas target holds). Linux: the X11
+    /// window (XID).</summary>
+    Window: NativeUInt;
+    /// <summary>Linux: the X11 Display; else nil.</summary>
+    Display: Pointer;
+  end;
+
+{$IFDEF MSWINDOWS}
   /// <summary>DirectComposition binding of a window: a device, a target on the window and one visual that shows a
   /// composition swap chain, above the window's own (GDI) content and below its child windows. Render thread.
   /// </summary>
@@ -209,6 +224,7 @@ type
     /// undefined. Sends no messages (safe on the render thread).</summary>
     class procedure ClearWindow(const AWnd: HWND); static;
   end;
+{$ENDIF}
 
   /// <summary>The pixels of the frame a window shows (FastCanvasCaptureWindow): four floats per pixel, R, G, B, A;
   /// scRGB (linear, 1.0 = 80 nits) for HDR output, sRGB-encoded 0..1 for SDR output.</summary>
@@ -223,11 +239,14 @@ type
   /// window buffer after every frame. Render thread only.</summary>
   TGpuWindow = class
   protected
+    FHandle: TGpuWindowHandle;
+{$IFDEF MSWINDOWS}
     FWnd: HWND;
+{$ENDIF}
     FLayered: Boolean;
     FHdr: Boolean;
   public
-    constructor Create(const AWnd: HWND; const ALayered: Boolean); virtual;
+    constructor Create(const AHandle: TGpuWindowHandle; const ALayered: Boolean); virtual;
     /// <summary>At the start of a frame: the surface to draw into, resized or recreated as needed (also when the
     /// output changes between SDR and HDR: the surface is Hdr then).</summary>
     function Prepare(const AWidth, AHeight: Integer; const ATearing: Boolean; const AOutput: TGpuOutput): TGpuSurface;
@@ -345,7 +364,8 @@ type
       const APitch: Integer): TGpuSurface; virtual; abstract;
     /// <summary>An RGBA16F surface (transparent black), nil when the backend has none (Direct3D 11).</summary>
     class function CreateHdrSurface(const AWidth, AHeight: Integer): TGpuSurface; virtual;
-    class function CreateWindow(const AWnd: HWND; const ALayered: Boolean): TGpuWindow; virtual; abstract;
+    class function CreateWindow(const AHandle: TGpuWindowHandle; const ALayered: Boolean): TGpuWindow; virtual;
+      abstract;
     /// <summary>Hands the recorded work to the GPU (Direct3D 12: the open command list).</summary>
     class procedure Submit; virtual;
     /// <summary>Waits until the GPU has executed everything recorded so far.</summary>
@@ -367,7 +387,7 @@ implementation
 
 procedure GpuCheck(const ARes: HResult; const AWhat: string);
 begin
-  if Failed(ARes) then
+  if ARes < 0 then
     raise EFastDevice.CreateFmt('FastCanvas: %s failed (0x%.8x)', [AWhat, Cardinal(ARes)]);
 end;
 
@@ -447,10 +467,13 @@ end;
 
 { TGpuWindow }
 
-constructor TGpuWindow.Create(const AWnd: HWND; const ALayered: Boolean);
+constructor TGpuWindow.Create(const AHandle: TGpuWindowHandle; const ALayered: Boolean);
 begin
   inherited Create;
-  FWnd := AWnd;
+  FHandle := AHandle;
+{$IFDEF MSWINDOWS}
+  FWnd := HWND(AHandle.Window);
+{$ENDIF}
   FLayered := ALayered;
 end;
 
@@ -465,6 +488,7 @@ begin
   Result := False;
 end;
 
+{$IFDEF MSWINDOWS}
 { TGpuComposition }
 
 function TGpuComposition.Bind(const AWnd: HWND): Boolean;
@@ -530,6 +554,7 @@ begin
   FDevice := nil;
   inherited;
 end;
+{$ENDIF}
 
 { TGpuBackend }
 
@@ -587,8 +612,10 @@ const
   Norm13 = 65536 / (255 * 255) * 4;
   Norm24 = 256 / 255 * 4;
 var
+{$IFDEF MSWINDOWS}
   Params: IDWriteRenderingParams;
   Params1: IDWriteRenderingParams1;
+{$ENDIF}
   Gamma: Single;
   Index: Integer;
 begin
@@ -596,6 +623,7 @@ begin
   FTextContrast := 1;
   FClearTypeContrast := 1;
   FClearTypeLevel := 1;
+{$IFDEF MSWINDOWS}
   if (TFastDevice.DWrite <> nil) and Succeeded(TFastDevice.DWrite.CreateRenderingParams(Params)) and (Params <> nil) then
   begin
     Gamma := Params.GetGamma;
@@ -606,6 +634,7 @@ begin
     else
       FTextContrast := Params.GetEnhancedContrast;
   end;
+{$ENDIF}
   Index := EnsureRange(Trunc(Gamma * 10 + 0.5), 10, 22) - 10;
   FGammaRatios[0] := Norm13 * Ratios[Index, 0] / 4;
   FGammaRatios[1] := Norm24 * Ratios[Index, 1] / 4;

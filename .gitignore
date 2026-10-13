@@ -16,6 +16,7 @@ __history/
 __recovery/
 bin/
 bin-dev/
+bin-base/
 dcu/
 Win32/
 Win64/
@@ -25,3 +26,6 @@ Win64/
 results/raw/
 *.etl
 *.wpaProfile.tmp
+
+# The debug keystore of Android builds (tools\build-android.ps1)
+*.keystore

@@ -14,18 +14,32 @@ unit FastCanvas.Device;
   Thread use: the device, the queue and the factories are free-threaded. The immediate context (Direct3D 11) and the
   open command list (Direct3D 12) or command buffer (Vulkan) are used by the render thread, and by other threads
   only between Lock and Unlock (the Direct2D multithread lock, which Direct2D itself takes around its use of the
-  context). }
+  context).
+
+  Android and Linux: Vulkan only (FastCanvasBackend is ignored), no factories; Lock and Unlock are a monitor of the
+  device. }
 
 interface
 
 uses
+{$IFDEF MSWINDOWS}
   DX12.D3D12, DX12.D3DCommon,
   Winapi.Windows, Winapi.DXGI, Winapi.DXGI1_2, Winapi.D3DCommon, Winapi.D3D11, Winapi.D2D1, System.SysUtils,
   FastCanvas.D2D1Ext, FastCanvas.DWriteExt, FastCanvas.DeviceVk;
+{$ELSE}
+  System.SysUtils, FastCanvas.DeviceVk;
+{$ENDIF}
 
 type
   EFastDevice = class(Exception);
 
+const
+  /// <summary>The reasons a device stops working on every platform (the values of DXGI_ERROR_DEVICE_REMOVED and
+  /// DXGI_ERROR_DEVICE_RESET): TFastDevice.RemovedReason, TGpuWindow.Present.</summary>
+  FastDeviceRemoved = HResult($887A0005);
+  FastDeviceReset = HResult($887A0007);
+
+type
   {$SCOPEDENUMS ON}
   TFastCanvasBackend = (D3D11, D3D12, Vulkan);
   /// <summary>Direct3D 12 DRED auto-breadcrumbs (FastCanvasD3D12Breadcrumbs).</summary>
@@ -34,8 +48,9 @@ type
 
 var
   /// <summary>The graphics API of the canvas. Read when the device is created (the first canvas, bitmap or text
-  /// layout): set it before Application.Initialize.</summary>
-  FastCanvasBackend: TFastCanvasBackend = TFastCanvasBackend.D3D11;
+  /// layout): set it before Application.Initialize. Android and Linux: Vulkan whatever it says.</summary>
+  FastCanvasBackend: TFastCanvasBackend =
+    {$IFDEF MSWINDOWS}TFastCanvasBackend.D3D11{$ELSE}TFastCanvasBackend.Vulkan{$ENDIF};
   /// <summary>Direct3D 12: DRED auto-breadcrumbs, the GPU records which commands it finished (for diagnosing a
   /// removed device); costs GPU time. Nvidia: on NVIDIA graphics cards only (a hang of ray tracing structure builds on
   /// an RTX 5080 with driver 610.88 went away with them). Read when the device is created.</summary>
@@ -48,6 +63,7 @@ type
     /// would release managed class variables, while forms, canvases and bitmaps are freed by FMX after the unit
     /// finalizations (FinalizeForms) and still use them; the canvas service releases them then (Finish).</summary>
     TRefs = record
+{$IFDEF MSWINDOWS}
       D3D: ID3D11Device;
       Context: ID3D11DeviceContext;
       DXGIFactory: IDXGIFactory2;
@@ -58,6 +74,10 @@ type
       DWrite2: IDWriteFactory2;
       D3D12: ID3D12Device;
       Queue: ID3D12CommandQueue;
+{$ELSE}
+      /// <summary>The device lock (a monitor).</summary>
+      DeviceLock: TObject;
+{$ENDIF}
       /// <summary>Owned: freed by Release and ResetDevice.</summary>
       Vulkan: TFastVulkan;
     end;
@@ -66,16 +86,20 @@ type
     FBackend: TFastCanvasBackend;
     /// <summary>nil after Finish.</summary>
     FRefs: PRefs;
+{$IFDEF MSWINDOWS}
     FLevel: D3D_FEATURE_LEVEL;
+{$ENDIF}
     FHardware: Boolean;
     FTearing: Boolean;
     FCreateLock: TObject;
     FUseWarp: Boolean;
     FDebug12: Boolean;
     FVendorId: Cardinal;
+    /// <summary>The device and the factories are made.</summary>
+    class function Created: Boolean; static; inline;
+{$IFDEF MSWINDOWS}
     class procedure CreateDevice; static;
     class procedure CreateDevice12; static;
-    class procedure CreateDeviceVk; static;
     class procedure CreateFactories; static;
     class procedure CheckTearing; static;
     class function GetD3D: ID3D11Device; static;
@@ -87,6 +111,8 @@ type
     class function GetDWrite2: IDWriteFactory2; static;
     class function GetD3D12: ID3D12Device; static;
     class function GetQueue: ID3D12CommandQueue; static;
+{$ENDIF}
+    class procedure CreateDeviceVk; static;
     class function GetVulkan: TFastVulkan; static;
   public
     class constructor Create;
@@ -108,24 +134,33 @@ type
     class function RemovedReason: HResult; static;
     /// <summary>The graphics API of the current device.</summary>
     class property Backend: TFastCanvasBackend read FBackend;
+{$IFDEF MSWINDOWS}
     /// <summary>Direct3D 11: the device and its immediate context; else nil.</summary>
     class property D3D: ID3D11Device read GetD3D;
     class property Context: ID3D11DeviceContext read GetContext;
     class property FeatureLevel: D3D_FEATURE_LEVEL read FLevel;
+{$ENDIF}
     class property Hardware: Boolean read FHardware;
+{$IFDEF MSWINDOWS}
     class property DXGIFactory: IDXGIFactory2 read GetDXGIFactory;
+{$ENDIF}
     class property TearingSupported: Boolean read FTearing;
+{$IFDEF MSWINDOWS}
     class property D2DFactory: ID2D1Factory1 read GetD2DFactory;
     /// <summary>Direct3D 11 only, else nil.</summary>
     class property D2DDevice: ID2D1Device read GetD2DDevice;
     class property DWrite: IDWriteFactory read GetDWrite;
     /// <summary>nil before Windows 8.1.</summary>
     class property DWrite2: IDWriteFactory2 read GetDWrite2;
-    /// <summary>Set before the first use: WARP (software) instead of the hardware adapter.</summary>
+{$ENDIF}
+    /// <summary>Set before the first use: WARP (software) instead of the hardware adapter (Vulkan: a CPU
+    /// implementation first, such as lavapipe).</summary>
     class property UseWarp: Boolean read FUseWarp write FUseWarp;
+{$IFDEF MSWINDOWS}
     /// <summary>Direct3D 12: the device and its direct queue; else nil.</summary>
     class property D3D12: ID3D12Device read GetD3D12;
     class property Queue: ID3D12CommandQueue read GetQueue;
+{$ENDIF}
     /// <summary>Vulkan: the instance, device and queue; else nil.</summary>
     class property Vulkan: TFastVulkan read GetVulkan;
     /// <summary>Direct3D 12 with the debug layer (environment variable FASTCANVAS_D3D12_DEBUG: the file its messages
@@ -141,13 +176,19 @@ type
 implementation
 
 uses
+{$IFDEF MSWINDOWS}
   DX12.D3D12SDKLayers, DX12.DXGI1_4, System.Math, Winapi.DXGI1_3, Winapi.DxgiType, Vulkan;
+{$ELSE}
+  System.Math, Vulkan;
+{$ENDIF}
 
+{$IFDEF MSWINDOWS}
 /// <summary>CreateDXGIFactory2 with the interface ID by reference, as dxgi.dll takes it (REFIID). Winapi.DXGI1_3
 /// declares it by value, which only Win64 passes as a pointer: a Win32 build wrote the factory to an address made of
 /// the GUID's bytes (an access violation in dxgi.dll).</summary>
 function CreateDXGIFactory2(Flags: UINT; const [ref] riid: TGUID; out ppFactory): HResult; stdcall;
   external 'dxgi.dll';
+{$ENDIF}
 
 { TFastDevice }
 
@@ -157,8 +198,21 @@ begin
   // finalizations, and the canvas service shuts the device down then (FastCanvas.Service).
   FCreateLock := TObject.Create;
   New(FRefs);
+{$IFNDEF MSWINDOWS}
+  FRefs.DeviceLock := TObject.Create;
+{$ENDIF}
 end;
 
+class function TFastDevice.Created: Boolean;
+begin
+{$IFDEF MSWINDOWS}
+  Result := FRefs.DWrite <> nil;
+{$ELSE}
+  Result := FRefs.Vulkan <> nil;
+{$ENDIF}
+end;
+
+{$IFDEF MSWINDOWS}
 class function TFastDevice.GetD3D: ID3D11Device;
 begin
   if FRefs <> nil then
@@ -230,6 +284,7 @@ begin
   else
     Result := nil;
 end;
+{$ENDIF}
 
 class function TFastDevice.GetVulkan: TFastVulkan;
 begin
@@ -239,6 +294,7 @@ begin
     Result := nil;
 end;
 
+{$IFDEF MSWINDOWS}
 class procedure TFastDevice.CheckTearing;
 var
   Factory5: IDXGIFactory5;
@@ -334,6 +390,8 @@ begin
   CheckTearing;
 end;
 
+{$ENDIF}
+
 class procedure TFastDevice.CreateDeviceVk;
 begin
   try
@@ -344,11 +402,14 @@ begin
   end;
   FVendorId := FRefs.Vulkan.Properties.vendorID;
   FHardware := FRefs.Vulkan.Properties.deviceType <> VK_PHYSICAL_DEVICE_TYPE_CPU;
+{$IFDEF MSWINDOWS}
   FLevel := D3D_FEATURE_LEVEL_11_0;
+{$ENDIF}
   // Windows present with VK_PRESENT_MODE_IMMEDIATE_KHR when they allow tearing (FastCanvas.GpuVk), no DXGI flag.
   FTearing := False;
 end;
 
+{$IFDEF MSWINDOWS}
 class procedure TFastDevice.CreateFactories;
 var
   Factory: ID2D1Factory;
@@ -368,6 +429,7 @@ begin
     not Supports(Unk, IDWriteFactory, FRefs.DWrite) then
     raise EFastDevice.Create('FastCanvas: cannot create the DirectWrite factory');
 end;
+{$ENDIF}
 
 class procedure TFastDevice.Ensure;
 var
@@ -375,17 +437,18 @@ var
 begin
   if FRefs = nil then
     raise EFastDevice.Create('FastCanvas: the device is shut down');
-  if FRefs.DWrite <> nil then
+  if Created then
     Exit;
   TMonitor.Enter(FCreateLock);
   try
-    if FRefs.DWrite <> nil then
+    if Created then
       Exit;
     // Direct3D and Direct2D expect the floating point exceptions masked.
     Mask := GetExceptionMask;
     SetExceptionMask(exAllArithmeticExceptions);
     try
       try
+{$IFDEF MSWINDOWS}
         FBackend := FastCanvasBackend;
         case FBackend of
           TFastCanvasBackend.D3D12: CreateDevice12;
@@ -394,6 +457,10 @@ begin
           CreateDevice;
         end;
         CreateFactories;
+{$ELSE}
+        FBackend := TFastCanvasBackend.Vulkan;
+        CreateDeviceVk;
+{$ENDIF}
       except
         Release;
         raise;
@@ -411,6 +478,9 @@ begin
   if FRefs = nil then
     Exit;
   Release;
+{$IFNDEF MSWINDOWS}
+  FreeAndNil(FRefs.DeviceLock);
+{$ENDIF}
   Dispose(FRefs);
   FRefs := nil;
   FreeAndNil(FCreateLock);
@@ -420,6 +490,7 @@ class procedure TFastDevice.Release;
 begin
   if FRefs = nil then
     Exit;
+{$IFDEF MSWINDOWS}
   if FRefs.Context <> nil then
   begin
     FRefs.Context.ClearState;
@@ -436,17 +507,23 @@ begin
   FRefs.DXGIFactory := nil;
   FRefs.Context := nil;
   FRefs.D3D := nil;
+{$ELSE}
+  FreeAndNil(FRefs.Vulkan);
+{$ENDIF}
 end;
 
 class procedure TFastDevice.ResetDevice;
 var
   Mask: TArithmeticExceptionMask;
+{$IFDEF MSWINDOWS}
   Device: IDXGIDevice;
+{$ENDIF}
 begin
   if FRefs = nil then
     Exit;
   TMonitor.Enter(FCreateLock);
   try
+{$IFDEF MSWINDOWS}
     if FRefs.Context <> nil then
     begin
       // A window takes a new flip-model swap chain only when the old one is destroyed.
@@ -459,10 +536,12 @@ begin
     FRefs.D3D := nil;
     FRefs.Queue := nil;
     FRefs.D3D12 := nil;
+{$ENDIF}
     FreeAndNil(FRefs.Vulkan);
     Mask := GetExceptionMask;
     SetExceptionMask(exAllArithmeticExceptions);
     try
+{$IFDEF MSWINDOWS}
       case FBackend of
         TFastCanvasBackend.D3D12: CreateDevice12;
         TFastCanvasBackend.Vulkan: CreateDeviceVk;
@@ -474,6 +553,9 @@ begin
       else if (FRefs.D3D <> nil) and (not Supports(FRefs.D3D, IDXGIDevice, Device) or
         Failed(FRefs.D2DFactory.CreateDevice(Device, FRefs.D2DDevice))) then
         raise EFastDevice.Create('FastCanvas: cannot create the Direct2D device');
+{$ELSE}
+      CreateDeviceVk;
+{$ENDIF}
     finally
       SetExceptionMask(Mask);
     end;
@@ -484,32 +566,48 @@ end;
 
 class function TFastDevice.Ready: Boolean;
 begin
+{$IFDEF MSWINDOWS}
   Result := (FRefs <> nil) and (FRefs.DWrite <> nil) and
     ((FRefs.D3D <> nil) or (FRefs.D3D12 <> nil) or (FRefs.Vulkan <> nil));
+{$ELSE}
+  Result := (FRefs <> nil) and (FRefs.Vulkan <> nil);
+{$ENDIF}
 end;
 
 class procedure TFastDevice.Lock;
 begin
+{$IFDEF MSWINDOWS}
   if (FRefs <> nil) and (FRefs.D2DLock <> nil) then
     FRefs.D2DLock.Enter;
+{$ELSE}
+  if FRefs <> nil then
+    TMonitor.Enter(FRefs.DeviceLock);
+{$ENDIF}
 end;
 
 class procedure TFastDevice.Unlock;
 begin
+{$IFDEF MSWINDOWS}
   if (FRefs <> nil) and (FRefs.D2DLock <> nil) then
     FRefs.D2DLock.Leave;
+{$ELSE}
+  if FRefs <> nil then
+    TMonitor.Exit(FRefs.DeviceLock);
+{$ENDIF}
 end;
 
 class function TFastDevice.RemovedReason: HResult;
 begin
   if FRefs = nil then
     Result := S_OK
+{$IFDEF MSWINDOWS}
   else if FRefs.D3D12 <> nil then
     Result := FRefs.D3D12.GetDeviceRemovedReason
   else if FRefs.D3D <> nil then
     Result := FRefs.D3D.GetDeviceRemovedReason
+{$ENDIF}
   else if (FRefs.Vulkan <> nil) and FRefs.Vulkan.Lost then
-    Result := DXGI_ERROR_DEVICE_REMOVED
+    Result := FastDeviceRemoved
   else
     Result := S_OK;
 end;
@@ -518,8 +616,10 @@ class function TFastDevice.MaxTextureSize: Integer;
 begin
   if (FRefs <> nil) and (FRefs.Vulkan <> nil) then
     Result := FRefs.Vulkan.Properties.limits.maxImageDimension2D
+{$IFDEF MSWINDOWS}
   else if ((FRefs <> nil) and (FRefs.D3D12 <> nil)) or (FLevel >= D3D_FEATURE_LEVEL_11_0) then
     Result := 16384
+{$ENDIF}
   else
     Result := 8192;
 end;

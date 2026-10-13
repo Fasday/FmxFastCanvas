@@ -7,9 +7,14 @@ unit FastCanvas.Canvas;
   thread executes them. Rectangles, rounded rectangles, ellipses, lines, bitmaps and glyphs become TGpuInstance
   records that the recording side writes straight into the stream, and the render thread draws them in instanced
   runs (FastCanvas.Gpu, on Direct3D 11, 12 or Vulkan: FastCanvasBackend). Paths and stroke outlines are polygons with
-  exact area coverage on the GPU (their geometry comes from the Direct2D factory on the CPU); rotated and very large
-  text is drawn from glyph outlines, color fonts from an image rasterized once. Clips are a table of pixel boxes plus
-  up to two oriented rectangles per entry, tested per pixel, so clip changes do not split draw calls.
+  exact area coverage on the GPU (their geometry comes from a CPU geometry engine: Direct2D or Skia,
+  FastCanvas.Geometry); rotated and very large text is drawn from glyph outlines, color fonts from an image rasterized
+  once (FastCanvas.Text: DirectWrite or Skia). Clips are a table of pixel boxes plus up to two oriented rectangles per
+  entry, tested per pixel, so clip changes do not split draw calls.
+
+  Android and Linux: Vulkan, Skia geometry and Skia text; the windows are the platform's (FastCanvas.Platform). What
+  needs Direct2D drawing (the D2DText measurement aid, brushes the GPU renderer has no paint for) draws nothing there,
+  as on Direct3D 12 and Vulkan on Windows.
 
   Contract: TCanvas (FMX.Graphics.pas:980-1229), TTextLayout (FMX.TextLayout.pas:48-177). On Direct3D 12 the canvas
   reports TCanvasStyle.SupportClipRects (FastCanvasPartialFrames): FMX then repaints only the rectangles that changed
@@ -24,7 +29,7 @@ interface
 
 uses
   System.Types, System.UITypes, System.SysUtils, System.Classes, System.Math, FMX.Types, FMX.Graphics, FMX.Forms,
-  FastCanvas.Gpu, FastCanvas.Hdr;
+  FastCanvas.Gpu{$IFDEF MSWINDOWS}, FastCanvas.Hdr{$ENDIF};
 
 type
   TFastCanvasOption = (
@@ -121,19 +126,21 @@ function FastCanvasRenderBusyMs: Double;
 /// <summary>GPU draw calls issued so far (diagnostics).</summary>
 function FastCanvasDrawCalls: Integer;
 /// <summary>ID of the render thread, 0 before the first scene.</summary>
-function FastCanvasRenderThreadId: Cardinal;
+function FastCanvasRenderThreadId: TThreadID;
 /// <summary>Testing aid: the next scene that is not nested in another treats the graphics device as lost and
 /// recreates everything on a new one, as after a real device removal.</summary>
 procedure FastCanvasSimulateDeviceLoss;
 /// <summary>Devices recreated so far (removed or simulated).</summary>
 function FastCanvasDeviceResets: Integer;
 /// <summary>What TFastTextAntialias.System stands for: the font smoothing of Windows (Aliased, Grayscale or
-/// ClearType), read once.</summary>
+/// ClearType), read once; Grayscale on other platforms.</summary>
 function FastCanvasSystemTextAntialias: TFastTextAntialias;
+{$IFDEF MSWINDOWS}
 /// <summary>HDR output of a form's window (FastCanvas.Hdr.FastCanvasHdr) and the levels of its display: Output says
 /// whether its frames go out as FP16 scRGB (from the next frame on); tone-map HDR content to Headroom. Main thread.
 /// </summary>
 function FastCanvasHdrInfo(const AForm: TCommonCustomForm): TFastHdrInfo;
+{$ENDIF}
 /// <summary>Diagnostics: the frame a form's window presented last, as the GPU holds it (Direct3D 12). Waits for the
 /// render thread and the GPU. False when there is none.</summary>
 function FastCanvasCaptureWindow(const AForm: TCommonCustomForm; out ACapture: TFastWindowCapture): Boolean;
@@ -141,12 +148,20 @@ function FastCanvasCaptureWindow(const AForm: TCommonCustomForm; out ACapture: T
 implementation
 
 uses
-  Winapi.Windows, Winapi.DXGI, Winapi.D3D11, Winapi.D3DCommon, Winapi.DxgiFormat, Winapi.DxgiType,
-  Winapi.D2D1, Winapi.Wincodec, Winapi.ActiveX, System.Generics.Collections, System.Math.Vectors, System.Messaging,
+{$IFDEF MSWINDOWS}
+  Winapi.Windows, Winapi.DXGI, Winapi.D3D11, Winapi.D3DCommon, Winapi.DxgiFormat,
+  Winapi.D2D1, System.Generics.Collections, System.Math.Vectors, System.Messaging,
   FMX.Platform.Win, FMX.TextLayout,
   FMX.Types3D, FMX.Controls,
   FastCanvas.D2D1Ext, FastCanvas.DWriteExt, FastCanvas.Device, FastCanvas.Gpu11, FastCanvas.Gpu12,
-  FastCanvas.GpuVk, FastCanvas.Text, FastCanvas.RenderQueue, FastCanvas.Service, FastCanvas.Bridge;
+  FastCanvas.GpuVk, FastCanvas.Text, FastCanvas.RenderQueue, FastCanvas.Service, FastCanvas.Bridge,
+  FastCanvas.Geometry, FastCanvas.GeometryD2D, FastCanvas.TextDWrite, FastCanvas.Platform;
+{$ELSE}
+  System.Generics.Collections, System.Math.Vectors, System.Messaging, System.Diagnostics, FMX.TextLayout,
+  FMX.Types3D, FMX.Controls, FastCanvas.Device, FastCanvas.GpuVk, FastCanvas.Text, FastCanvas.RenderQueue,
+  FastCanvas.Service, FastCanvas.Bridge, FastCanvas.Geometry, FastCanvas.GeometrySkia, FastCanvas.TextSkia,
+  FastCanvas.Platform;
+{$ENDIF}
 
 type
   // Winapi.Windows declares a TBitmap too.
@@ -178,7 +193,9 @@ type
     FWidth, FHeight: Integer;
     /// <summary>nil while the device is lost.</summary>
     FSurface: TGpuSurface;
+{$IFDEF MSWINDOWS}
     FD2D: ID2D1Bitmap1;
+{$ENDIF}
     FAccess: TMapAccess;
     /// <summary>Pixels last written by the CPU (FastCanvasKeepBitmapCopies), nil when the GPU wrote it since.</summary>
     FCopy: TBytes;
@@ -199,8 +216,10 @@ type
     function Surface: TGpuSurface;
     function HdrTarget: TGpuSurface;
     procedure SdrTarget;
+{$IFDEF MSWINDOWS}
     /// <summary>Render thread, Direct3D 11: the Direct2D bitmap over the texture (source and target).</summary>
     function D2DBitmap(const AContext: ID2D1DeviceContext): ID2D1Bitmap1;
+{$ENDIF}
   end;
 
   TTargetKind = (Window, Layered, Bitmap);
@@ -209,13 +228,19 @@ type
   TFastTarget = class
   public
     Kind: TTargetKind;
+{$IFDEF MSWINDOWS}
     Wnd: HWND;
+{$ENDIF}
+    /// <summary>The window as the backend knows it (FastCanvas.Platform; released with the target).</summary>
+    Handle: TGpuWindowHandle;
     Width, Height: Integer;
     Aliased, Tearing: Boolean;
     Window: TGpuWindow;
     /// <summary>The surface the frame in progress draws into.</summary>
     Surface: TGpuSurface;
+{$IFDEF MSWINDOWS}
     D2D: ID2D1Bitmap1;
+{$ENDIF}
     Bitmap: IGpuTexture;
     /// <summary>Device generation the window and the surfaces belong to.</summary>
     Gen: Integer;
@@ -235,9 +260,11 @@ type
     /// <summary>AHdr, AComposition: TCmdBegin.Hdr, TCmdBegin.Composition.</summary>
     procedure Prepare(const AWidth, AHeight: Integer; const ATearing: Boolean; const ABitmap: TFastBitmap;
       const AHdr: Byte; const AComposition: Boolean);
+{$IFDEF MSWINDOWS}
     /// <summary>AOpaque: a window's bitmap ignores alpha, as Direct2D draws ClearType text only into opaque bitmaps
     /// (the D2DText measurement aid in ClearType frames).</summary>
     function D2DTarget(const AContext: ID2D1DeviceContext; const AOpaque: Boolean): ID2D1Bitmap1;
+{$ENDIF}
     constructor Create;
     destructor Destroy; override;
   end;
@@ -287,7 +314,9 @@ type
     /// <summary>How the scene in progress antialiases its text: FastCanvasTextAntialias with System resolved, and
     /// ClearType only in window frames (else Grayscale).</summary>
     FTextAntialias: TFastTextAntialias;
+{$IFDEF MSWINDOWS}
     procedure QueueRecreateWindow;
+{$ENDIF}
     procedure RecRegion;
     procedure PartialRegion(const ARects: TClipRects);
     procedure RegionOf(const ARects: TClipRects);
@@ -441,7 +470,8 @@ type
   TD2DBrushKind = (Solid, Linear, Radial, Bitmap);
 
   PCmdD2D = ^TCmdD2D;
-  /// <summary>A shape drawn by Direct2D; followed by DashCount Singles and StopCount TD2D1GradientStop.</summary>
+  /// <summary>A shape drawn by Direct2D; followed by DashCount Singles and StopCount TD2D1GradientStop (Windows
+  /// only, for Direct2D's gradient brushes).</summary>
   TCmdD2D = packed record
     Shape: TD2DShape;
     Brush: TD2DBrushKind;
@@ -495,8 +525,8 @@ type
     List: Pointer;   // ID3D11CommandList, kept alive by the chunk
   end;
 
-  PPathPoints = ^TPathPoints;
-  TPathPoints = array[0..MaxInt div SizeOf(TPathPoint) - 1] of TPathPoint;
+  PPathPoints = PFastPathPoints;
+  TPathPoints = TFastPathPoints;
 
   { Render thread }
 
@@ -511,59 +541,39 @@ type
     EvenOdd: Boolean;
   end;
 
-  TEdge = record
-    X0, Y0, X1, Y1: Single;
-  end;
-
-  /// <summary>Receives a flattened or widened Direct2D geometry as polygon edges (every figure closed, curves
-  /// flattened to the tolerance).</summary>
-  TEdgeSink = class(TInterfacedObject, ID2D1SimplifiedGeometrySink)
-  private
-    FTolerance: Single;
-    FStart, FCur: TD2D1Point2F;
-    FOpen: Boolean;
-    procedure Edge(const A, B: TD2D1Point2F);
-    procedure CloseFigure;
-  public
-    Edges: TArray<TEdge>;
-    Count: Integer;
-    EvenOdd: Boolean;
-    MinX, MinY, MaxX, MaxY: Single;
-    constructor Create;
-    /// <summary>Starts a new polygon (keeps the edge buffer).</summary>
-    procedure Reset(const ATolerance: Single; const AEvenOdd: Boolean);
-    procedure SetFillMode(fillMode: D2D1_FILL_MODE); stdcall;
-    procedure SetSegmentFlags(vertexFlags: D2D1_PATH_SEGMENT); stdcall;
-    procedure BeginFigure(startPoint: D2D1_POINT_2F; figureBegin: D2D1_FIGURE_BEGIN); stdcall;
-    procedure AddLines(points: PD2D1Point2F; pointsCount: UINT); stdcall;
-    procedure AddBeziers(beziers: PD2D1BezierSegment; beziersCount: UINT); stdcall;
-    procedure EndFigure(figureEnd: D2D1_FIGURE_END); stdcall;
-    function Close: HResult; stdcall;
-  end;
+  TEdge = TFastEdge;
 
   TPlayer = class
   private
     FGpu: TGpuRenderer;
+{$IFDEF MSWINDOWS}
     FD2D: ID2D1DeviceContext;
+{$ENDIF}
     FCanvas: TFastCanvas;
+{$IFDEF MSWINDOWS}
     FInD2D: Boolean;
     FD2DClip: Integer;
     FD2DPushed: TArray<Boolean>;  // True = layer, False = axis-aligned clip
     FD2DPushCount: Integer;
     FSolid: ID2D1SolidColorBrush;
+{$ENDIF}
     FGlyphs: TFastGlyphCache;
+    /// <summary>The text engine (FastCanvasTextEngine): glyphs and their outlines.</summary>
+    FText: TFastTextEngineClass;
+    /// <summary>The CPU geometry (FastCanvasGeometryEngine).</summary>
+    FGeometry: TFastGeometryEngine;
     /// <summary>Glyph outlines (rotated, sideways and very large text) by face, glyph and size.</summary>
-    FGlyphPaths: TDictionary<UInt64, ID2D1PathGeometry>;
-    FWic: IWICImagingFactory;
-    FPaths: TDictionary<UInt64, ID2D1PathGeometry>;
+    FGlyphPaths: TDictionary<UInt64, IFastGeometry>;
+    FPaths: TDictionary<UInt64, IFastGeometry>;
+{$IFDEF MSWINDOWS}
     FStrokes: TDictionary<UInt64, ID2D1StrokeStyle>;
     FStops: TDictionary<UInt64, ID2D1GradientStopCollection>;
+{$ENDIF}
     FEdges: TDictionary<UInt64, TPathEdges>;
     FEdgeCount: Integer;
     // Reused for every path: the render thread must not allocate per draw (the Delphi memory manager sleeps 10 ms
     // when the main thread holds the same block lock).
-    FSink: TEdgeSink;
-    FSinkRef: ID2D1SimplifiedGeometrySink;
+    FSink: TFastEdgeSink;
     FBanded: TArray<TEdge>;
     FFrame, FEdgeResetFrame: Integer;
     /// <summary>The frame in progress is partial but found no frame to start from: it is not presented.</summary>
@@ -573,9 +583,11 @@ type
     FPersistCount: Integer;
     FTransKeys: array[0..1] of TArray<UInt64>;
     FTransCount: array[0..1] of Integer;
+{$IFDEF MSWINDOWS}
     /// <summary>Gradient brushes by stop collection: points, opacity and transform are set before every use.</summary>
     FLinear: TDictionary<UInt64, ID2D1LinearGradientBrush>;
     FRadial: TDictionary<UInt64, ID2D1RadialGradientBrush>;
+{$ENDIF}
     procedure Run(const H: PCmdHeader);
     procedure SelectTarget(const ACanvas: TFastCanvas);
     procedure SetRegion(const C: PCmdRegion);
@@ -587,20 +599,26 @@ type
     procedure NewFrame;
     procedure EnterD2D;
     procedure LeaveD2D;
+{$IFDEF MSWINDOWS}
     procedure UseD2DClip(const AIndex: Integer);
     procedure PopD2DClips;
+{$ENDIF}
     procedure DefinePath(const C: PCmdPathDef);
     procedure DrawShape(const C: PCmdD2D);
     function StrokeKey(const C: PCmdD2D): UInt64;
+    /// <summary>The stroke of a shape command (TCmdD2D: cap, join, dashes after the record).</summary>
+    function StrokeOf(const C: PCmdD2D): TFastStroke;
     function PathEdges(const C: PCmdD2D; const AScaleMax, AScaleMin: Single; out AEdges: TPathEdges): Boolean;
-    function ShapeGeometry(const C: PCmdD2D; const R: TRectF): ID2D1Geometry;
+    function ShapeGeometry(const C: PCmdD2D; const R: TRectF): IFastGeometry;
     function DrawShapeGpu(const C: PCmdD2D): Boolean;
     procedure DrawText(const C: PCmdText);
     procedure DrawRunOutlines(const C: PCmdText; const ARun: TFastGlyphRun; const AColor: Cardinal);
     procedure DrawColorLayout(const C: PCmdText; const AData: TFastLayoutData);
+{$IFDEF MSWINDOWS}
     procedure DrawTextD2D(const C: PCmdText; const AData: TFastLayoutData);
     function Brush(const C: PCmdD2D): ID2D1Brush;
     function StrokeStyle(const C: PCmdD2D): ID2D1StrokeStyle;
+{$ENDIF}
   public
     constructor Create;
     destructor Destroy; override;
@@ -682,6 +700,7 @@ begin
   Result.Dy := M.m32;
 end;
 
+{$IFDEF MSWINDOWS}
 function D2DMatrix(const A: TGpuAffine): TD2D1Matrix3x2F; inline;
 begin
   Result._11 := A.M11;
@@ -713,6 +732,7 @@ begin
   Result.x := X;
   Result.y := Y;
 end;
+{$ENDIF}
 
 function ResolveBrush(const ABrush: TBrush): TBrush;
 begin
@@ -799,57 +819,6 @@ begin
   end;
 end;
 
-/// <summary>Direct2D path geometry of FMX path points: MoveTo starts a filled figure, CurveTo takes three points
-/// (two control points and the end), Close ends the figure closed; an unfinished figure ends open.</summary>
-function BuildGeometry(const APoints: PPathPoints; const ACount: Integer): ID2D1PathGeometry;
-var
-  Sink: ID2D1GeometrySink;
-  I: Integer;
-  Open: Boolean;
-  B: TD2D1BezierSegment;
-begin
-  if Failed(TFastDevice.D2DFactory.CreatePathGeometry(Result)) or Failed(Result.Open(Sink)) then
-    Exit(nil);
-  Open := False;
-  I := 0;
-  while I < ACount do
-  begin
-    case APoints[I].Kind of
-      TPathPointKind.MoveTo:
-        begin
-          if Open then
-            Sink.EndFigure(D2D1_FIGURE_END_OPEN);
-          Sink.BeginFigure(D2DPoint(APoints[I].Point.X, APoints[I].Point.Y), D2D1_FIGURE_BEGIN_FILLED);
-          Open := True;
-        end;
-      TPathPointKind.LineTo:
-        if Open then
-          Sink.AddLine(D2DPoint(APoints[I].Point.X, APoints[I].Point.Y));
-      TPathPointKind.CurveTo:
-        begin
-          if Open and (I + 2 < ACount) then
-          begin
-            B.point1 := D2DPoint(APoints[I].Point.X, APoints[I].Point.Y);
-            B.point2 := D2DPoint(APoints[I + 1].Point.X, APoints[I + 1].Point.Y);
-            B.point3 := D2DPoint(APoints[I + 2].Point.X, APoints[I + 2].Point.Y);
-            Sink.AddBezier(B);
-          end;
-          Inc(I, 2);
-        end;
-      TPathPointKind.Close:
-        if Open then
-        begin
-          Sink.EndFigure(D2D1_FIGURE_END_CLOSED);
-          Open := False;
-        end;
-    end;
-    Inc(I);
-  end;
-  if Open then
-    Sink.EndFigure(D2D1_FIGURE_END_OPEN);
-  Sink.Close;
-end;
-
 function PathPoints(const APath: TPathData): TArray<TPathPoint>;
 var
   I: Integer;
@@ -862,6 +831,7 @@ end;
 { Recording (the thread that holds the canvas lock of FMX) }
 
 procedure PlayStream(const AData: PByte; const ASize: Integer); forward;
+procedure RegisterTextLayout; forward;
 
 function Queue: TRenderQueue;
 begin
@@ -1131,12 +1101,18 @@ function FastCanvasRenderBusyMs: Double;
 var
   Freq: Int64;
 begin
+{$IFDEF MSWINDOWS}
   if (GQueue = nil) or not QueryPerformanceFrequency(Freq) then
     Exit(0);
+{$ELSE}
+  if GQueue = nil then
+    Exit(0);
+  Freq := TStopwatch.Frequency;
+{$ENDIF}
   Result := GQueue.BusyTicks * 1000 / Freq;
 end;
 
-function FastCanvasRenderThreadId: Cardinal;
+function FastCanvasRenderThreadId: TThreadID;
 begin
   if GQueue = nil then
     Result := 0
@@ -1167,12 +1143,16 @@ end;
 /// <summary>The classes of the graphics API of the device.</summary>
 function Backend: TGpuBackendClass; inline;
 begin
+{$IFDEF MSWINDOWS}
   case TFastDevice.Backend of
     TFastCanvasBackend.D3D12: Result := TGpu12Backend;
     TFastCanvasBackend.Vulkan: Result := TGpuVkBackend;
   else
     Result := TGpu11Backend;
   end;
+{$ELSE}
+  Result := TGpuVkBackend;
+{$ENDIF}
 end;
 
 /// <summary>Removes AItem from a registry of live bitmaps or targets (GBitmaps, GTargets). After the shutdown a
@@ -1254,7 +1234,9 @@ end;
 
 procedure TFastBitmap.ReleaseTexture;
 begin
+{$IFDEF MSWINDOWS}
   FD2D := nil;
+{$ENDIF}
   FreeAndNil(FSurface);
   FreeAndNil(FHdr);
   FHdrValid := False;
@@ -1319,6 +1301,7 @@ begin
   FSurface.Upload(@Pixels[0], FWidth * 4);
 end;
 
+{$IFDEF MSWINDOWS}
 function TFastBitmap.D2DBitmap(const AContext: ID2D1DeviceContext): ID2D1Bitmap1;
 var
   Props: TD2D1BitmapProperties1;
@@ -1331,6 +1314,7 @@ begin
   end;
   Result := FD2D;
 end;
+{$ENDIF}
 
 /// <summary>After a new device: FMX keeps some drawings in bitmaps the GPU drew (results of effects), which are
 /// transparent now. Marks every effect for an update and repaints every form.</summary>
@@ -1450,12 +1434,15 @@ var
   GSystemTextAntialias: Integer = -1;
 
 function FastCanvasSystemTextAntialias: TFastTextAntialias;
+{$IFDEF MSWINDOWS}
 var
   Smoothing: BOOL;
   Kind: UINT;
+{$ENDIF}
 begin
   if GSystemTextAntialias < 0 then
   begin
+{$IFDEF MSWINDOWS}
     // "Smooth edges of screen fonts" (off: GDI draws text aliased), then its kind (standard or ClearType).
     Smoothing := True;
     Kind := 0;
@@ -1465,11 +1452,15 @@ begin
       Result := TFastTextAntialias.ClearType
     else
       Result := TFastTextAntialias.Grayscale;
+{$ELSE}
+    Result := TFastTextAntialias.Grayscale;
+{$ENDIF}
     GSystemTextAntialias := Ord(Result);
   end;
   Result := TFastTextAntialias(GSystemTextAntialias);
 end;
 
+{$IFDEF MSWINDOWS}
 function FastCanvasHdrInfo(const AForm: TCommonCustomForm): TFastHdrInfo;
 var
   H: TWinWindowHandle;
@@ -1488,6 +1479,7 @@ begin
     (Assigned(FastBridge.DrawsWindow) and FastBridge.DrawsWindow(AForm))) and
     (TFastDevice.Backend = TFastCanvasBackend.D3D12) and ((FastCanvasHdr = TFastCanvasHdr.Force) or Result.DisplayHdr);
 end;
+{$ENDIF}
 
 function FastCanvasCaptureWindow(const AForm: TCommonCustomForm; out ACapture: TFastWindowCapture): Boolean;
 var
@@ -1533,12 +1525,16 @@ begin
   Unregister(GTargets, Self);
   ReleaseViews;
   Bitmap := nil;
+  // After the window: its surface is made from the native window.
+  FastReleaseWindow(Handle);
   inherited;
 end;
 
 procedure TFastTarget.ReleaseViews;
 begin
+{$IFDEF MSWINDOWS}
   D2D := nil;
+{$ENDIF}
   Surface := nil;
   FreeAndNil(Window);
 end;
@@ -1547,8 +1543,10 @@ procedure TFastTarget.Prepare(const AWidth, AHeight: Integer; const ATearing: Bo
   const AHdr: Byte; const AComposition: Boolean);
 var
   Output: TGpuOutput;
+{$IFDEF MSWINDOWS}
   Info: TFastHdrInfo;
   Mode: TFastCanvasHdr;
+{$ENDIF}
 begin
   if Gen <> GDeviceGen then
   begin
@@ -1559,7 +1557,9 @@ begin
   if Kind = TTargetKind.Bitmap then
   begin
     Bitmap := ABitmap;
+{$IFDEF MSWINDOWS}
     D2D := nil;
+{$ENDIF}
     if ABitmap <> nil then
     begin
       // The canvas draws over the content: HDR content of a 3D context first into the 8-bit surface.
@@ -1571,12 +1571,15 @@ begin
   end
   else
   begin
+{$IFDEF MSWINDOWS}
     // Direct2D's bitmap over a buffer must go before the buffers are resized or the swap chain is replaced.
     if (AWidth <> Width) or (AHeight <> Height) or (ATearing <> Tearing) then
       D2D := nil;
+{$ENDIF}
     if Window = nil then
-      Window := Backend.CreateWindow(Wnd, Kind = TTargetKind.Layered);
+      Window := Backend.CreateWindow(Handle, Kind = TTargetKind.Layered);
     Output := Default(TGpuOutput);
+{$IFDEF MSWINDOWS}
     Mode := TFastCanvasHdr(AHdr and HdrModeMask);
     if (Mode <> TFastCanvasHdr.Off) and (Kind = TTargetKind.Window) then
     begin
@@ -1586,6 +1589,7 @@ begin
       Output.WhiteScale := Info.WhiteScale;
       Output.Linear := AHdr and HdrLinear <> 0;
     end;
+{$ENDIF}
     Output.Composition := AComposition and (Kind = TTargetKind.Window);
     Surface := Window.Prepare(AWidth, AHeight, ATearing, Output);
     Tearing := ATearing;
@@ -1594,6 +1598,7 @@ begin
   Height := AHeight;
 end;
 
+{$IFDEF MSWINDOWS}
 /// <summary>The Direct2D bitmap over the target, made on first use (only Direct2D drawing needs it: the
 /// D2DText measurement aid, Direct3D 11 only).</summary>
 function TFastTarget.D2DTarget(const AContext: ID2D1DeviceContext; const AOpaque: Boolean): ID2D1Bitmap1;
@@ -1630,6 +1635,7 @@ begin
     end;
   Result := D2D;
 end;
+{$ENDIF}
 
 { TFastCanvasState }
 
@@ -1664,12 +1670,17 @@ end;
 
 constructor TFastCanvas.CreateFromWindow(const AParent: TWindowHandle; const AWidth, AHeight: Single;
   const AQuality: TCanvasQuality);
+{$IFDEF MSWINDOWS}
 var
   H: TWinWindowHandle;
+{$ENDIF}
 begin
   inherited;
   TFastDevice.Ensure;
+  RegisterTextLayout;
   FTarget := TFastTarget.Create;
+  FTarget.Handle := FastWindowOf(AParent);
+{$IFDEF MSWINDOWS}
   H := WindowHandleToPlatform(AParent);
   FTarget.Wnd := H.Wnd;
   if H.Transparency then
@@ -1678,6 +1689,7 @@ begin
     H.CreateBuffer(H.WndClientSize.Width, H.WndClientSize.Height);
   end
   else
+{$ENDIF}
     FTarget.Kind := TTargetKind.Window;
 end;
 
@@ -1685,6 +1697,7 @@ constructor TFastCanvas.CreateFromBitmap(const ABitmap: TBitmap; const AQuality:
 begin
   inherited;
   TFastDevice.Ensure;
+  RegisterTextLayout;
   FTarget := TFastTarget.Create;
   FTarget.Kind := TTargetKind.Bitmap;
 end;
@@ -1771,7 +1784,11 @@ end;
 
 function TFastCanvas.DoBeginScene(AClipRects: PClipRects; AContextHandle: THandle): Boolean;
 var
+{$IFDEF MSWINDOWS}
   H: TWinWindowHandle;
+{$ELSE}
+  Size: TSize;
+{$ENDIF}
   B: TFastBitmap;
   C: PCmdBegin;
   I: Integer;
@@ -1794,11 +1811,25 @@ begin
   end
   else
   begin
+{$IFDEF MSWINDOWS}
     H := WindowHandleToPlatform(Parent);
     FPixelW := H.WndClientSize.Width;
     FPixelH := H.WndClientSize.Height;
     if (FTarget.Kind = TTargetKind.Layered) and ((H.BufferSize.Width <> FPixelW) or (H.BufferSize.Height <> FPixelH)) then
       H.ResizeBuffer(FPixelW, FPixelH);
+{$ELSE}
+    // Android: no surface while the app is in the background; a canvas made before its form had one takes it now
+    // (nothing was recorded for its window yet).
+    if not FastWindowReady(Parent) then
+      Exit(False);
+    if (FTarget.Handle.Window = 0) and (FTarget.Window = nil) then
+      FTarget.Handle := FastWindowOf(Parent);
+    if FTarget.Handle.Window = 0 then
+      Exit(False);
+    Size := FastWindowPixelSize(Parent, FTarget.Handle, Width, Height);
+    FPixelW := Size.Width;
+    FPixelH := Size.Height;
+{$ENDIF}
   end;
   if (FPixelW <= 0) or (FPixelH <= 0) then
     Exit(False);
@@ -1847,12 +1878,13 @@ begin
   C.Composition := (FTarget.Kind = TTargetKind.Window) and
     (FastCanvasPresentation = TFastCanvasPresentation.Composition) and not C.Tearing and
     (TFastDevice.Backend <> TFastCanvasBackend.Vulkan);
+  C.Hdr := 0;
+{$IFDEF MSWINDOWS}
   if FTarget.Kind = TTargetKind.Window then
     if not C.Composition then
       FFlipShown := True
     else if FFlipShown and not FRecreateQueued then
       QueueRecreateWindow;
-  C.Hdr := 0;
   if (FastCanvasHdr <> TFastCanvasHdr.Off) and (FTarget.Kind = TTargetKind.Window) and
     (TFastDevice.Backend = TFastCanvasBackend.D3D12) then
   begin
@@ -1860,6 +1892,7 @@ begin
     if TFastCanvasOption.HdrLinearBlend in FastCanvasOptions then
       C.Hdr := C.Hdr or HdrLinear;
   end;
+{$ENDIF}
   C.Bitmap := B;
   if FRegion <> nil then
   begin
@@ -1874,13 +1907,16 @@ begin
   end;
 end;
 
+{$IFDEF MSWINDOWS}
 type
   TFormAccess = class(TCommonCustomForm);
+{$ENDIF}
 
 /// <summary>The window switched from its own swap chain to a composition one. DWM goes on showing the last frame of
 /// the window's swap chain under the composition visual, through its transparent pixels (neither GDI drawing into
 /// the window, nor resizing, hiding or making it layered for a moment clears it; measured 2026-10-13): the form gets a
 /// new window (as FMX does when BorderStyle changes), whose frames are composition ones from the start.</summary>
+{$IFDEF MSWINDOWS}
 procedure TFastCanvas.QueueRecreateWindow;
 var
   Wnd: HWND;
@@ -1898,6 +1934,7 @@ begin
         TFormAccess(Form).Recreate;
     end);
 end;
+{$ENDIF}
 
 /// <summary>Window scene: FRegion := the rectangles FMX updates, in pixels (whole pixels around them), when they
 /// leave part of the window as it was and the last frame recorded for presenting has the same size on the same
@@ -1942,7 +1979,9 @@ end;
 procedure TFastCanvas.DoEndScene;
 var
   C: PCmdEnd;
+{$IFDEF MSWINDOWS}
   H: TWinWindowHandle;
+{$ENDIF}
   Q: TRenderQueue;
   R: PCmdRegion;
 begin
@@ -1971,6 +2010,7 @@ begin
   C.Bits := nil;
   C.BitsWidth := 0;
   C.BitsHeight := 0;
+{$IFDEF MSWINDOWS}
   if FTarget.Kind = TTargetKind.Layered then
   begin
     H := WindowHandleToPlatform(Parent);
@@ -1978,6 +2018,7 @@ begin
     C.BitsWidth := H.BufferSize.Width;
     C.BitsHeight := H.BufferSize.Height;
   end;
+{$ENDIF}
   inherited;
   Dec(GSceneDepth);
   Q := GQueue;
@@ -2573,13 +2614,15 @@ var
   PathKey, GradKey: UInt64;
   Clip: Cardinal;
   Dashes: TArray<Single>;
+{$IFDEF MSWINDOWS}
   Offsets: TArray<Single>;
   Colors: TArray<TAlphaColor>;
   Stops: TArray<TD2D1GradientStop>;
+  I, N: Integer;
+{$ENDIF}
   C: PCmdD2D;
   Bmp: TFastBitmap;
   Ref: IInterface;
-  I, N: Integer;
   G: TGradient;
   Tail: PByte;
   GpuOk: Boolean;
@@ -2636,6 +2679,8 @@ begin
   if Kind in [TD2DBrushKind.Linear, TD2DBrushKind.Radial] then
   begin
     G := B.Gradient;
+{$IFDEF MSWINDOWS}
+    // The stops of Direct2D's gradient brush (Direct2D draws a shape the GPU renderer cannot).
     SortedStops(G, Offsets, Colors);
     N := Length(Offsets);
     SetLength(Stops, N);
@@ -2651,12 +2696,13 @@ begin
       else
         Stops[I].color := D2DColor(Colors[I]);
     end;
+{$ENDIF}
     GradKey := GradientHash(G);
   end;
   Clip := ClipIndex;
   RecTarget(Self);
-  C := RecAlloc(TCmd.D2DShape, SizeOf(TCmdD2D) + Length(Dashes) * SizeOf(Single) +
-    Length(Stops) * SizeOf(TD2D1GradientStop), Ref);
+  C := RecAlloc(TCmd.D2DShape, SizeOf(TCmdD2D) + Length(Dashes) * SizeOf(Single)
+    {$IFDEF MSWINDOWS} + Length(Stops) * SizeOf(TD2D1GradientStop){$ENDIF}, Ref);
   FillChar(C^, SizeOf(TCmdD2D), 0);
   C.Shape := AShape;
   C.Brush := Kind;
@@ -2679,7 +2725,9 @@ begin
     C.DashOffset := S.DashOffset;
   end;
   C.DashCount := Length(Dashes);
+{$IFDEF MSWINDOWS}
   C.StopCount := Length(Stops);
+{$ENDIF}
   C.GradKey := GradKey;
   if Kind = TD2DBrushKind.Linear then
   begin
@@ -2734,8 +2782,10 @@ begin
     Move(Dashes[0], Tail^, Length(Dashes) * SizeOf(Single));
     Inc(Tail, Length(Dashes) * SizeOf(Single));
   end;
+{$IFDEF MSWINDOWS}
   if Length(Stops) > 0 then
     Move(Stops[0], Tail^, Length(Stops) * SizeOf(TD2D1GradientStop));
+{$ENDIF}
 end;
 
 procedure TFastCanvas.DrawText(const AData: TFastLayoutData; const AOrigin, AMaxSize: TPointF;
@@ -2752,17 +2802,17 @@ begin
   // not from the text. (Until 2026-10-07 they widened the text box: with a tall layout box, e.g. a paragraph of
   // MaxSize.Y = 10000, the bottom overhang is about -10000, the box ended above the text, and the text vanished
   // as soon as it came near the top edge.)
-  Box := TRectF.Create(AOrigin.X - AData.Overhang.left, AOrigin.Y - AData.Overhang.top,
-    AOrigin.X + AData.Metrics.layoutWidth + AData.Overhang.right,
-    AOrigin.Y + AData.Metrics.layoutHeight + AData.Overhang.bottom);
+  Box := TRectF.Create(AOrigin.X - AData.Overhang.Left, AOrigin.Y - AData.Overhang.Top,
+    AOrigin.X + AData.LayoutWidth + AData.Overhang.Right,
+    AOrigin.Y + AData.LayoutHeight + AData.Overhang.Bottom);
   if not Visible(NormRect(Box), 2) then
     Exit;
   Saved := FClip;
   try
     // Ink outside the layout box is clipped to it, as Direct2D does with D2D1_DRAW_TEXT_OPTIONS_CLIP.
     if AData.InkOutside then
-      IntersectDeviceClip(TRectF.Create(AOrigin.X, AOrigin.Y, AOrigin.X + AData.Metrics.layoutWidth,
-        AOrigin.Y + AData.Metrics.layoutHeight), False);
+      IntersectDeviceClip(TRectF.Create(AOrigin.X, AOrigin.Y, AOrigin.X + AData.LayoutWidth,
+        AOrigin.Y + AData.LayoutHeight), False);
     Clip := ClipIndex;
   finally
     FClip := Saved;
@@ -2789,29 +2839,25 @@ end;
 
 function TFastCanvas.PtInPath(const APoint: TPointF; const APath: TPathData): Boolean;
 var
-  Geometry: ID2D1PathGeometry;
+  Engine: TFastGeometryEngine;
+  Geometry: IFastGeometry;
   Points: TArray<TPathPoint>;
-  Contains: BOOL;
-  Identity: TD2D1Matrix3x2F;
 begin
   Result := False;
   if (APath = nil) or APath.IsEmpty or not APath.GetBounds.Contains(APoint) then
     Exit;
   TFastDevice.Ensure;
   Points := PathPoints(APath);
-  Geometry := BuildGeometry(@Points[0], Length(Points));
-  if Geometry = nil then
-    Exit;
-  Identity._11 := 1;
-  Identity._12 := 0;
-  Identity._21 := 0;
-  Identity._22 := 1;
-  Identity._31 := 0;
-  Identity._32 := 0;
-  Contains := False;
-  if Succeeded(Geometry.FillContainsPoint(D2DPoint(APoint.X, APoint.Y), Identity, D2D1_DEFAULT_FLATTENING_TOLERANCE,
-    Contains)) then
-    Result := Contains;
+  // An engine of its own: the render thread's is not for this thread.
+  Engine := FastGeometryEngineClass.Create;
+  try
+    Geometry := Engine.Path(@Points[0], Length(Points));
+    if Geometry <> nil then
+      Result := Engine.Contains(Geometry, APoint);
+    Geometry := nil;
+  finally
+    Engine.Free;
+  end;
 end;
 
 { Bitmaps }
@@ -2918,152 +2964,29 @@ begin
   Result := True;
 end;
 
-{ TEdgeSink }
-
-constructor TEdgeSink.Create;
-begin
-  inherited Create;
-  SetLength(Edges, 1024);
-end;
-
-procedure TEdgeSink.Reset(const ATolerance: Single; const AEvenOdd: Boolean);
-begin
-  FTolerance := ATolerance;
-  FOpen := False;
-  EvenOdd := AEvenOdd;
-  Count := 0;
-  MinX := MaxSingle;
-  MinY := MaxSingle;
-  MaxX := -MaxSingle;
-  MaxY := -MaxSingle;
-end;
-
-procedure TEdgeSink.Edge(const A, B: TD2D1Point2F);
-begin
-  if (A.x = B.x) and (A.y = B.y) then
-    Exit;
-  if Count = Length(Edges) then
-    SetLength(Edges, 2 * Count);
-  Edges[Count].X0 := A.x;
-  Edges[Count].Y0 := A.y;
-  Edges[Count].X1 := B.x;
-  Edges[Count].Y1 := B.y;
-  Inc(Count);
-  // Every edge starts where the previous one ended: B is enough, except for the first point of a figure.
-  if B.x < MinX then
-    MinX := B.x;
-  if B.x > MaxX then
-    MaxX := B.x;
-  if B.y < MinY then
-    MinY := B.y;
-  if B.y > MaxY then
-    MaxY := B.y;
-end;
-
-procedure TEdgeSink.CloseFigure;
-begin
-  if FOpen then
-    Edge(FCur, FStart);
-  FOpen := False;
-end;
-
-procedure TEdgeSink.SetFillMode(fillMode: D2D1_FILL_MODE);
-begin
-  EvenOdd := fillMode = D2D1_FILL_MODE_ALTERNATE;
-end;
-
-procedure TEdgeSink.SetSegmentFlags(vertexFlags: D2D1_PATH_SEGMENT);
-begin
-end;
-
-procedure TEdgeSink.BeginFigure(startPoint: D2D1_POINT_2F; figureBegin: D2D1_FIGURE_BEGIN);
-begin
-  CloseFigure;
-  if startPoint.x < MinX then
-    MinX := startPoint.x;
-  if startPoint.x > MaxX then
-    MaxX := startPoint.x;
-  if startPoint.y < MinY then
-    MinY := startPoint.y;
-  if startPoint.y > MaxY then
-    MaxY := startPoint.y;
-  FStart := startPoint;
-  FCur := startPoint;
-  FOpen := True;
-end;
-
-procedure TEdgeSink.AddLines(points: PD2D1Point2F; pointsCount: UINT);
-var
-  I: Integer;
-begin
-  for I := 0 to Integer(pointsCount) - 1 do
-  begin
-    Edge(FCur, points^);
-    FCur := points^;
-    Inc(points);
-  end;
-end;
-
-procedure TEdgeSink.AddBeziers(beziers: PD2D1BezierSegment; beziersCount: UINT);
-var
-  I, K, N: Integer;
-  P0, P1, P2, P3, Q: TD2D1Point2F;
-  Dd, T, U: Single;
-begin
-  for I := 0 to Integer(beziersCount) - 1 do
-  begin
-    P0 := FCur;
-    P1 := beziers.point1;
-    P2 := beziers.point2;
-    P3 := beziers.point3;
-    // Segments for a cubic from the size of its second differences.
-    Dd := Max(Sqrt(Sqr(P0.x - 2 * P1.x + P2.x) + Sqr(P0.y - 2 * P1.y + P2.y)),
-      Sqrt(Sqr(P1.x - 2 * P2.x + P3.x) + Sqr(P1.y - 2 * P2.y + P3.y)));
-    N := EnsureRange(Ceil(Sqrt(0.75 * Dd / Max(FTolerance, 1E-4))), 1, 256);
-    for K := 1 to N do
-    begin
-      T := K / N;
-      U := 1 - T;
-      Q.x := U * U * U * P0.x + 3 * U * U * T * P1.x + 3 * U * T * T * P2.x + T * T * T * P3.x;
-      Q.y := U * U * U * P0.y + 3 * U * U * T * P1.y + 3 * U * T * T * P2.y + T * T * T * P3.y;
-      Edge(FCur, Q);
-      FCur := Q;
-    end;
-    Inc(beziers);
-  end;
-end;
-
-procedure TEdgeSink.EndFigure(figureEnd: D2D1_FIGURE_END);
-begin
-  // Fills close every figure; widened outlines are closed already.
-  CloseFigure;
-end;
-
-function TEdgeSink.Close: HResult;
-begin
-  CloseFigure;
-  Result := S_OK;
-end;
-
 { TPlayer (render thread) }
 
 constructor TPlayer.Create;
 begin
   inherited Create;
   FGpu := Backend.CreateRenderer;
-
-  FPaths := TDictionary<UInt64, ID2D1PathGeometry>.Create;
+  FText := FastTextEngineClass;
+  FGeometry := FastGeometryEngineClass.Create;
+  FPaths := TDictionary<UInt64, IFastGeometry>.Create;
+{$IFDEF MSWINDOWS}
   FStrokes := TDictionary<UInt64, ID2D1StrokeStyle>.Create;
   FStops := TDictionary<UInt64, ID2D1GradientStopCollection>.Create;
   FLinear := TDictionary<UInt64, ID2D1LinearGradientBrush>.Create;
+{$ENDIF}
   FEdges := TDictionary<UInt64, TPathEdges>.Create;
-  FGlyphPaths := TDictionary<UInt64, ID2D1PathGeometry>.Create;
-  FSink := TEdgeSink.Create;
-  FSinkRef := FSink;
+  FGlyphPaths := TDictionary<UInt64, IFastGeometry>.Create;
+  FSink := TFastEdgeSink.Create;
   FEdgeResetFrame := -100;
   FTransFrame := -1;
+{$IFDEF MSWINDOWS}
   FRadial := TDictionary<UInt64, ID2D1RadialGradientBrush>.Create;
   FD2DClip := -1;
+{$ENDIF}
 end;
 
 destructor TPlayer.Destroy;
@@ -3071,15 +2994,20 @@ begin
   LeaveD2D;
   FGlyphs.Free;
   FPaths.Free;
+{$IFDEF MSWINDOWS}
   FStrokes.Free;
   FStops.Free;
   FLinear.Free;
+{$ENDIF}
   FEdges.Free;
   FGlyphPaths.Free;
-  FSinkRef := nil;
+  FSink.Free;
+  FGeometry.Free;
+{$IFDEF MSWINDOWS}
   FRadial.Free;
   FSolid := nil;
   FD2D := nil;
+{$ENDIF}
   FGpu.Free;
   inherited;
 end;
@@ -3172,7 +3100,7 @@ begin
     if C.Present and not FNoPresent then
     begin
       Res := T.Window.Present;
-      if (Res = DXGI_ERROR_DEVICE_REMOVED) or (Res = DXGI_ERROR_DEVICE_RESET) then
+      if (Res = FastDeviceRemoved) or (Res = FastDeviceReset) then
         MarkDeviceLost;
     end;
     if (C.Bits <> nil) and not FNoPresent then
@@ -3183,6 +3111,7 @@ begin
   end;
 end;
 
+{$IFDEF MSWINDOWS}
 procedure TPlayer.EnterD2D;
 var
   Target: ID2D1Bitmap1;
@@ -3306,41 +3235,36 @@ begin
   end;
   FD2DClip := AIndex;
 end;
+{$ELSE}
+procedure TPlayer.EnterD2D;
+begin
+  // Direct2D draws only with a Direct3D 11 device: what needs it is skipped (EAbort ends the command quietly).
+  Abort;
+end;
+
+procedure TPlayer.LeaveD2D;
+begin
+end;
+{$ENDIF}
 
 procedure TPlayer.DefinePath(const C: PCmdPathDef);
 var
-  G: ID2D1PathGeometry;
+  G: IFastGeometry;
 begin
-  G := BuildGeometry(PPathPoints(PByte(C) + SizeOf(TCmdPathDef)), C.Count);
+  G := FGeometry.Path(PPathPoints(PByte(C) + SizeOf(TCmdPathDef)), C.Count);
   if G <> nil then
     FPaths.AddOrSetValue(C.Key, G);
 end;
 
+{$IFDEF MSWINDOWS}
 function TPlayer.StrokeStyle(const C: PCmdD2D): ID2D1StrokeStyle;
-const
-  Caps: array[0..1] of D2D1_CAP_STYLE = (D2D1_CAP_STYLE_SQUARE, D2D1_CAP_STYLE_ROUND);
-  Joins: array[0..2] of D2D1_LINE_JOIN = (D2D1_LINE_JOIN_MITER, D2D1_LINE_JOIN_ROUND, D2D1_LINE_JOIN_BEVEL);
 var
   Key: UInt64;
-  Props: TD2D1StrokeStyleProperties;
-  Dashes: PSingle;
 begin
   Key := StrokeKey(C);
-  Dashes := PSingle(PByte(C) + SizeOf(TCmdD2D));
   if FStrokes.TryGetValue(Key, Result) then
     Exit;
-  // FMX flat caps are drawn square, as the stock Direct2D canvas does.
-  Props.startCap := Caps[Min(C.Cap, 1)];
-  Props.endCap := Props.startCap;
-  Props.dashCap := Props.startCap;
-  Props.lineJoin := Joins[Min(C.Join, 2)];
-  Props.miterLimit := 10;
-  Props.dashStyle := D2D1_DASH_STYLE(C.Dash);
-  Props.dashOffset := C.DashOffset;
-  if C.DashCount = 0 then
-    Dashes := nil;
-  if Failed(TFastDevice.D2DFactory.CreateStrokeStyle(Props, Dashes, C.DashCount, Result)) then
-    Result := nil;
+  Result := FastD2DStrokeStyle(StrokeOf(C));
   FStrokes.AddOrSetValue(Key, Result);
 end;
 
@@ -3448,6 +3372,8 @@ begin
   end;
 end;
 
+{$ENDIF}
+
 /// <summary>Cap, join and dashes of a stroke (not the width).</summary>
 function TPlayer.StrokeKey(const C: PCmdD2D): UInt64;
 begin
@@ -3456,12 +3382,24 @@ begin
   Result := Fnv(PByte(C) + SizeOf(TCmdD2D), C.DashCount * SizeOf(Single), Result);
 end;
 
+function TPlayer.StrokeOf(const C: PCmdD2D): TFastStroke;
+begin
+  Result.Width := C.StrokeWidth;
+  Result.Cap := C.Cap;
+  Result.Join := C.Join;
+  Result.Dash := C.Dash;
+  Result.DashOffset := C.DashOffset;
+  Result.Dashes := System.PSingle(PByte(C) + SizeOf(TCmdD2D));
+  Result.DashCount := C.DashCount;
+  Result.Key := StrokeKey(C);
+end;
+
 /// <summary>Band layout of polygon edges for the shader (PathCoverage), written to AOut (grown when needed, reused):
 /// (Bands + 1) div 2 headers of two (start, count) pairs each (relative to AOut, as Cardinal bits), then the edges
 /// of every band. A band lists the edges overlapping it widened by 0.75 pixel at the lowest scale of the bucket, so
 /// the pixel square around any point of the band finds all the edges it needs in that band. Returns the number of
 /// entries used.</summary>
-function BandEdges(const ASink: TEdgeSink; const AMinScale: Single; var AOut: TArray<TEdge>;
+function BandEdges(const ASink: TFastEdgeSink; const AMinScale: Single; var AOut: TArray<TEdge>;
   out ABands: Integer): Integer;
 var
   H, InvH, Margin: Single;
@@ -3566,51 +3504,23 @@ begin
     Result := TPointF.Zero;
 end;
 
-/// <summary>Direct2D geometry of a shape command: the recorded path, or a rectangle, rounded rectangle, ellipse or
-/// line (an open figure) with the rectangle R (the command's, relative to ShapeOrigin).</summary>
-function TPlayer.ShapeGeometry(const C: PCmdD2D; const R: TRectF): ID2D1Geometry;
-var
-  Path: ID2D1PathGeometry;
-  Rect: ID2D1RectangleGeometry;
-  Round: ID2D1RoundedRectangleGeometry;
-  Ellipse: ID2D1EllipseGeometry;
-  RR: TD2D1RoundedRect;
-  E: TD2D1Ellipse;
-  Sink: ID2D1GeometrySink;
+/// <summary>Geometry of a shape command: the recorded path, or a rectangle, rounded rectangle, ellipse or line (an
+/// open figure) with the rectangle R (the command's, relative to ShapeOrigin).</summary>
+function TPlayer.ShapeGeometry(const C: PCmdD2D; const R: TRectF): IFastGeometry;
 begin
   Result := nil;
   case C.Shape of
     TD2DShape.Path:
-      if FPaths.TryGetValue(C.PathKey, Path) or FGlyphPaths.TryGetValue(C.PathKey, Path) then
-        Result := Path;
+      if not FPaths.TryGetValue(C.PathKey, Result) and not FGlyphPaths.TryGetValue(C.PathKey, Result) then
+        Result := nil;
     TD2DShape.Rect:
-      if Succeeded(TFastDevice.D2DFactory.CreateRectangleGeometry(D2DRect(R), Rect)) then
-        Result := Rect;
+      Result := FGeometry.Rectangle(R);
     TD2DShape.RoundRect:
-      begin
-        RR.rect := D2DRect(R);
-        RR.radiusX := C.Rx;
-        RR.radiusY := C.Ry;
-        if Succeeded(TFastDevice.D2DFactory.CreateRoundedRectangleGeometry(RR, Round)) then
-          Result := Round;
-      end;
+      Result := FGeometry.RoundedRectangle(R, C.Rx, C.Ry);
     TD2DShape.Ellipse:
-      begin
-        E.point := D2DPoint((R.Left + R.Right) / 2, (R.Top + R.Bottom) / 2);
-        E.radiusX := R.Width / 2;
-        E.radiusY := R.Height / 2;
-        if Succeeded(TFastDevice.D2DFactory.CreateEllipseGeometry(E, Ellipse)) then
-          Result := Ellipse;
-      end;
+      Result := FGeometry.Ellipse(R);
     TD2DShape.Line:
-      if Succeeded(TFastDevice.D2DFactory.CreatePathGeometry(Path)) and Succeeded(Path.Open(Sink)) then
-      begin
-        Sink.BeginFigure(D2DPoint(R.Left, R.Top), D2D1_FIGURE_BEGIN_HOLLOW);
-        Sink.AddLine(D2DPoint(R.Right, R.Bottom));
-        Sink.EndFigure(D2D1_FIGURE_END_OPEN);
-        if Succeeded(Sink.Close) then
-          Result := Path;
-      end;
+      Result := FGeometry.Line(R.TopLeft, R.BottomRight);
   end;
 end;
 
@@ -3622,9 +3532,8 @@ var
   Bucket, BucketMin: Integer;
   Tolerance: Single;
   Key: UInt64;
-  Geometry: ID2D1Geometry;
-  Identity: TD2D1Matrix3x2F;
-  Res: HResult;
+  Geometry: IFastGeometry;
+  Done: Boolean;
   Fill, Shape: Byte;
   Bands, N, I, Start: Integer;
   R: TRectF;
@@ -3672,22 +3581,17 @@ begin
   Geometry := ShapeGeometry(C, R);
   if Geometry = nil then
     Exit(False);
-  Identity._11 := 1;
-  Identity._12 := 0;
-  Identity._21 := 0;
-  Identity._22 := 1;
-  Identity._31 := 0;
-  Identity._32 := 0;
-  // The fill rule is the one the geometry reports (SetFillMode): FMX paths are ALTERNATE (even-odd), glyph outlines
-  // WINDING; Widen reports WINDING for most outlines, but not for the outline of a plain rectangle, whose inner
-  // contour runs the same way as the outer one (even-odd, the default here). Found 2026-10-07: a bitmap-brush
-  // rectangle stroke filled with non-zero came out solid.
+  // The fill rule is the one the engine reports: FMX paths are even-odd, glyph outlines non-zero; Direct2D's Widen
+  // reports WINDING for most outlines, but not for the outline of a plain rectangle, whose inner contour runs the
+  // same way as the outer one (even-odd, the default here). Found 2026-10-07: a bitmap-brush rectangle stroke filled
+  // with non-zero came out solid.
   FSink.Reset(Tolerance, True);
   if C.Fill then
-    Res := Geometry.Simplify(D2D1_GEOMETRY_SIMPLIFICATION_OPTION_LINES, Identity, Tolerance, FSinkRef)
+    Done := FGeometry.Flatten(Geometry, FSink)
   else
-    Res := Geometry.Widen(C.StrokeWidth, StrokeStyle(C), Identity, Tolerance, FSinkRef);
-  if Failed(Res) then
+    Done := FGeometry.Widen(Geometry, StrokeOf(C), FSink);
+  Geometry := nil;
+  if not Done then
     Exit(False);
   AEdges := Default(TPathEdges);
   AEdges.Frame := -1;
@@ -3856,24 +3760,34 @@ begin
 end;
 
 procedure TPlayer.DrawShape(const C: PCmdD2D);
+{$IFDEF MSWINDOWS}
 var
   B: ID2D1Brush;
   S: ID2D1StrokeStyle;
-  Geometry: ID2D1PathGeometry;
+  Path: IFastGeometry;
+  Geometry: ID2D1Geometry;
   RR: TD2D1RoundedRect;
   E: TD2D1Ellipse;
+{$ENDIF}
 begin
   if C.GpuOk and DrawShapeGpu(C) then
     Exit;
   EnterD2D;
+{$IFDEF MSWINDOWS}
   UseD2DClip(C.Clip);
   FD2D.SetTransform(D2DMatrix(C.Matrix));
   B := Brush(C);
   if B = nil then
     Exit;
   Geometry := nil;
-  if (C.Shape = TD2DShape.Path) and not FPaths.TryGetValue(C.PathKey, Geometry) then
-    Exit;
+  if C.Shape = TD2DShape.Path then
+  begin
+    // A path of the Direct2D geometry engine.
+    if FPaths.TryGetValue(C.PathKey, Path) then
+      Geometry := FastD2DGeometry(Path);
+    if Geometry = nil then
+      Exit;
+  end;
   RR.rect := D2DRect(C.R);
   RR.radiusX := C.Rx;
   RR.radiusY := C.Ry;
@@ -3907,8 +3821,10 @@ begin
         FD2D.DrawGeometry(Geometry, B, C.StrokeWidth, S);
     end;
   end;
+{$ENDIF}
 end;
 
+{$IFDEF MSWINDOWS}
 procedure TPlayer.DrawTextD2D(const C: PCmdText; const AData: TFastLayoutData);
 var
   Options: Cardinal;
@@ -3934,11 +3850,12 @@ begin
     Options := Options or D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT;
   AData.Lock;
   try
-    FD2D.DrawTextLayout(D2DPoint(C.Origin.X, C.Origin.Y), AData.Layout, FSolid, Options);
+    FD2D.DrawTextLayout(D2DPoint(C.Origin.X, C.Origin.Y), TFastDWriteLayoutData(AData).Layout, FSolid, Options);
   finally
     AData.Unlock;
   end;
 end;
+{$ENDIF}
 
 procedure GlyphUploadNow(const X, Y, W, H: Integer; const AData: PByte; const APitch: Integer);
 begin
@@ -3952,7 +3869,8 @@ begin
 end;
 
 /// <summary>Glyphs as filled outlines (GPU path coverage), for runs the atlas cannot take: rotated or skewed text,
-/// sideways runs, glyphs larger than MaxAtlasEm pixels. Outlines come from DirectWrite once per face, glyph and size.
+/// sideways runs, glyphs larger than MaxAtlasEm pixels. Outlines come from the text engine once per face, glyph and
+/// size.
 /// </summary>
 procedure TPlayer.DrawRunOutlines(const C: PCmdText; const ARun: TFastGlyphRun; const AColor: Cardinal);
 var
@@ -3960,8 +3878,8 @@ var
   Key: UInt64;
   Face: Pointer;
   Glyph: Word;
-  Geometry: ID2D1PathGeometry;
-  Sink: ID2D1GeometrySink;
+  Geometry: IFastGeometry;
+  Points: TArray<TPathPoint>;
   Cmd: TCmdD2D;
   Lx, Ly: Single;
   M: TGpuAffine;
@@ -3980,14 +3898,9 @@ begin
       if FGlyphPaths.Count >= 4096 then
         FGlyphPaths.Clear;
       Geometry := nil;
-      if Succeeded(TFastDevice.D2DFactory.CreatePathGeometry(Geometry)) and Succeeded(Geometry.Open(Sink)) then
-      begin
-        if Failed(ARun.FontFace.GetGlyphRunOutline(ARun.EmSize, @Glyph, nil, nil, 1, ARun.Sideways, False,
-          IDWriteGeometrySink(Sink))) then
-          Geometry := nil;
-        Sink.Close;
-        Sink := nil;
-      end;
+      // Outlines are filled with the non-zero rule.
+      if FText.GlyphOutline(ARun.FontFace, Glyph, ARun.EmSize, ARun.Sideways, Points) then
+        Geometry := FGeometry.Path(PPathPoints(Pointer(Points)), Length(Points), True);
       FGlyphPaths.Add(Key, Geometry);
     end;
     if Geometry = nil then
@@ -4022,41 +3935,31 @@ begin
   end;
 end;
 
-/// <summary>A layout with color glyphs (emoji): rasterized once on the CPU (a software Direct2D target over a WIC
-/// bitmap, which renders color fonts as Direct2D does), kept with the layout data for this scale and color, and
-/// drawn as an image.</summary>
+/// <summary>A layout with color glyphs (emoji): rasterized once on the CPU by the text engine (DirectWrite: a software
+/// Direct2D target over a WIC bitmap, which renders color fonts as Direct2D does), kept with the layout data for this
+/// scale and color, and drawn as an image.</summary>
 procedure TPlayer.DrawColorLayout(const C: PCmdText; const AData: TFastLayoutData);
 var
   M: TGpuAffine;
   Scale: Single;
   Ink: TRectF;
-  W, H, Y: Integer;
+  W, H: Integer;
   Key: UInt64;
-  Wic: IWICBitmap;
-  Target: ID2D1RenderTarget;
-  Props: TD2D1RenderTargetProperties;
-  Brush: ID2D1SolidColorBrush;
-  Options: Cardinal;
-  Lock: IWICBitmapLock;
-  Size, Stride: Cardinal;
-  Bits: PByte;
   Pixels: TBytes;
   B: TFastBitmap;
   Inst: PGpuInstance;
   Flags: Cardinal;
-  Rect: WICRect;
   Gen: Integer;
-  T: TGpuAffine;
 begin
   M := C.Matrix;
   Scale := Max(Sqrt(Sqr(M.M11) + Sqr(M.M12)), Sqrt(Sqr(M.M21) + Sqr(M.M22)));
   if Scale <= 0 then
     Exit;
   // The ink: the layout box widened by the overhangs (distances from its edges).
-  Ink := TRectF.Create(-AData.Overhang.left, -AData.Overhang.top, AData.Metrics.layoutWidth + AData.Overhang.right,
-    AData.Metrics.layoutHeight + AData.Overhang.bottom);
+  Ink := TRectF.Create(-AData.Overhang.Left, -AData.Overhang.Top, AData.LayoutWidth + AData.Overhang.Right,
+    AData.LayoutHeight + AData.Overhang.Bottom);
   if AData.InkOutside then
-    Ink.Intersect(TRectF.Create(0, 0, AData.Metrics.layoutWidth, AData.Metrics.layoutHeight));
+    Ink.Intersect(TRectF.Create(0, 0, AData.LayoutWidth, AData.LayoutHeight));
   W := Min(Ceil(Ink.Width * Scale) + 2, 4096);
   H := Min(Ceil(Ink.Height * Scale) + 2, 4096);
   if (W <= 2) or (H <= 2) then
@@ -4068,49 +3971,9 @@ begin
     B := TFastBitmap(AData.ColorImage as TObject)
   else
   begin
-    if FWic = nil then
-      CoCreateInstance(CLSID_WICImagingFactory, nil, CLSCTX_INPROC_SERVER, IWICImagingFactory, FWic);
-    if (FWic = nil) or Failed(FWic.CreateBitmap(W, H, @GUID_WICPixelFormat32bppPBGRA, WICBitmapCacheOnLoad, Wic)) then
+    // The layout at this scale, one pixel of margin around the ink.
+    if not AData.RenderColor(Scale, 1 - Ink.Left * Scale, 1 - Ink.Top * Scale, C.Color, W, H, Pixels) then
       Exit;
-    Props := D2D1RenderTargetProperties(D2D1_RENDER_TARGET_TYPE_SOFTWARE,
-      D2D1PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED), 96, 96);
-    if Failed(TFastDevice.D2DFactory.CreateWicBitmapRenderTarget(Wic, Props, Target)) then
-      Exit;
-    Target.CreateSolidColorBrush(D2DColor(C.Color or $FF000000), nil, Brush);
-    Target.SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
-    Target.BeginDraw;
-    Target.Clear(D2DColor(0));
-    T.M11 := Scale;
-    T.M12 := 0;
-    T.M21 := 0;
-    T.M22 := Scale;
-    T.Dx := 1 - Ink.Left * Scale;
-    T.Dy := 1 - Ink.Top * Scale;
-    Target.SetTransform(D2DMatrix(T));
-    Options := D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT;
-    if AData.InkOutside then
-      Options := Options or D2D1_DRAW_TEXT_OPTIONS_CLIP;
-    AData.Lock;
-    try
-      Target.DrawTextLayout(D2DPoint(0, 0), AData.Layout, Brush, Options);
-    finally
-      AData.Unlock;
-    end;
-    if Failed(Target.EndDraw) then
-      Exit;
-    Target := nil;
-    Rect.X := 0;
-    Rect.Y := 0;
-    Rect.Width := W;
-    Rect.Height := H;
-    if Failed(Wic.Lock(Rect, WICBitmapLockRead, Lock)) then
-      Exit;
-    Lock.GetStride(Stride);
-    Lock.GetDataPointer(Size, WICInProcPointer(Bits));
-    SetLength(Pixels, W * 4 * H);
-    for Y := 0 to H - 1 do
-      Move((Bits + Cardinal(Y) * Stride)^, Pixels[Y * W * 4], W * 4);
-    Lock := nil;
     B := TFastBitmap.Create(W, H, @Pixels[0], W * 4);
     if B.FSurface = nil then
     begin
@@ -4167,11 +4030,13 @@ begin
   Data := TFastLayoutData(C.Data);
   Data.EnsureRuns;
   M := C.Matrix;
-  if C.ForceD2D and (TFastDevice.D2DDevice <> nil) then
+{$IFDEF MSWINDOWS}
+  if C.ForceD2D and (TFastDevice.D2DDevice <> nil) and (Data is TFastDWriteLayoutData) then
   begin
     DrawTextD2D(C, Data);
     Exit;
   end;
+{$ENDIF}
   if Data.ColorGlyphs then
   begin
     DrawColorLayout(C, Data);
@@ -4182,7 +4047,7 @@ begin
   Axis := (Abs(M.M12) <= 1E-5) and (Abs(M.M21) <= 1E-5) and (S > 0) and (Abs(M.M22 - S) <= 1E-4 * S);
   LeaveD2D;
   if FGlyphs = nil then
-    FGlyphs := TFastGlyphCache.Create(GpuAtlasSize, GlyphUploadNow, GlyphResetNow);
+    FGlyphs := TFastGlyphCache.Create(FText, GpuAtlasSize, GlyphUploadNow, GlyphResetNow);
   Atlas := 1 / FGlyphs.Size;
   Box := FGpu.Clip(C.Clip).Box;
   Glyphs := TFastGlyphKind.Gray;
@@ -4367,9 +4232,11 @@ begin
       begin
         LeaveD2D;
         FGpu.Flush;
+{$IFDEF MSWINDOWS}
         // Keeps the state of the immediate context, which Direct2D shares.
         if TFastDevice.Context <> nil then
           TFastDevice.Context.ExecuteCommandList(ID3D11CommandList(PCmdList(D).List), True);
+{$ENDIF}
         FGpu.Invalidate;
       end;
   end;
@@ -4417,6 +4284,7 @@ end;
 
 { Bridge (FastCanvas.Bridge): the 3D context on the canvas device }
 
+{$IFDEF MSWINDOWS}
 function BridgeDevice: ID3D11Device;
 begin
   TFastDevice.Ensure;
@@ -4434,6 +4302,8 @@ begin
   TFastDevice.Ensure;
   Result := TFastDevice.FeatureLevel;
 end;
+
+{$ENDIF}
 
 function BridgeHardware: Boolean;
 begin
@@ -4459,6 +4329,7 @@ begin
   Result := (GetCurrentThreadId = MainThreadID) and ((GQueue = nil) or GQueue.Threaded);
 end;
 
+{$IFDEF MSWINDOWS}
 procedure BridgeExecute(const AList: ID3D11CommandList);
 begin
   if AList <> nil then
@@ -4473,6 +4344,8 @@ begin
   else
     Result := nil;
 end;
+
+{$ENDIF}
 
 function BridgeSurface(const ABitmap: TBitmap): IInterface;
 begin
@@ -4554,22 +4427,40 @@ begin
   end;
 end;
 
+var
+  GLayoutRegistered: Boolean;
+
+/// <summary>The text layout class of FastCanvasTextEngine becomes the one of TFastCanvas (once: FMX takes the first
+/// one registered for a canvas class).</summary>
+procedure RegisterTextLayout;
+begin
+  if GLayoutRegistered then
+    Exit;
+  GLayoutRegistered := True;
+  TTextLayoutManager.RegisterTextLayout(FastTextEngineClass.LayoutClass, TFastCanvas);
+end;
+
 procedure InstallFastCanvas;
 begin
   if FastCanvasNoHeapSleep then
     NeverSleepOnMMThreadContention := True;
+  RegisterTextLayout;
   InstallCanvasService(TFastCanvas, ShutdownFastCanvas);
   GInstalled := True;
+{$IFDEF MSWINDOWS}
   FastBridge.Device := BridgeDevice;
   FastBridge.ImmediateContext := BridgeContext;
   FastBridge.FeatureLevel := BridgeLevel;
+{$ENDIF}
   FastBridge.Hardware := BridgeHardware;
   FastBridge.Lock := BridgeLock;
   FastBridge.Unlock := BridgeUnlock;
   FastBridge.Sync := FastCanvasSync;
   FastBridge.Recording := BridgeRecording;
+{$IFDEF MSWINDOWS}
   FastBridge.ExecuteCommandList := BridgeExecute;
   FastBridge.BitmapTexture := BridgeTexture;
+{$ENDIF}
   FastBridge.BitmapSurface := BridgeSurface;
   FastBridge.BitmapWritten := BridgeWritten;
   FastBridge.RunOnRender := BridgeRunOnRender;
@@ -4582,7 +4473,6 @@ initialization
   // unit finalizations.
   GBitmapsLock := TObject.Create;
   FastDrawLayout := DrawLayoutOnCanvas;
-  TTextLayoutManager.RegisterTextLayout(TFastTextLayout, TFastCanvas);
 finalization
   // When installed, the canvas service shuts down after the forms are freed (FastCanvas.Service).
   if not GInstalled then

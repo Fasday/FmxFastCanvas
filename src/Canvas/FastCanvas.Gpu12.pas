@@ -283,7 +283,7 @@ type
     class function CreateSurface(const AWidth, AHeight: Integer; const AData: Pointer;
       const APitch: Integer): TGpuSurface; override;
     class function CreateHdrSurface(const AWidth, AHeight: Integer): TGpuSurface; override;
-    class function CreateWindow(const AWnd: HWND; const ALayered: Boolean): TGpuWindow; override;
+    class function CreateWindow(const AHandle: TGpuWindowHandle; const ALayered: Boolean): TGpuWindow; override;
     class procedure Submit; override;
     class procedure WaitIdle; override;
     class procedure Shutdown; override;
@@ -2083,9 +2083,10 @@ begin
   Result := TGpu12Surface.CreateHdr(AWidth, AHeight);
 end;
 
-class function TGpu12Backend.CreateWindow(const AWnd: HWND; const ALayered: Boolean): TGpuWindow;
+class function TGpu12Backend.CreateWindow(const AHandle: TGpuWindowHandle;
+  const ALayered: Boolean): TGpuWindow;
 begin
-  Result := TGpu12Window.Create(AWnd, ALayered);
+  Result := TGpu12Window.Create(AHandle, ALayered);
 end;
 
 class procedure TGpu12Backend.Submit;

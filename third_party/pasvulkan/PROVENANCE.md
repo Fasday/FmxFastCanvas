@@ -23,6 +23,8 @@ Marked `FastCanvas patch` in the source; the generated declarations are untouche
 - `VK_DEFAULT_LIB_NAME`: `libvulkan.so.1` also for Delphi's `LINUX`.
 - `vkLoadLibrary`, `vkGetProcAddress`, `vkFreeLibrary`: `dlopen`, `dlsym`, `dlclose` of `Posix.Dlfcn` for Delphi on
   POSIX (UTF-8 names; the upstream code returned nil there).
+- `XLIB` is defined on Linux (not Android): the declarations of `VK_KHR_xlib_surface` (FastCanvas presents to X11
+  windows there).
 
 Checked: compiles with dcc64, dccaarm64 and dcclinux64; on Win64 the loader, an instance and the device features
 (dynamic rendering, synchronization2, timeline semaphores, buffer device address, acceleration structures, ray query)

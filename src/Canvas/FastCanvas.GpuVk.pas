@@ -26,13 +26,18 @@ unit FastCanvas.GpuVk;
   no semaphore spans the frame's chunks, the surface keeps the frame (RestoreLast, Capture), and transparent windows
   read it back. FIFO, or IMMEDIATE (else MAILBOX) when tearing is allowed; made again when the window's size or the
   tearing changes, or when Vulkan reports it out of date or suboptimal. Vulkan windows present to the window itself
-  (opaque, as Flip): no DirectComposition. No HDR yet (CreateHdrSurface returns nil, windows are 8-bit). }
+  (opaque, as Flip): no DirectComposition. No HDR yet (CreateHdrSurface returns nil, windows are 8-bit).
+
+  Android and Linux: the surface is made from the native window (ANativeWindow) or the X11 window of the handle. A
+  surface that is lost (Android takes the native window away when the app goes to the background) is dropped and
+  the frame not presented; FMX makes the canvas again for the next native window. On Android the swap chain takes
+  the frame's size unrotated (the compositor rotates it). }
 
 interface
 
 uses
-  Winapi.Windows, System.SysUtils, System.Types, System.Math, System.Generics.Collections, Vulkan,
-  FastCanvas.Device, FastCanvas.DeviceVk, FastCanvas.Gpu;
+  {$IFDEF MSWINDOWS}Winapi.Windows, {$ENDIF}System.SysUtils, System.Types, System.Math, System.Generics.Collections,
+  Vulkan, FastCanvas.Device, FastCanvas.DeviceVk, FastCanvas.Gpu;
 
 type
   TGpuVkSurface = class;
@@ -240,13 +245,17 @@ type
     /// <summary>The surface size the window's extent was checked for.</summary>
     FCheckedW, FCheckedH: Integer;
     procedure ReleaseSwapchain(const ADestroyOld: Boolean);
-    /// <summary>The swap chain for the window's current size; False when there is none (a minimized window).
-    /// </summary>
+    /// <summary>The swap chain for the window's current size; False when there is none (a minimized window, a lost
+    /// surface).</summary>
     function CreateSwapchain: Boolean;
+    /// <summary>The surface of the platform's window; False when the window cannot have one now.</summary>
+    function CreateVkSurface: Boolean;
+    /// <summary>The surface is lost: it goes with its swap chain (made again at the next frame).</summary>
+    procedure DropSurface;
     /// <summary>Destroys the Vulkan objects at once (the context shuts down).</summary>
     procedure Drop(const AContext: TGpuVkContext);
   public
-    constructor Create(const AWnd: HWND; const ALayered: Boolean); override;
+    constructor Create(const AHandle: TGpuWindowHandle; const ALayered: Boolean); override;
     destructor Destroy; override;
     function Prepare(const AWidth, AHeight: Integer; const ATearing: Boolean; const AOutput: TGpuOutput): TGpuSurface;
       override;
@@ -330,7 +339,7 @@ type
     class function CreateRenderer: TGpuRenderer; override;
     class function CreateSurface(const AWidth, AHeight: Integer; const AData: Pointer;
       const APitch: Integer): TGpuSurface; override;
-    class function CreateWindow(const AWnd: HWND; const ALayered: Boolean): TGpuWindow; override;
+    class function CreateWindow(const AHandle: TGpuWindowHandle; const ALayered: Boolean): TGpuWindow; override;
     class procedure Submit; override;
     class procedure WaitIdle; override;
     class procedure Shutdown; override;
@@ -343,8 +352,13 @@ function GpuVkCurrent: TGpuVkContext;
 
 implementation
 
+{$IFDEF MSWINDOWS}
 uses
   Winapi.DxgiType;
+{$ELSE}
+const
+  DXGI_ERROR_DEVICE_REMOVED = FastDeviceRemoved;
+{$ENDIF}
 
 {$I FastCanvas.VkShaders.inc}
 
@@ -1470,7 +1484,7 @@ end;
 
 { TGpuVkWindow }
 
-constructor TGpuVkWindow.Create(const AWnd: HWND; const ALayered: Boolean);
+constructor TGpuVkWindow.Create(const AHandle: TGpuWindowHandle; const ALayered: Boolean);
 begin
   inherited;
   TFastDevice.Lock;
@@ -1550,12 +1564,69 @@ begin
   FVkSurface := VK_NULL_HANDLE;
 end;
 
+function TGpuVkWindow.CreateVkSurface: Boolean;
+var
+  C: TGpuVkContext;
+  F: TFastVulkan;
+{$IF Defined(MSWINDOWS)}
+  SurfaceInfo: TVkWin32SurfaceCreateInfoKHR;
+{$ELSEIF Defined(ANDROID)}
+  SurfaceInfo: TVkAndroidSurfaceCreateInfoKHR;
+{$ELSE}
+  SurfaceInfo: TVkXlibSurfaceCreateInfoKHR;
+{$ENDIF}
+  Supported: TVkBool32;
+begin
+  C := GpuVk;
+  F := C.Fast;
+{$IF Defined(MSWINDOWS)}
+  FillChar(SurfaceInfo, SizeOf(SurfaceInfo), 0);
+  SurfaceInfo.sType := VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR;
+  SurfaceInfo.hinstance_ := TVkHINSTANCE(GetWindowLongPtr(FWnd, GWLP_HINSTANCE));
+  SurfaceInfo.hwnd_ := FWnd;
+  C.Check(F.InstanceVk.CreateWin32SurfaceKHR(F.Instance, @SurfaceInfo, nil, @FVkSurface), 'vkCreateWin32SurfaceKHR');
+{$ELSEIF Defined(ANDROID)}
+  // No native window: the app has no surface now (FMX makes the canvas again when it gets one).
+  if FHandle.Window = 0 then
+    Exit(False);
+  FillChar(SurfaceInfo, SizeOf(SurfaceInfo), 0);
+  SurfaceInfo.sType := VK_STRUCTURE_TYPE_ANDROID_SURFACE_CREATE_INFO_KHR;
+  SurfaceInfo.window := Pointer(FHandle.Window);
+  if F.Track(F.InstanceVk.CreateAndroidSurfaceKHR(F.Instance, @SurfaceInfo, nil, @FVkSurface)) <> VK_SUCCESS then
+  begin
+    FVkSurface := VK_NULL_HANDLE;
+    Exit(False);
+  end;
+{$ELSE}
+  if (FHandle.Window = 0) or (FHandle.Display = nil) then
+    Exit(False);
+  FillChar(SurfaceInfo, SizeOf(SurfaceInfo), 0);
+  SurfaceInfo.sType := VK_STRUCTURE_TYPE_XLIB_SURFACE_CREATE_INFO_KHR;
+  SurfaceInfo.dpy := FHandle.Display;
+  SurfaceInfo.window := FHandle.Window;
+  C.Check(F.InstanceVk.CreateXlibSurfaceKHR(F.Instance, @SurfaceInfo, nil, @FVkSurface), 'vkCreateXlibSurfaceKHR');
+{$ENDIF}
+  Supported := VK_FALSE;
+  F.InstanceVk.GetPhysicalDeviceSurfaceSupportKHR(F.Physical, F.QueueFamily, FVkSurface, @Supported);
+  if Supported = VK_FALSE then
+    raise EFastDevice.Create('FastCanvas: the Vulkan queue cannot present to the window');
+  Result := True;
+end;
+
+procedure TGpuVkWindow.DropSurface;
+begin
+  ReleaseSwapchain(True);
+  if FVkSurface <> VK_NULL_HANDLE then
+    GCtx.Fast.InstanceVk.DestroySurfaceKHR(GCtx.Fast.Instance, FVkSurface, nil);
+  FVkSurface := VK_NULL_HANDLE;
+  FStale := True;
+end;
+
 function TGpuVkWindow.CreateSwapchain: Boolean;
 var
   C: TGpuVkContext;
   F: TFastVulkan;
-  SurfaceInfo: TVkWin32SurfaceCreateInfoKHR;
-  Supported: TVkBool32;
+  Res: TVkResult;
   Caps: TVkSurfaceCapabilitiesKHR;
   Count, I: Cardinal;
   Formats: TArray<TVkSurfaceFormatKHR>;
@@ -1591,21 +1662,21 @@ begin
   Result := False;
   C := GpuVk;
   F := C.Fast;
-  if FVkSurface = VK_NULL_HANDLE then
+  if (FVkSurface = VK_NULL_HANDLE) and not CreateVkSurface then
+    Exit;
+  Res := F.Track(F.InstanceVk.GetPhysicalDeviceSurfaceCapabilitiesKHR(F.Physical, FVkSurface, @Caps));
+  if Res = VK_ERROR_SURFACE_LOST_KHR then
   begin
-    FillChar(SurfaceInfo, SizeOf(SurfaceInfo), 0);
-    SurfaceInfo.sType := VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR;
-    SurfaceInfo.hinstance_ := TVkHINSTANCE(GetWindowLongPtr(FWnd, GWLP_HINSTANCE));
-    SurfaceInfo.hwnd_ := FWnd;
-    C.Check(F.InstanceVk.CreateWin32SurfaceKHR(F.Instance, @SurfaceInfo, nil, @FVkSurface), 'vkCreateWin32SurfaceKHR');
-    Supported := VK_FALSE;
-    F.InstanceVk.GetPhysicalDeviceSurfaceSupportKHR(F.Physical, F.QueueFamily, FVkSurface, @Supported);
-    if Supported = VK_FALSE then
-      raise EFastDevice.Create('FastCanvas: the Vulkan queue cannot present to the window');
+    DropSurface;
+    Exit;
   end;
-  C.Check(F.InstanceVk.GetPhysicalDeviceSurfaceCapabilitiesKHR(F.Physical, FVkSurface, @Caps),
-    'vkGetPhysicalDeviceSurfaceCapabilitiesKHR');
+  C.Check(Res, 'vkGetPhysicalDeviceSurfaceCapabilitiesKHR');
   Extent := Caps.currentExtent;
+{$IFDEF ANDROID}
+  // The extent there is the one of the display's natural orientation: the frame's size instead (the compositor
+  // rotates the images, preTransform below).
+  Extent.width := High(Cardinal);
+{$ENDIF}
   if Extent.width = High(Cardinal) then
   begin
     // The surface takes the swap chain's size: the frame's.
@@ -1662,6 +1733,11 @@ begin
   Info.imageUsage := Ord(VK_IMAGE_USAGE_TRANSFER_DST_BIT);
   Info.imageSharingMode := VK_SHARING_MODE_EXCLUSIVE;
   Info.preTransform := Caps.currentTransform;
+{$IFDEF ANDROID}
+  // Unrotated images of the frame's size (the extent above): the compositor rotates them.
+  if (Caps.supportedTransforms and Ord(VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR)) <> 0 then
+    Info.preTransform := VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
+{$ENDIF}
   if (Caps.supportedCompositeAlpha and Ord(VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR)) <> 0 then
     Info.compositeAlpha := VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR
   else if (Caps.supportedCompositeAlpha and Ord(VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR)) <> 0 then
@@ -1672,7 +1748,14 @@ begin
   Info.clipped := VK_TRUE;
   Info.oldSwapchain := Old;
   Chain := VK_NULL_HANDLE;
-  C.Check(C.Vk.CreateSwapchainKHR(C.Device, @Info, nil, @Chain), 'vkCreateSwapchainKHR');
+  Res := F.Track(C.Vk.CreateSwapchainKHR(C.Device, @Info, nil, @Chain));
+  if (Res = VK_ERROR_SURFACE_LOST_KHR) or (Res = VK_ERROR_NATIVE_WINDOW_IN_USE_KHR) then
+  begin
+    // The old swap chain is retired all the same: it goes with the surface.
+    DropSurface;
+    Exit;
+  end;
+  C.Check(Res, 'vkCreateSwapchainKHR');
   if Old <> VK_NULL_HANDLE then
     C.Vk.DestroySwapchainKHR(C.Device, Old, nil);
   FSwapchain := Chain;
@@ -2546,9 +2629,9 @@ begin
   Result := TGpuVkSurface.Create(AWidth, AHeight, AData, APitch);
 end;
 
-class function TGpuVkBackend.CreateWindow(const AWnd: HWND; const ALayered: Boolean): TGpuWindow;
+class function TGpuVkBackend.CreateWindow(const AHandle: TGpuWindowHandle; const ALayered: Boolean): TGpuWindow;
 begin
-  Result := TGpuVkWindow.Create(AWnd, ALayered);
+  Result := TGpuVkWindow.Create(AHandle, ALayered);
 end;
 
 class procedure TGpuVkBackend.Submit;
