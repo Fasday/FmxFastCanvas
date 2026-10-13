@@ -1374,7 +1374,7 @@ begin
     if GQueue <> nil then
       GQueue.ClearError;
     // As the stock Direct2D canvas does: FMX textures and shaders of fragile 3D contexts let go of the device.
-    TMessageManager.DefaultManager.SendMessage(nil, TContextLostMessage.Create, False);
+    TMessageManager.DefaultManager.SendMessage(nil, TContextLostMessage.Create, True);
     if Assigned(FastBridge.DeviceLost) then
       FastBridge.DeviceLost();
     TFastDevice.Lock;
@@ -1425,7 +1425,7 @@ begin
     TCanvas.Unlock;
   end;
   // Textures of 3D contexts come back, then the contexts make their buffers.
-  TMessageManager.DefaultManager.SendMessage(nil, TContextResetMessage.Create, False);
+  TMessageManager.DefaultManager.SendMessage(nil, TContextResetMessage.Create, True);
   if Assigned(FastBridge.DeviceReset) then
     FastBridge.DeviceReset();
   if TThread.CurrentThread.ThreadID = MainThreadID then

@@ -4,9 +4,10 @@ unit FastCanvas.DeviceVk;
   and VK_KHR_win32_surface), the physical device (a discrete graphics card first, with a graphics queue family that
   presents to windows), the logical device with dynamic rendering, synchronization2 and timeline semaphores, its
   graphics queue and the device command table, and memory type lookup. Buffer device address, acceleration
-  structures and ray query are enabled too where the device has them (the 3D context of a later stage needs them).
+  structures and ray query are enabled too where the device has them (the 3D context needs them), and
+  VK_KHR_present_mode_fifo_latest_ready.
 
-  Memory: blocks of VkDeviceMemory per memory type (64 MB device-local, 16 MB host-visible), buffers and images in
+  Memory: blocks of VkDeviceMemory per memory type (32 MB device-local, 8 MB host-visible), buffers and images in
   blocks of their own (no bufferImageGranularity between them), suballocated first fit with merged free ranges;
   resources larger than half a block get memory of their own. Host-visible blocks stay mapped. An empty block is
   freed unless it is the last one of its kind. Thread-safe (the 3D context makes textures on the main thread while
@@ -18,7 +19,8 @@ unit FastCanvas.DeviceVk;
 
   The loader is held until Destroy: the unit Vulkan frees its handle in its finalization, which runs before FMX frees
   the forms and the canvas shuts the device down (FastCanvas.Service). Thread use as with Direct3D 12: the device is
-  free-threaded, the queue and command recording are used with the device lock held (TFastDevice.Lock). }
+  free-threaded, command recording is done with the device lock held (TFastDevice.Lock); submissions and presents
+  take the queue lock (LockQueue), which the threads presenting windows take without the device lock. }
 
 interface
 
@@ -44,10 +46,11 @@ type
 
   TFastVulkan = class
   private
-    FAllocLock: TRTLCriticalSection;
+    FAllocLock, FQueueLock: TRTLCriticalSection;
     /// <summary>Per memory type, for optimal images (False) and buffers (True).</summary>
     FPools: array[0..VK_MAX_MEMORY_TYPES - 1, Boolean] of TList<TObject>;
     FMemoryObjects, FPeakMemoryObjects, FAllocations, FPeakAllocations: Integer;
+    FMemoryBytes, FPeakMemoryBytes, FAllocatedBytes, FPeakAllocatedBytes: UInt64;
     FLibrary: HMODULE;
     FInstanceVk: TVulkan;
     FVk: TVulkan;
@@ -63,6 +66,7 @@ type
     FLost: Boolean;
     FDualSource: Boolean;
     FBufferDeviceAddress, FAccelerationStructure, FRayQuery: Boolean;
+    FFifoLatestReady: Boolean;
     procedure CreateInstance;
     procedure PickDevice(const APreferSoftware: Boolean);
     procedure CreateDevice;
@@ -70,7 +74,7 @@ type
     /// mapped when host-visible; VK_NULL_HANDLE when the device has no more memory.</summary>
     function NewMemory(const AType: Integer; const ASize: UInt64; const ADeviceAddress: Boolean;
       out ACpu: PByte): TVkDeviceMemory;
-    procedure FreeMemory(const AMemory: TVkDeviceMemory);
+    procedure FreeMemory(const AMemory: TVkDeviceMemory; const ASize: UInt64);
     procedure WriteStats;
   public
     /// <summary>Raises EFastVulkan when there is no Vulkan 1.3 device that can present to windows.
@@ -108,7 +112,12 @@ type
     property Physical: TVkPhysicalDevice read FPhysical;
     property Properties: TVkPhysicalDeviceProperties read FProperties;
     property Device: TVkDevice read FDevice;
-    /// <summary>The graphics queue, which also presents; used with the device lock held.</summary>
+    /// <summary>Submissions to the queue and presents are made between LockQueue and UnlockQueue (the presenting
+    /// threads of windows use it without the device lock); never held while waiting for the GPU or the display.
+    /// </summary>
+    procedure LockQueue; inline;
+    procedure UnlockQueue; inline;
+    /// <summary>The graphics queue, which also presents.</summary>
     property Queue: TVkQueue read FQueue;
     property QueueFamily: Cardinal read FQueueFamily;
     /// <summary>The validation layer is on (FASTCANVAS_VK_DEBUG).</summary>
@@ -121,6 +130,9 @@ type
     property BufferDeviceAddress: Boolean read FBufferDeviceAddress;
     property AccelerationStructure: Boolean read FAccelerationStructure;
     property RayQuery: Boolean read FRayQuery;
+    /// <summary>VK_PRESENT_MODE_FIFO_LATEST_READY_KHR is enabled (a swap chain may use it where the surface offers
+    /// it).</summary>
+    property FifoLatestReady: Boolean read FFifoLatestReady;
   end;
 
 implementation
@@ -134,8 +146,8 @@ const
   ValidationLayer: AnsiString = 'VK_LAYER_KHRONOS_validation';
   /// <summary>Messages logged per process at most.</summary>
   MaxMessages = 2000;
-  DeviceBlockSize = 64 * 1024 * 1024;
-  HostBlockSize = 16 * 1024 * 1024;
+  DeviceBlockSize = 32 * 1024 * 1024;
+  HostBlockSize = 8 * 1024 * 1024;
 
 type
   TFastVkRange = record
@@ -314,6 +326,7 @@ constructor TFastVulkan.Create(const APreferSoftware: Boolean);
 begin
   inherited Create;
   InitializeCriticalSection(FAllocLock);
+  InitializeCriticalSection(FQueueLock);
   FDebug := GetEnvironmentVariable(DebugVariable) <> '';
   CreateInstance;
   PickDevice(APreferSoftware);
@@ -336,7 +349,7 @@ begin
       begin
         for O in FPools[T, B] do
         begin
-          FreeMemory(TFastVkBlock(O).Memory);
+          FreeMemory(TFastVkBlock(O).Memory, TFastVkBlock(O).Size);
           O.Free;
         end;
         FreeAndNil(FPools[T, B]);
@@ -352,7 +365,18 @@ begin
   if FLibrary <> 0 then
     FreeLibrary(FLibrary);
   DeleteCriticalSection(FAllocLock);
+  DeleteCriticalSection(FQueueLock);
   inherited;
+end;
+
+procedure TFastVulkan.LockQueue;
+begin
+  EnterCriticalSection(FQueueLock);
+end;
+
+procedure TFastVulkan.UnlockQueue;
+begin
+  LeaveCriticalSection(FQueueLock);
 end;
 
 procedure TFastVulkan.WriteStats;
@@ -370,9 +394,9 @@ begin
     else
       Rewrite(F);
     try
-      Writeln(F, Format('memory objects: %d at most, %d left; allocations: %d at most, %d left (limit %u)',
-        [FPeakMemoryObjects, FMemoryObjects, FPeakAllocations, FAllocations,
-        FProperties.limits.maxMemoryAllocationCount]));
+      Writeln(F, Format('memory objects: %d at most (%d MB), %d left; allocations: %d at most (%d MB), %d left ' +
+        '(limit %u)', [FPeakMemoryObjects, FPeakMemoryBytes shr 20, FMemoryObjects, FPeakAllocations,
+        FPeakAllocatedBytes shr 20, FAllocations, FProperties.limits.maxMemoryAllocationCount]));
     finally
       CloseFile(F);
     end;
@@ -556,9 +580,11 @@ var
   F12: TVkPhysicalDeviceVulkan12Features;
   AccelFeatures: TVkPhysicalDeviceAccelerationStructureFeaturesKHR;
   RayFeatures: TVkPhysicalDeviceRayQueryFeaturesKHR;
+  FifoFeatures: TVkPhysicalDevicePresentModeFifoLatestReadyFeaturesKHR;
   Cmds: TVulkanCommands;
   Res: TVkResult;
   Ray: Boolean;
+  FifoName: PAnsiChar;
 begin
   Count := 0;
   FInstanceVk.EnumerateDeviceExtensionProperties(FPhysical, nil, @Count, nil);
@@ -568,8 +594,15 @@ begin
   Names := [PAnsiChar(VK_KHR_SWAPCHAIN_EXTENSION_NAME)];
   Ray := HasExtension(Exts, VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME) and
     HasExtension(Exts, VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME);
+  FifoName := nil;
+  if HasExtension(Exts, VK_KHR_PRESENT_MODE_FIFO_LATEST_READY_EXTENSION_NAME) then
+    FifoName := VK_KHR_PRESENT_MODE_FIFO_LATEST_READY_EXTENSION_NAME
+  else if HasExtension(Exts, VK_EXT_PRESENT_MODE_FIFO_LATEST_READY_EXTENSION_NAME) then
+    FifoName := VK_EXT_PRESENT_MODE_FIFO_LATEST_READY_EXTENSION_NAME;
 
   // What the device has of the optional features.
+  FillChar(FifoFeatures, SizeOf(FifoFeatures), 0);
+  FifoFeatures.sType := VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_MODE_FIFO_LATEST_READY_FEATURES_KHR;
   FillChar(RayFeatures, SizeOf(RayFeatures), 0);
   RayFeatures.sType := VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR;
   FillChar(AccelFeatures, SizeOf(AccelFeatures), 0);
@@ -585,7 +618,13 @@ begin
   FillChar(Features, SizeOf(Features), 0);
   Features.sType := VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
   Features.pNext := @F13;
+  if FifoName <> nil then
+  begin
+    FifoFeatures.pNext := @F13;
+    Features.pNext := @FifoFeatures;
+  end;
   FInstanceVk.GetPhysicalDeviceFeatures2(FPhysical, @Features);
+  FFifoLatestReady := (FifoName <> nil) and (FifoFeatures.presentModeFifoLatestReady <> VK_FALSE);
   FBufferDeviceAddress := F12.bufferDeviceAddress <> VK_FALSE;
   FAccelerationStructure := Ray and FBufferDeviceAddress and (AccelFeatures.accelerationStructure <> VK_FALSE);
   FRayQuery := FAccelerationStructure and HasExtension(Exts, VK_KHR_RAY_QUERY_EXTENSION_NAME) and
@@ -623,6 +662,15 @@ begin
   Features.pNext := @F13;
   if FDualSource then
     Features.features.dualSrcBlend := VK_TRUE;
+  if FFifoLatestReady then
+  begin
+    FillChar(FifoFeatures, SizeOf(FifoFeatures), 0);
+    FifoFeatures.sType := VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_MODE_FIFO_LATEST_READY_FEATURES_KHR;
+    FifoFeatures.presentModeFifoLatestReady := VK_TRUE;
+    FifoFeatures.pNext := @F13;
+    Features.pNext := @FifoFeatures;
+    Names := Names + [FifoName];
+  end;
 
   Priority := 1;
   FillChar(Queue, SizeOf(Queue), 0);
@@ -712,15 +760,19 @@ begin
   Inc(FMemoryObjects);
   if FMemoryObjects > FPeakMemoryObjects then
     FPeakMemoryObjects := FMemoryObjects;
+  Inc(FMemoryBytes, ASize);
+  if FMemoryBytes > FPeakMemoryBytes then
+    FPeakMemoryBytes := FMemoryBytes;
 end;
 
-procedure TFastVulkan.FreeMemory(const AMemory: TVkDeviceMemory);
+procedure TFastVulkan.FreeMemory(const AMemory: TVkDeviceMemory; const ASize: UInt64);
 begin
   if AMemory = VK_NULL_HANDLE then
     Exit;
   // Freeing memory unmaps it.
   FVk.FreeMemory(FDevice, AMemory, nil);
   Dec(FMemoryObjects);
+  Dec(FMemoryBytes, ASize);
 end;
 
 function TFastVulkan.Allocate(const ARequirements: TVkMemoryRequirements; const ARequired,
@@ -817,6 +869,9 @@ begin
         end;
       end;
       Inc(FAllocations);
+      Inc(FAllocatedBytes, Result.Size);
+      if FAllocatedBytes > FPeakAllocatedBytes then
+        FPeakAllocatedBytes := FAllocatedBytes;
       if FAllocations > FPeakAllocations then
         FPeakAllocations := FAllocations;
     except
@@ -839,9 +894,10 @@ begin
   EnterCriticalSection(FAllocLock);
   try
     Dec(FAllocations);
+    Dec(FAllocatedBytes, AAllocation.Size);
     B := TFastVkBlock(AAllocation.FBlock);
     if B = nil then
-      FreeMemory(AAllocation.Memory)
+      FreeMemory(AAllocation.Memory, AAllocation.Size)
     else
     begin
       B.Give(AAllocation.Offset, AAllocation.Size);
@@ -857,7 +913,7 @@ begin
         if Empty > 1 then
         begin
           Pool.Remove(B);
-          FreeMemory(B.Memory);
+          FreeMemory(B.Memory, B.Size);
           B.Free;
         end;
       end;

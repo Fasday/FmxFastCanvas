@@ -86,6 +86,10 @@ var
   BenchForm: TBenchForm;
   RunMutex: THandle;
 begin
+  {$IFDEF LEAKCHECK}
+  // A build with -Define LEAKCHECK reports leaked memory when the process ends.
+  ReportMemoryLeaksOnShutdown := True;
+  {$ENDIF}
   try
     BenchConfig := ParseCommandLine;
   except
