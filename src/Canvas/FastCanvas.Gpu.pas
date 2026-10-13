@@ -38,6 +38,11 @@ const
   GpuCapShift = 10;   // 0 flat, 1 square, 2 round
   GpuCornerShift = 12; // 1 top-left, 2 top-right, 4 bottom-left, 8 bottom-right
   GpuDashed = $10000;  // lines: Paint is a dash pattern
+  /// <summary>Glyphs: ClearType, three coverage texels per pixel (R, G, B) in the atlas; drawn with dual-source
+  /// blending (TGpuRenderer.SetDualBlend).</summary>
+  GpuClearType = $20000;
+  /// <summary>Paths: hard edges (aliased text drawn as outlines).</summary>
+  GpuAliased = $40000;
 
   GpuMaxClips = 16384;
   GpuMaxPaints = 4096;
@@ -135,7 +140,9 @@ type
     /// RegionFirst..RegionFirst + RegionCount - 1, and pixels outside all of them are left alone (0: no region).
     /// </summary>
     RegionFirst, RegionCount: Cardinal;
-    Pad: array[0..1] of Cardinal;
+    /// <summary>ClearType text: the enhanced contrast and the ClearType level of the system rendering parameters.
+    /// </summary>
+    ClearTypeContrast, ClearTypeLevel: Single;
   end;
 
   /// <summary>A premultiplied BGRA texture of the device, image source and render target: the content of a TBitmap
@@ -258,8 +265,10 @@ type
     FWidth, FHeight: Integer;
     FAliased: Boolean;
     FFrameDirty: Boolean;
-    FTextContrast: Single;
+    FTextContrast, FClearTypeContrast, FClearTypeLevel: Single;
     FGammaRatios: array[0..3] of Single;
+    /// <summary>The draws use dual-source blending (ClearType text in the frame of a window).</summary>
+    FDual: Boolean;
     FDrawCalls: Integer;
     FRegionFirst, FRegionCount: Cardinal;
     // Shader data of the changed clip entries (reused: the render thread must not allocate per draw).
@@ -290,6 +299,10 @@ type
     /// <summary>The rectangles a partial window frame updates: the boxes of clip entries AFirst..AFirst + ACount - 1
     /// (set before); ACount = 0: the whole target. Draws what is pending first.</summary>
     procedure SetRegion(const AFirst, ACount: Cardinal);
+    /// <summary>The following draws blend with a second color output of the pixel shader: per-channel weights,
+    /// which ClearType glyphs (GpuClearType) need and which equal the alpha for everything else. Draws what is
+    /// pending first when it changes.</summary>
+    procedure SetDualBlend(const AValue: Boolean); virtual;
     procedure Add(AData: PGpuInstance; const ACount: Integer);
     /// <summary>One more pending instance without a texture, to be filled by the caller (valid until the next Add,
     /// Append or Flush).</summary>
@@ -581,9 +594,13 @@ var
 begin
   Gamma := 1.8;
   FTextContrast := 1;
+  FClearTypeContrast := 1;
+  FClearTypeLevel := 1;
   if (TFastDevice.DWrite <> nil) and Succeeded(TFastDevice.DWrite.CreateRenderingParams(Params)) and (Params <> nil) then
   begin
     Gamma := Params.GetGamma;
+    FClearTypeContrast := Params.GetEnhancedContrast;
+    FClearTypeLevel := EnsureRange(Params.GetClearTypeLevel, 0, 1);
     if Supports(Params, IDWriteRenderingParams1, Params1) then
       FTextContrast := Params1.GetGrayscaleEnhancedContrast
     else
@@ -605,8 +622,16 @@ begin
   Move(FGammaRatios, Result.Gamma, SizeOf(Result.Gamma));
   Result.RegionFirst := FRegionFirst;
   Result.RegionCount := FRegionCount;
-  Result.Pad[0] := 0;
-  Result.Pad[1] := 0;
+  Result.ClearTypeContrast := FClearTypeContrast;
+  Result.ClearTypeLevel := FClearTypeLevel;
+end;
+
+procedure TGpuRenderer.SetDualBlend(const AValue: Boolean);
+begin
+  if AValue = FDual then
+    Exit;
+  Flush;
+  FDual := AValue;
 end;
 
 procedure TGpuRenderer.SetRegion(const AFirst, ACount: Cardinal);

@@ -238,6 +238,8 @@ type
     FPsoBlend, FPsoCopy: ID3D12PipelineState;
     /// <summary>RGBA16F targets (HDR windows), made on first use: blend, copy; the same in linear light.</summary>
     FPso16: array[0..3] of ID3D12PipelineState;
+    /// <summary>Dual-source blending (ClearType text), made on first use: 8-bit and RGBA16F targets.</summary>
+    FPsoDual, FPso16Dual: ID3D12PipelineState;
     FBoundPso: Pointer;
     FClips, FPaints, FEdges, FAtlas, FRamps: TGpu12Table;
     // CPU descriptors: 0 atlas, 1 ramps, 2 clips, 3 paints, 4 edges (t8..t12, copied together), 5 empty texture.
@@ -251,7 +253,8 @@ type
     FTargetBound: Boolean;
     FCopy: Boolean;
     procedure CreatePipeline;
-    function NewPso(const AFormat: TDXGI_FORMAT; const ABlend, ALinear: Boolean): ID3D12PipelineState;
+    function NewPso(const AFormat: TDXGI_FORMAT; const ABlend, ALinear: Boolean;
+      const ADual: Boolean = False): ID3D12PipelineState;
     /// <summary>The pipeline state for the target and the kind of draw.</summary>
     function TargetPso: ID3D12PipelineState;
     function NewBuffer(const ABytes: Integer): TGpu12Table;
@@ -1593,6 +1596,8 @@ begin
     C.Retire(FPsoCopy);
     for I := 0 to High(FPso16) do
       C.Retire(FPso16[I]);
+    C.Retire(FPsoDual);
+    C.Retire(FPso16Dual);
     C.Retire(FClips.Resource);
     C.Retire(FPaints.Resource);
     C.Retire(FEdges.Resource);
@@ -1615,7 +1620,8 @@ begin
     IID_ID3D12Resource, Result.Resource), 'CreateCommittedResource (table)');
 end;
 
-function TGpu12Renderer.NewPso(const AFormat: TDXGI_FORMAT; const ABlend, ALinear: Boolean): ID3D12PipelineState;
+function TGpu12Renderer.NewPso(const AFormat: TDXGI_FORMAT; const ABlend, ALinear,
+  ADual: Boolean): ID3D12PipelineState;
 var
   Elements: array[0..5] of TD3D12_INPUT_ELEMENT_DESC;
   Pso: TD3D12_GRAPHICS_PIPELINE_STATE_DESC;
@@ -1641,7 +1647,9 @@ begin
   Pso := Default(TD3D12_GRAPHICS_PIPELINE_STATE_DESC);
   Pso.pRootSignature := FRoot;
   Pso.VS := TD3D12_SHADER_BYTECODE.Create(@FastCanvasVS[0], Length(FastCanvasVS));
-  if ALinear then
+  if ADual then
+    Pso.PS := TD3D12_SHADER_BYTECODE.Create(@FastCanvasPSDual[0], Length(FastCanvasPSDual))
+  else if ALinear then
     Pso.PS := TD3D12_SHADER_BYTECODE.Create(@FastCanvasPSLinear[0], Length(FastCanvasPSLinear))
   else
     Pso.PS := TD3D12_SHADER_BYTECODE.Create(@FastCanvasPS[0], Length(FastCanvasPS));
@@ -1655,6 +1663,12 @@ begin
   Pso.BlendState.RenderTarget[0].BlendOpAlpha := D3D12_BLEND_OP_ADD;
   Pso.BlendState.RenderTarget[0].LogicOp := D3D12_LOGIC_OP_NOOP;
   Pso.BlendState.RenderTarget[0].RenderTargetWriteMask := Ord(D3D12_COLOR_WRITE_ENABLE_ALL);
+  if ADual then
+  begin
+    // ClearType: result = color + destination * (1 - weights), the weights per channel (second output).
+    Pso.BlendState.RenderTarget[0].DestBlend := D3D12_BLEND_INV_SRC1_COLOR;
+    Pso.BlendState.RenderTarget[0].DestBlendAlpha := D3D12_BLEND_INV_SRC1_ALPHA;
+  end;
   Pso.SampleMask := $FFFFFFFF;
   Pso.RasterizerState := TD3D12_RASTERIZER_DESC.Create(D3D12_DEFAULT);
   Pso.RasterizerState.CullMode := D3D12_CULL_MODE_NONE;
@@ -1676,6 +1690,19 @@ function TGpu12Renderer.TargetPso: ID3D12PipelineState;
 var
   I: Integer;
 begin
+  if FDual and not FCopy and not FTarget.Linear then
+  begin
+    // ClearType text in the frame: everything blends with the second output (the same result for the rest).
+    if FTarget.Hdr then
+    begin
+      if FPso16Dual = nil then
+        FPso16Dual := NewPso(DXGI_FORMAT_R16G16B16A16_FLOAT, True, False, True);
+      Exit(FPso16Dual);
+    end;
+    if FPsoDual = nil then
+      FPsoDual := NewPso(DXGI_FORMAT_B8G8R8A8_UNORM, True, False, True);
+    Exit(FPsoDual);
+  end;
   if not FTarget.Hdr then
   begin
     if FCopy then

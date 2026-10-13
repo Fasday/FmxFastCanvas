@@ -53,7 +53,8 @@ begin
           SameText(Name, 'MainThread') or SameText(Name, 'D3D12') or
           SameText(Name, 'RayShadows') or SameText(Name, 'RaySoft') or SameText(Name, 'RayAO') or
           SameText(Name, 'NoPartial') or SameText(Name, 'RayReflect') or SameText(Name, 'HdrForce') or
-          SameText(Name, 'HdrAuto') or SameText(Name, 'Composition') then
+          SameText(Name, 'HdrAuto') or SameText(Name, 'Composition') or SameText(Name, 'ClearType') or
+          SameText(Name, 'TextAliased') or SameText(Name, 'TextSystem') then
           Continue;
         if SameText(Name, 'none') then
         begin
@@ -102,6 +103,16 @@ begin
       end
       else
         FastCanvasPresentation := TFastCanvasPresentation.Flip;
+      // Text antialiasing: ClearType in the window frames (dual-source blending), aliased, as Windows draws it, else
+      // grayscale as the stock canvas.
+      if (ABaseOptions + ',' + AConfig.CanvasOpts).Contains('ClearType') then
+        FastCanvasTextAntialias := TFastTextAntialias.ClearType
+      else if (ABaseOptions + ',' + AConfig.CanvasOpts).Contains('TextAliased') then
+        FastCanvasTextAntialias := TFastTextAntialias.Aliased
+      else if (ABaseOptions + ',' + AConfig.CanvasOpts).Contains('TextSystem') then
+        FastCanvasTextAntialias := TFastTextAntialias.System
+      else
+        FastCanvasTextAntialias := TFastTextAntialias.Grayscale;
       InstallFastCanvas;
       // The 3D context (TEffect filters, TViewport3D) on the canvas device: our own; SeparateContext3D keeps the stock
       // context on its own device.
@@ -117,7 +128,13 @@ begin
         AGeometry := 'none'
       else
         AGeometry := 'analytic';
-      AText := 'gray-atlas';
+      case FastCanvasTextAntialias of
+        TFastTextAntialias.ClearType: AText := 'cleartype-atlas';
+        TFastTextAntialias.Aliased: AText := 'aliased-atlas';
+        TFastTextAntialias.System: AText := 'system-atlas';
+      else
+        AText := 'gray-atlas';
+      end;
     end);
   FindBenchCanvas(AName).Options :=
     function: string
@@ -145,6 +162,11 @@ begin
       end;
       if FastCanvasPresentation = TFastCanvasPresentation.Composition then
         Result := Result + '+Composition';
+      case FastCanvasTextAntialias of
+        TFastTextAntialias.ClearType: Result := Result + '+ClearType';
+        TFastTextAntialias.Aliased: Result := Result + '+TextAliased';
+        TFastTextAntialias.System: Result := Result + '+TextSystem';
+      end;
     end;
   FindBenchCanvas(AName).RenderBusyMs :=
     function: Double
@@ -178,7 +200,18 @@ begin
   RegisterFastCanvas('fc', 'FastCanvas (stage 4: own GPU renderer, glyph atlas, render thread; own 3D context)', '');
   RegisterFastCanvas('fcsep', 'FastCanvas with the stock 3D context on its own device', 'SeparateContext3D');
   RegisterFastCanvas('fcd2dtext', 'FastCanvas with Direct2D text (measurement aid)', 'D2DText');
+  RegisterFastCanvas('fcd2dtextct', 'FastCanvas with Direct2D ClearType text (measurement aid, reference of fcct)',
+    'D2DText,ClearType');
+  RegisterFastCanvas('fcd2dtextaliased',
+    'FastCanvas with Direct2D aliased text (measurement aid, reference of fcaliased)', 'D2DText,TextAliased');
   RegisterFastCanvas('fcdx12', 'FastCanvas on Direct3D 12 (stage 5: canvas and own 3D context)', 'D3D12');
+  RegisterFastCanvas('fcct', 'FastCanvas with ClearType text (dual-source blending of the window frames)',
+    'ClearType');
+  RegisterFastCanvas('fcdx12ct', 'FastCanvas on Direct3D 12 with ClearType text (dual-source blending)',
+    'D3D12,ClearType');
+  RegisterFastCanvas('fcaliased', 'FastCanvas with aliased text (no antialiasing)', 'TextAliased');
+  RegisterFastCanvas('fcsystext', 'FastCanvas with text antialiased as Windows draws it (TFastTextAntialias.System)',
+    'TextSystem');
   RegisterFastCanvas('fcdx12rt', 'FastCanvas on Direct3D 12 with ray-traced shadows in 3D scenes (DXR 1.1)',
     'D3D12,RayShadows');
   RegisterFastCanvas('fcdx12ao', 'FastCanvas on Direct3D 12 with ray-traced shadows and ambient occlusion (8 rays)',

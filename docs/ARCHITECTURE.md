@@ -61,8 +61,10 @@ stream is executed on the recording thread at `EndScene`.
   part, so geometry that changes every frame does not evict the geometry that stays.
 - **Text.** `TFastTextLayout` builds a DirectWrite text layout, analyses it once into glyph runs (cached by text and
   parameters), and the canvas draws glyph quads that sample an R8 glyph atlas (2048 x 2048, shelf-packed; glyphs
-  rasterized by DirectWrite in grayscale at 4 horizontal subpixel positions). The blending follows DirectWrite's own
-  grayscale contrast and gamma correction (formulas of Microsoft Terminal, `THIRD_PARTY_NOTICES.md`). Color fonts
+  rasterized by DirectWrite at 4 horizontal subpixel positions, in grayscale by default; ClearType glyphs take three
+  texels per pixel, aliased ones are 0 or 255). The blending follows DirectWrite's own contrast and gamma correction
+  (formulas of Microsoft Terminal, `THIRD_PARTY_NOTICES.md`); ClearType blends per channel with a second pixel shader
+  output (dual-source blending), switched on at the first ClearType glyph of a window frame. Color fonts
   (emoji) are rasterized once into images; rotated and very large text is drawn from glyph outlines.
 - **No Direct2D drawing.** Direct2D only serves the CPU geometry; everything is drawn by the shaders above.
 

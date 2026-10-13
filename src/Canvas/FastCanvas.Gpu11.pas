@@ -66,6 +66,9 @@ type
     FLayout: ID3D11InputLayout;
     FBlend: ID3D11BlendState;
     FBlendCopy: ID3D11BlendState;
+    /// <summary>Dual-source blending (ClearType text, SetDualBlend).</summary>
+    FPSDual: ID3D11PixelShader;
+    FBlendDual: ID3D11BlendState;
     FRaster: ID3D11RasterizerState;
     FSamplers: array[0..2] of ID3D11SamplerState;
     FFrameCB: ID3D11Buffer;
@@ -87,6 +90,7 @@ type
     constructor Create;
     procedure BeginTarget(const ATarget: TGpuSurface; const AWidth, AHeight: Integer;
       const AAliased: Boolean); override;
+    procedure SetDualBlend(const AValue: Boolean); override;
     procedure Flush; override;
     procedure Invalidate; override;
     procedure Clear(const AColor: Cardinal); override;
@@ -474,6 +478,8 @@ begin
   D3D := TFastDevice.D3D;
   GpuCheck(D3D.CreateVertexShader(@FastCanvasVS[0], Length(FastCanvasVS), nil, @FVS), 'CreateVertexShader');
   GpuCheck(D3D.CreatePixelShader(@FastCanvasPS[0], Length(FastCanvasPS), nil, FPS), 'CreatePixelShader');
+  GpuCheck(D3D.CreatePixelShader(@FastCanvasPSDual[0], Length(FastCanvasPSDual), nil, FPSDual),
+    'CreatePixelShader (dual)');
   Element(0, 'RECT', DXGI_FORMAT_R32G32B32A32_FLOAT, 0);
   Element(1, 'XFORM', DXGI_FORMAT_R32G32B32A32_FLOAT, 16);
   Element(2, 'XLATE', DXGI_FORMAT_R32G32B32A32_FLOAT, 32);
@@ -494,6 +500,12 @@ begin
   Blend.RenderTarget[0].BlendOpAlpha := D3D11_BLEND_OP_ADD;
   Blend.RenderTarget[0].RenderTargetWriteMask := Byte(D3D11_COLOR_WRITE_ENABLE_ALL);
   GpuCheck(D3D.CreateBlendState(Blend, FBlend), 'CreateBlendState');
+  // ClearType: result = color + destination * (1 - weights), the weights per channel (second output).
+  Blend.RenderTarget[0].DestBlend := D3D11_BLEND_INV_SRC1_COLOR;
+  Blend.RenderTarget[0].DestBlendAlpha := D3D11_BLEND_INV_SRC1_ALPHA;
+  GpuCheck(D3D.CreateBlendState(Blend, FBlendDual), 'CreateBlendState (dual)');
+  Blend.RenderTarget[0].DestBlend := D3D11_BLEND_INV_SRC_ALPHA;
+  Blend.RenderTarget[0].DestBlendAlpha := D3D11_BLEND_INV_SRC_ALPHA;
   Blend.RenderTarget[0].BlendEnable := False;
   GpuCheck(D3D.CreateBlendState(Blend, FBlendCopy), 'CreateBlendState (copy)');
 
@@ -575,7 +587,10 @@ begin
   Viewport.MaxDepth := 1;
   Ctx.RSSetViewports(1, @Viewport);
   Ctx.RSSetState(FRaster);
-  Ctx.OMSetBlendState(FBlend, Factor, $FFFFFFFF);
+  if FDual then
+    Ctx.OMSetBlendState(FBlendDual, Factor, $FFFFFFFF)
+  else
+    Ctx.OMSetBlendState(FBlend, Factor, $FFFFFFFF);
   Ctx.OMSetDepthStencilState(nil, 0);
   Ctx.IASetInputLayout(FLayout);
   Ctx.IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
@@ -584,7 +599,10 @@ begin
   Ctx.IASetVertexBuffers(0, 1, FVB, @Stride, @Offset);
   Ctx.VSSetShader(FVS, nil, 0);
   Ctx.GSSetShader(nil, nil, 0);
-  Ctx.PSSetShader(FPS, nil, 0);
+  if FDual then
+    Ctx.PSSetShader(FPSDual, nil, 0)
+  else
+    Ctx.PSSetShader(FPS, nil, 0);
   Ctx.VSSetConstantBuffers(0, 1, FFrameCB);
   Ctx.PSSetConstantBuffers(0, 1, FFrameCB);
   Ctx.PSSetSamplers(0, Length(FSamplers), FSamplers[0]);
@@ -740,8 +758,24 @@ begin
   Add(@I, 1);
   ApplyState;
   TFastDevice.Context.OMSetBlendState(FBlendCopy, Factor, $FFFFFFFF);
+  if FDual then
+    TFastDevice.Context.PSSetShader(FPS, nil, 0);
   DrawPending;
-  TFastDevice.Context.OMSetBlendState(FBlend, Factor, $FFFFFFFF);
+  if FDual then
+  begin
+    TFastDevice.Context.OMSetBlendState(FBlendDual, Factor, $FFFFFFFF);
+    TFastDevice.Context.PSSetShader(FPSDual, nil, 0);
+  end
+  else
+    TFastDevice.Context.OMSetBlendState(FBlend, Factor, $FFFFFFFF);
+end;
+
+procedure TGpu11Renderer.SetDualBlend(const AValue: Boolean);
+begin
+  if AValue = FDual then
+    Exit;
+  inherited;
+  FStateApplied := False;
 end;
 
 procedure TGpu11Renderer.UploadRamp(const ARow: Integer; const AData: Pointer);

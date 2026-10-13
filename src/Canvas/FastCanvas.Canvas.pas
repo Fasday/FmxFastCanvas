@@ -50,6 +50,24 @@ type
     /// Falls back to Flip when DirectComposition is not available. HDR output stays opaque.</summary>
     Composition);
 
+  /// <summary>How text is antialiased (FastCanvasTextAntialias).</summary>
+  TFastTextAntialias = (
+    /// <summary>Grayscale, as FMX's Direct2D canvas draws it: the look of the stock canvas.</summary>
+    Grayscale,
+    /// <summary>ClearType (subpixel antialiasing, the system's ClearType settings) where it can be drawn: text in
+    /// window frames, unrotated and uniformly scaled, on a display whose subpixels are in a row; also when ClearType
+    /// is turned off in Windows (as Direct2D's ClearType mode; System follows that switch). Text drawn into bitmaps
+    /// (effects, TLayer3D, caches), into transparent forms and rotated text stay grayscale, as with DirectWrite and
+    /// Direct2D. ClearType mixes the channels of the text with what is under it: over parts of a window that are
+    /// transparent (DirectComposition with a backdrop) its edges show colors.</summary>
+    ClearType,
+    /// <summary>No antialiasing: every pixel of a glyph is covered or not (DirectWrite's aliased rendering), also
+    /// for text drawn as outlines (large, rotated). Color glyphs (emoji) stay smooth.</summary>
+    Aliased,
+    /// <summary>As Windows draws text (FastCanvasSystemTextAntialias): font smoothing off: Aliased; ClearType:
+    /// ClearType; standard smoothing: Grayscale.</summary>
+    System);
+
   /// <summary>The frame a window shows (FastCanvasCaptureWindow): Width x Height pixels of four floats, R, G, B, A;
   /// scRGB (linear light, 1.0 = 80 nits) when Hdr, else sRGB-encoded 0..1.</summary>
   TFastWindowCapture = TGpuCapture;
@@ -89,6 +107,9 @@ var
   /// go on showing the last of those frames under the composition). Composition by default: forms look as with the
   /// stock Direct2D canvas where they are transparent, at the same speed (measured 2026-10-13).</summary>
   FastCanvasPresentation: TFastCanvasPresentation = TFastCanvasPresentation.Composition;
+  /// <summary>Grayscale by default, as the stock canvas. ClearType: window frames blend with dual sources (a second
+  /// color output per pixel) from their first ClearType glyph on. Read at every scene.</summary>
+  FastCanvasTextAntialias: TFastTextAntialias = TFastTextAntialias.Grayscale;
 
 /// <summary>Makes TFastCanvas the default canvas. Call before Application.Initialize.</summary>
 procedure InstallFastCanvas;
@@ -105,6 +126,9 @@ function FastCanvasRenderThreadId: Cardinal;
 procedure FastCanvasSimulateDeviceLoss;
 /// <summary>Devices recreated so far (removed or simulated).</summary>
 function FastCanvasDeviceResets: Integer;
+/// <summary>What TFastTextAntialias.System stands for: the font smoothing of Windows (Aliased, Grayscale or
+/// ClearType), read once.</summary>
+function FastCanvasSystemTextAntialias: TFastTextAntialias;
 /// <summary>HDR output of a form's window (FastCanvas.Hdr.FastCanvasHdr) and the levels of its display: Output says
 /// whether its frames go out as FP16 scRGB (from the next frame on); tone-map HDR content to Headroom. Main thread.
 /// </summary>
@@ -197,11 +221,22 @@ type
     /// <summary>Render thread: the rectangles of the partial frame in progress (TCmdRegion), applied whenever this
     /// target is selected; RegionCount = 0: none.</summary>
     RegionFirst, RegionCount: Cardinal;
+    /// <summary>Render thread: the frame in progress may draw ClearType text (TCmdBegin.ClearType).</summary>
+    ClearType: Boolean;
+    /// <summary>Render thread: the frame in progress has drawn ClearType glyphs, and its draws blend with dual sources
+    /// from then on (TGpuRenderer.SetDualBlend; what came before blends as usual, at no extra cost).</summary>
+    Dual: Boolean;
+    /// <summary>Render thread: the frame in progress draws its text with Direct2D (TCmdBegin.D2DText).</summary>
+    D2DText: Boolean;
+    /// <summary>D2D of a window ignores alpha (D2DTarget AOpaque).</summary>
+    D2DOpaque: Boolean;
     procedure ReleaseViews;
     /// <summary>AHdr, AComposition: TCmdBegin.Hdr, TCmdBegin.Composition.</summary>
     procedure Prepare(const AWidth, AHeight: Integer; const ATearing: Boolean; const ABitmap: TFastBitmap;
       const AHdr: Byte; const AComposition: Boolean);
-    function D2DTarget(const AContext: ID2D1DeviceContext): ID2D1Bitmap1;
+    /// <summary>AOpaque: a window's bitmap ignores alpha, as Direct2D draws ClearType text only into opaque bitmaps
+    /// (the D2DText measurement aid in ClearType frames).</summary>
+    function D2DTarget(const AContext: ID2D1DeviceContext; const AOpaque: Boolean): ID2D1Bitmap1;
     constructor Create;
     destructor Destroy; override;
   end;
@@ -248,6 +283,9 @@ type
     /// <summary>Window: a frame was recorded for its own swap chain (FastCanvasPresentation = Flip); a new window
     /// for the form was asked for.</summary>
     FFlipShown, FRecreateQueued: Boolean;
+    /// <summary>How the scene in progress antialiases its text: FastCanvasTextAntialias with System resolved, and
+    /// ClearType only in window frames (else Grayscale).</summary>
+    FTextAntialias: TFastTextAntialias;
     procedure QueueRecreateWindow;
     procedure RecRegion;
     procedure PartialRegion(const ARects: TClipRects);
@@ -332,6 +370,11 @@ type
     Hdr: Byte;
     /// <summary>Window: FastCanvasPresentation = Composition.</summary>
     Composition: Boolean;
+    /// <summary>Window: FastCanvasTextAntialias = ClearType (from its first ClearType glyph on, the frame blends with
+    /// dual sources).</summary>
+    ClearType: Boolean;
+    /// <summary>TFastCanvasOption.D2DText (measurement aid).</summary>
+    D2DText: Boolean;
     Bitmap: Pointer;   // TFastBitmap of a bitmap canvas, kept alive by the chunk
   end;
 
@@ -442,7 +485,9 @@ type
     Opacity: Single;
     Clip: Integer;
     ForceD2D: Boolean;
-    Pad: array[0..2] of Byte;
+    /// <summary>Ord(TFastTextAntialias), never System (TFastCanvas.FTextAntialias).</summary>
+    Antialias: Byte;
+    Pad: array[0..1] of Byte;
   end;
   PCmdList = ^TCmdList;
   TCmdList = packed record
@@ -1397,6 +1442,31 @@ begin
   Result := GDeviceResets;
 end;
 
+var
+  /// <summary>FastCanvasSystemTextAntialias, -1 before it is asked.</summary>
+  GSystemTextAntialias: Integer = -1;
+
+function FastCanvasSystemTextAntialias: TFastTextAntialias;
+var
+  Smoothing: BOOL;
+  Kind: UINT;
+begin
+  if GSystemTextAntialias < 0 then
+  begin
+    // "Smooth edges of screen fonts" (off: GDI draws text aliased), then its kind (standard or ClearType).
+    Smoothing := True;
+    Kind := 0;
+    if SystemParametersInfo(SPI_GETFONTSMOOTHING, 0, @Smoothing, 0) and not Smoothing then
+      Result := TFastTextAntialias.Aliased
+    else if SystemParametersInfo(SPI_GETFONTSMOOTHINGTYPE, 0, @Kind, 0) and (Kind = FE_FONTSMOOTHINGCLEARTYPE) then
+      Result := TFastTextAntialias.ClearType
+    else
+      Result := TFastTextAntialias.Grayscale;
+    GSystemTextAntialias := Ord(Result);
+  end;
+  Result := TFastTextAntialias(GSystemTextAntialias);
+end;
+
 function FastCanvasHdrInfo(const AForm: TCommonCustomForm): TFastHdrInfo;
 var
   H: TWinWindowHandle;
@@ -1523,10 +1593,12 @@ end;
 
 /// <summary>The Direct2D bitmap over the target, made on first use (only Direct2D drawing needs it: the
 /// D2DText measurement aid, Direct3D 11 only).</summary>
-function TFastTarget.D2DTarget(const AContext: ID2D1DeviceContext): ID2D1Bitmap1;
+function TFastTarget.D2DTarget(const AContext: ID2D1DeviceContext; const AOpaque: Boolean): ID2D1Bitmap1;
 var
   Props: TD2D1BitmapProperties1;
 begin
+  if (D2D <> nil) and (Kind = TTargetKind.Window) and (D2DOpaque <> AOpaque) then
+    D2D := nil;
   if (D2D = nil) and (AContext <> nil) then
     case Kind of
       TTargetKind.Bitmap:
@@ -1536,8 +1608,15 @@ begin
         if Surface is TGpu11Surface then
         begin
           if Kind = TTargetKind.Window then
-            Props := D2D1BitmapProperties1(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED,
-              D2D1_BITMAP_OPTIONS_TARGET or D2D1_BITMAP_OPTIONS_CANNOT_DRAW)
+          begin
+            D2DOpaque := AOpaque;
+            if AOpaque then
+              Props := D2D1BitmapProperties1(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_IGNORE,
+                D2D1_BITMAP_OPTIONS_TARGET or D2D1_BITMAP_OPTIONS_CANNOT_DRAW)
+            else
+              Props := D2D1BitmapProperties1(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED,
+                D2D1_BITMAP_OPTIONS_TARGET or D2D1_BITMAP_OPTIONS_CANNOT_DRAW);
+          end
           else
             Props := D2D1BitmapProperties1(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED,
               D2D1_BITMAP_OPTIONS_TARGET);
@@ -1749,6 +1828,16 @@ begin
   C.Height := FPixelH;
   C.Aliased := Quality = TCanvasQuality.HighPerformance;
   C.Tearing := TFastCanvasOption.AllowTearing in FastCanvasOptions;
+  FTextAntialias := FastCanvasTextAntialias;
+  if FTextAntialias = TFastTextAntialias.System then
+    FTextAntialias := FastCanvasSystemTextAntialias;
+  // ClearType needs what is under the text: the frames of windows (not bitmaps, nor the 8-bit pixels of transparent
+  // forms), blended in sRGB-encoded values (not the linear-light measurement aid).
+  if (FTextAntialias = TFastTextAntialias.ClearType) and ((FTarget.Kind <> TTargetKind.Window) or
+    (TFastCanvasOption.HdrLinearBlend in FastCanvasOptions)) then
+    FTextAntialias := TFastTextAntialias.Grayscale;
+  C.ClearType := FTextAntialias = TFastTextAntialias.ClearType;
+  C.D2DText := TFastCanvasOption.D2DText in FastCanvasOptions;
   // A partial window frame starts from the last one; a bitmap keeps its pixels anyway.
   C.Partial := (FRegion <> nil) and (FTarget.Kind <> TTargetKind.Bitmap);
   // Tearing needs a swap chain of the window.
@@ -2683,9 +2772,9 @@ begin
   C.Opacity := EnsureRange(AOpacity, 0, 1);
   C.Clip := Clip;
   C.ForceD2D := TFastCanvasOption.D2DText in FastCanvasOptions;
+  C.Antialias := Ord(FTextAntialias);
   C.Pad[0] := 0;
   C.Pad[1] := 0;
-  C.Pad[2] := 0;
 end;
 procedure DrawLayoutOnCanvas(const ACanvas: TCanvas; const AData: TFastLayoutData; const AOrigin: TPointF;
   const AMaxSize: TPointF; const AColor: TAlphaColor; const AOpacity: Single);
@@ -3002,8 +3091,9 @@ begin
     T := ACanvas.FTarget;
     FGpu.BeginTarget(T.Surface, T.Width, T.Height, T.Aliased);
     // The rectangles of a partial window frame hold for that window only: back to it after a bitmap scene drawn in
-    // the middle of its frame, they hold again.
+    // the middle of its frame, they hold again. So does its blending.
     FGpu.SetRegion(T.RegionFirst, T.RegionCount);
+    FGpu.SetDualBlend(T.Dual);
   end
   else
     FGpu.Flush;
@@ -3049,6 +3139,10 @@ begin
   T.RegionFirst := 0;
   T.RegionCount := 0;
   FGpu.SetRegion(0, 0);
+  T.ClearType := C.ClearType;
+  T.Dual := False;
+  T.D2DText := C.D2DText;
+  FGpu.SetDualBlend(False);
 end;
 
 procedure TPlayer.EndFrame(const C: PCmdEnd);
@@ -3060,12 +3154,15 @@ begin
     LeaveD2D;
     FGpu.EndTarget;
     FGpu.SetRegion(0, 0);
+    FGpu.SetDualBlend(False);
     Inc(FFrame);
     if FCanvas = nil then
       Exit;
     T := FCanvas.FTarget;
     T.RegionFirst := 0;
     T.RegionCount := 0;
+    T.ClearType := False;
+    T.Dual := False;
     if T.Window = nil then
       Exit;
     if C.Present and not FNoPresent then
@@ -3098,7 +3195,7 @@ begin
       raise EFastDevice.Create('FastCanvas: cannot create a Direct2D device context');
     FD2D.SetDpi(96, 96);
   end;
-  Target := FCanvas.FTarget.D2DTarget(FD2D);
+  Target := FCanvas.FTarget.D2DTarget(FD2D, FCanvas.FTarget.ClearType and FCanvas.FTarget.D2DText);
   if Target = nil then
     Abort;
   FGpu.Flush;
@@ -3815,6 +3912,13 @@ begin
   EnterD2D;
   UseD2DClip(C.Clip);
   FD2D.SetTransform(D2DMatrix(C.Matrix));
+  // ClearType only comes in window frames, whose Direct2D bitmap then ignores alpha (D2DTarget).
+  case TFastTextAntialias(C.Antialias) of
+    TFastTextAntialias.ClearType: FD2D.SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_CLEARTYPE);
+    TFastTextAntialias.Aliased: FD2D.SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_ALIASED);
+  else
+    FD2D.SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
+  end;
   if FSolid = nil then
     FD2D.CreateSolidColorBrush(D2DColor(MulAlpha(C.Color, C.Opacity)), nil, FSolid)
   else
@@ -3908,6 +4012,8 @@ begin
     Cmd.Inst.Color := AColor;
     Cmd.Inst.Clip := C.Clip;
     Cmd.Inst.Flags := GpuKindPath;
+    if TFastTextAntialias(C.Antialias) = TFastTextAntialias.Aliased then
+      Cmd.Inst.Flags := GpuKindPath or GpuAliased;
     DrawShapeGpu(@Cmd);
   end;
 end;
@@ -4050,6 +4156,9 @@ var
   D: TFastTextDecoration;
   M: TGpuAffine;
   Axis: Boolean;
+  Glyphs: TFastGlyphKind;
+  Texels: Integer;
+  Kind: Cardinal;
 begin
   Data := TFastLayoutData(C.Data);
   Data.EnsureRuns;
@@ -4072,6 +4181,29 @@ begin
     FGlyphs := TFastGlyphCache.Create(GpuAtlasSize, GlyphUploadNow, GlyphResetNow);
   Atlas := 1 / FGlyphs.Size;
   Box := FGpu.Clip(C.Clip).Box;
+  Glyphs := TFastGlyphKind.Gray;
+  case TFastTextAntialias(C.Antialias) of
+    TFastTextAntialias.ClearType:
+      // A window frame (TCmdBegin.ClearType) on a display with subpixels in a row: the glyphs take three atlas texels
+      // per pixel, and the frame blends with dual sources from here on.
+      if FGlyphs.ClearTypeGeometry then
+        Glyphs := TFastGlyphKind.ClearType;
+    TFastTextAntialias.Aliased:
+      Glyphs := TFastGlyphKind.Aliased;
+  end;
+  if (Glyphs = TFastGlyphKind.ClearType) and (FCanvas <> nil) and (FCanvas.FTarget <> nil) and
+    not FCanvas.FTarget.Dual then
+  begin
+    FCanvas.FTarget.Dual := True;
+    FGpu.SetDualBlend(True);
+  end;
+  Texels := 1;
+  Kind := GpuKindGlyph;
+  if Glyphs = TFastGlyphKind.ClearType then
+  begin
+    Texels := 3;
+    Kind := GpuKindGlyph or GpuClearType;
+  end;
   for Run in Data.Runs do
   begin
     if Run.HasColor then
@@ -4097,7 +4229,7 @@ begin
       Iy := Floor(Y0 + Run.Y[I] * S + 0.5);
       if (Ix - 64 >= Box.Right) or (Iy + 64 <= Box.Top) or (Iy - 256 >= Box.Bottom) then
         Continue;
-      G := FGlyphs.Glyph(Face, Run.Glyphs[I], Sub);
+      G := FGlyphs.Glyph(Face, Run.Glyphs[I], Sub, Glyphs);
       if G.W = 0 then
         Continue;
       if (Ix + G.Left + G.W <= Box.Left) or (Ix + G.Left >= Box.Right) or (Iy + G.Top + G.H <= Box.Top) or
@@ -4118,10 +4250,10 @@ begin
       Inst.Ry := 0;
       Inst.U0 := G.X * Atlas;
       Inst.V0 := G.Y * Atlas;
-      Inst.U1 := (G.X + G.W) * Atlas;
+      Inst.U1 := (G.X + Texels * G.W) * Atlas;
       Inst.V1 := (G.Y + G.H) * Atlas;
       Inst.Color := Color;
-      Inst.Flags := GpuKindGlyph;
+      Inst.Flags := Kind;
       Inst.Clip := C.Clip;
       Inst.Paint := 0;
       Inst.Stroke := 0;

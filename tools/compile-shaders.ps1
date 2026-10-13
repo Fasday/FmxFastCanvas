@@ -61,6 +61,7 @@ try {
     @{ Name = 'FastCanvasVS'; Entry = 'VSMain'; Profile = 'vs_4_0'; Src = $src },
     @{ Name = 'FastCanvasPS'; Entry = 'PSMain'; Profile = 'ps_4_0'; Src = $src },
     @{ Name = 'FastCanvasPSLinear'; Entry = 'PSMainLinear'; Profile = 'ps_4_0'; Src = $src },
+    @{ Name = 'FastCanvasPSDual'; Entry = 'PSMainDual'; Profile = 'ps_4_0'; Src = $src },
     @{ Name = 'FastOutputVS'; Entry = 'VSOutput'; Profile = 'vs_4_0'; Src = $outputSrc },
     @{ Name = 'FastOutputPS'; Entry = 'PSOutput'; Profile = 'ps_4_0'; Src = $outputSrc })) {
     $cso = Join-Path $tmp ($e.Name + '.cso')

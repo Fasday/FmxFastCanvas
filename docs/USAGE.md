@@ -74,12 +74,14 @@ All settings are global variables, set before `Application.Initialize` unless no
 | `FastCanvasFramesInFlight` | `1` | Window frames the main thread may run ahead of the render thread. |
 | `FastCanvasPartialFrames` | `True` | Direct3D 12 only: report `TCanvasStyle.SupportClipRects`, so FMX repaints only the rectangles that changed. Faster when part of a form changes (scrolled lists), about 5 % slower when hundreds of controls move every frame (FMX then works out the update rectangle of each). |
 | `FastCanvasPresentation` | `Composition` | How windows show their frames. `Composition`: a composition swap chain shown by DirectComposition, with the frame's alpha: where a form is drawn transparent, what is behind it shows, such as a DWM backdrop (Mica, Acrylic) with the frame extended into the client area, as with FMX's stock Direct2D canvas. `Flip`: a swap chain of the window, which DWM shows opaque. Same speed. Windows presenting with tearing (`AllowTearing`) take `Flip`, which tearing needs. Not for transparent forms (layered windows) and `TForm3D`; HDR output stays opaque. Read at every window frame; a form switching from `Flip` to `Composition` gets a new window (DWM would keep the last flip frame under the composition). |
+| `FastCanvasTextAntialias` | `Grayscale` | How text is antialiased. `Grayscale`: as FMX's stock Direct2D canvas draws it. `ClearType`: subpixel antialiasing with the system's ClearType settings (the ClearType tuner's gamma, contrast and level; RGB or BGR subpixels), blended as Direct2D blends ClearType text, also when ClearType is turned off in Windows (as Direct2D's ClearType mode). Only where ClearType can be drawn: text in the frames of windows, unrotated and uniformly scaled, on a display whose subpixels are in a row; text drawn into bitmaps (effects, `TLayer3D`, the 2D controls of a `TForm3D`, caches), into transparent forms and rotated text stays grayscale, as with DirectWrite and Direct2D. Over parts of a `Composition` window that are transparent, ClearType edges show colors. From the first ClearType glyph of a window frame on, its draws blend with a second color output of the pixel shader (dual-source blending); frames without text blend as usual. `Aliased`: no antialiasing, every pixel of a glyph covered or not (DirectWrite's aliased rendering), everywhere, also text drawn as outlines (large or rotated); color emoji stay smooth. `System`: as Windows draws text (`FastCanvasSystemTextAntialias`, read once): `Aliased` when "Smooth edges of screen fonts" is off, `ClearType` when ClearType is on, else `Grayscale`. Read at every scene. |
 | `FastCanvasKeepBitmapCopies` | `True` | Bitmaps the CPU wrote (loaded images, style bitmaps) keep a copy of their pixels and survive a device loss. |
 | `FastCanvasNoHeapSleep` | `True` | `InstallFastCanvas` sets `System.NeverSleepOnMMThreadContention`: the RTL memory manager otherwise sleeps 10 ms when two threads contend for a block size, which showed as 10-25 ms frame spikes. |
 | `FastCanvasOptions` | `[]` | `AllowTearing`: present with `DXGI_PRESENT_ALLOW_TEARING` when the system supports it (for throughput measurements; never waits for vertical blank; windows take `Flip` then). `D2DText`: text through Direct2D instead of the glyph atlas (Direct3D 11 only, a measurement aid). `HdrLinearBlend`: HDR windows blend in linear light (a measurement aid, see "HDR output"). Read at every scene. |
 
 Functions: `FastCanvasSync` (wait until the render thread has executed everything recorded), `FastCanvasRenderBusyMs`,
-`FastCanvasDrawCalls`, `FastCanvasDeviceResets` (diagnostics), `FastCanvasSimulateDeviceLoss` (testing: the next scene
+`FastCanvasDrawCalls`, `FastCanvasDeviceResets` (diagnostics), `FastCanvasSystemTextAntialias` (what `System` text
+antialiasing stands for), `FastCanvasSimulateDeviceLoss` (testing: the next scene
 treats the device as lost and recreates everything).
 
 ### `FastCanvas.Context3D11`
@@ -296,7 +298,9 @@ measured at 1920x1080, 4–13 µs per frame (3–7 % on scenes running at 6000�
 
 - Windows only (Win64 and Win32).
 - Printing (`TPrinter` canvases) is not supported.
-- Text is grayscale antialiased (as FMX's stock Direct2D canvas draws it), not ClearType.
+- Text is grayscale antialiased by default (as FMX's stock Direct2D canvas draws it); ClearType
+  (`FastCanvasTextAntialias`) only in the frames of windows, not in bitmaps, transparent forms and `TForm3D`. No
+  GDI-style text rendering (glyphs fitted to the pixel grid).
 - Ray-traced effects need a depth buffer and DXR tier 1.1; they do not trace transparent objects.
 - Partial frames are Direct3D 12 only.
 - HDR output is Direct3D 12 only, and not for transparent forms.

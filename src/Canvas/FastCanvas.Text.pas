@@ -5,8 +5,8 @@ unit FastCanvas.Text;
   TFastTextLayout implements the FMX TTextLayout contract (FMX.TextLayout.pas:48-177) over a DirectWrite text
   layout. A layout is analysed once into glyph runs (TFastLayoutData, shared through a cache by all layouts with
   the same text and parameters); the canvas draws the runs as GPU quads that sample glyph bitmaps from an atlas
-  texture. TFastGlyphCache owns the atlas: it rasterizes glyphs with DirectWrite (grayscale coverage) on demand
-  and hands the bitmaps to the canvas for upload.
+  texture. TFastGlyphCache owns the atlas: it rasterizes glyphs with DirectWrite (grayscale, ClearType or aliased
+  coverage) on demand and hands the bitmaps to the canvas for upload.
 
   Written from the DirectWrite documentation; no code from the FMX canvases. }
 
@@ -94,7 +94,8 @@ type
   end;
 
   TFastGlyph = record
-    /// <summary>Atlas rectangle; W = 0 for glyphs without ink (spaces).</summary>
+    /// <summary>Atlas position and size in pixels; W = 0 for glyphs without ink (spaces). A ClearType glyph takes 3 * W
+    /// texels of the atlas in width: R, G and B coverage of every pixel.</summary>
     X, Y, W, H: SmallInt;
     /// <summary>Top-left of the glyph bitmap relative to the (integer) baseline origin, pixels.</summary>
     Left, Top: SmallInt;
@@ -116,6 +117,10 @@ type
     destructor Destroy; override;
   end;
 
+  /// <summary>How a glyph is rasterized: grayscale coverage; ClearType coverage, three texels (R, G, B) per pixel;
+  /// aliased, every pixel covered or not.</summary>
+  TFastGlyphKind = (Gray, ClearType, Aliased);
+
   /// <summary>Glyph atlas: an GpuAtlasSize square of 8-bit coverage, shelf-packed. Used by the recording thread
   /// only (FMX holds the canvas lock between BeginScene and EndScene).</summary>
   TFastGlyphCache = class
@@ -134,16 +139,19 @@ type
     FResets: Integer;
     function Allocate(const W, H: Integer; out X, Y: Integer): Boolean;
     function Rasterize(const AFaceGlyphs: TFastFaceGlyphs; const AGlyph: Word; const ASub: Integer;
-      out AResult: TFastGlyph): Boolean;
+      const AKind: TFastGlyphKind; out AResult: TFastGlyph): Boolean;
   public
     constructor Create(const ASize: Integer; const AUpload: TFastGlyphUploadProc; const AReset: TFastGlyphResetProc);
     destructor Destroy; override;
     /// <summary>The glyph set of a face at a pixel size. Valid until the next Clear (also implicit when the atlas
     /// is full).</summary>
     function Face(const AFace: IDWriteFontFace; const AEmSize: Single): TFastFaceGlyphs;
-    /// <summary>The glyph at a subpixel position 0..SubpixelSteps - 1; rasterized and uploaded on first use.
-    /// Returns nil when the atlas was reset meanwhile (AFaceGlyphs is gone): ask Face again.</summary>
-    function Glyph(var AFaceGlyphs: TFastFaceGlyphs; const AGlyph: Word; const ASub: Integer): TFastGlyph;
+    /// <summary>The glyph at a subpixel position 0..SubpixelSteps - 1, rasterized as AKind; rasterized and uploaded on
+    /// first use. AFaceGlyphs is replaced when the atlas was full and started over.</summary>
+    function Glyph(var AFaceGlyphs: TFastFaceGlyphs; const AGlyph: Word; const ASub: Integer;
+      const AKind: TFastGlyphKind = TFastGlyphKind.Gray): TFastGlyph;
+    /// <summary>The display's subpixels are in a row (RGB or BGR): ClearType can be drawn.</summary>
+    function ClearTypeGeometry: Boolean;
     procedure Clear;
     property Size: Integer read FSize;
     property Resets: Integer read FResets;
@@ -1029,8 +1037,20 @@ begin
   Result := True;
 end;
 
+function TFastGlyphCache.ClearTypeGeometry: Boolean;
+var
+  G: DWRITE_PIXEL_GEOMETRY;
+begin
+  if FParams = nil then
+    TFastDevice.DWrite.CreateRenderingParams(FParams);
+  if FParams = nil then
+    Exit(False);
+  G := FParams.GetPixelGeometry;
+  Result := (G = DWRITE_PIXEL_GEOMETRY_RGB) or (G = DWRITE_PIXEL_GEOMETRY_BGR);
+end;
+
 function TFastGlyphCache.Rasterize(const AFaceGlyphs: TFastFaceGlyphs; const AGlyph: Word; const ASub: Integer;
-  out AResult: TFastGlyph): Boolean;
+  const AKind: TFastGlyphKind; out AResult: TFastGlyph): Boolean;
 var
   Run: TDwriteGlyphRun;
   Glyph: Word;
@@ -1038,9 +1058,10 @@ var
   Analysis: IDWriteGlyphRunAnalysis;
   Bounds: TRect;
   TexType: DWRITE_TEXTURE_TYPE;
-  W, H, X, Y, I, N: Integer;
+  W, H, X, Y, I, N, Texels: Integer;
   Identity: TDwriteMatrix;
   Mode: DWRITE_RENDERING_MODE;
+  T: Byte;
 begin
   FillChar(AResult, SizeOf(AResult), 0);
   Result := True;
@@ -1065,24 +1086,39 @@ begin
   Run.glyphCount := 1;
   Run.glyphIndices := @Glyph;
   Run.glyphAdvances := @Advance;
-  if TFastDevice.DWrite2 <> nil then
+  // Aliased glyphs: DirectWrite's aliased rendering, one byte per pixel, 0 or 255.
+  Mode := AFaceGlyphs.FMode;
+  if AKind = TFastGlyphKind.Aliased then
+    Mode := DWRITE_RENDERING_MODE_ALIASED;
+  if (TFastDevice.DWrite2 <> nil) and (AKind = TFastGlyphKind.ClearType) then
+  begin
+    TexType := DWRITE_TEXTURE_CLEARTYPE_3x1;
+    if Failed(TFastDevice.DWrite2.CreateGlyphRunAnalysis2(@Run, nil, Mode, DWRITE_MEASURING_MODE_NATURAL,
+      DWRITE_GRID_FIT_MODE_DEFAULT, DWRITE_TEXT_ANTIALIAS_MODE_CLEARTYPE, ASub / SubpixelSteps, 0, Analysis)) then
+      Exit;
+  end
+  else if TFastDevice.DWrite2 <> nil then
   begin
     TexType := DWRITE_TEXTURE_ALIASED_1x1;
-    if Failed(TFastDevice.DWrite2.CreateGlyphRunAnalysis2(@Run, nil, AFaceGlyphs.FMode, DWRITE_MEASURING_MODE_NATURAL,
+    if Failed(TFastDevice.DWrite2.CreateGlyphRunAnalysis2(@Run, nil, Mode, DWRITE_MEASURING_MODE_NATURAL,
       DWRITE_GRID_FIT_MODE_DEFAULT, DWRITE_TEXT_ANTIALIAS_MODE_GRAYSCALE, ASub / SubpixelSteps, 0, Analysis)) then
       Exit;
   end
   else
   begin
-    TexType := DWRITE_TEXTURE_CLEARTYPE_3x1;
+    // IDWriteFactory only: antialiased modes give ClearType coverage (averaged below for grayscale).
+    if AKind = TFastGlyphKind.Aliased then
+      TexType := DWRITE_TEXTURE_ALIASED_1x1
+    else
+      TexType := DWRITE_TEXTURE_CLEARTYPE_3x1;
     Identity.m11 := 1;
     Identity.m12 := 0;
     Identity.m21 := 0;
     Identity.m22 := 1;
     Identity.dx := 0;
     Identity.dy := 0;
-    if Failed(TFastDevice.DWrite.CreateGlyphRunAnalysis(Run, 1, Identity, AFaceGlyphs.FMode,
-      DWRITE_MEASURING_MODE_NATURAL, ASub / SubpixelSteps, 0, Analysis)) then
+    if Failed(TFastDevice.DWrite.CreateGlyphRunAnalysis(Run, 1, Identity, Mode, DWRITE_MEASURING_MODE_NATURAL,
+      ASub / SubpixelSteps, 0, Analysis)) then
       Exit;
   end;
   Run.fontFace := nil;
@@ -1100,13 +1136,26 @@ begin
     SetLength(FBuffer, N);
   if Failed(Analysis.CreateAlphaTexture(TexType, Bounds, FBuffer[0], N)) then
     Exit;
-  if TexType = DWRITE_TEXTURE_CLEARTYPE_3x1 then
+  Texels := W;
+  if AKind = TFastGlyphKind.ClearType then
+  begin
+    // Three texels per pixel, red first: on a BGR display the subpixel on the left is blue.
+    Texels := 3 * W;
+    if FParams.GetPixelGeometry = DWRITE_PIXEL_GEOMETRY_BGR then
+      for I := 0 to W * H - 1 do
+      begin
+        T := FBuffer[3 * I];
+        FBuffer[3 * I] := FBuffer[3 * I + 2];
+        FBuffer[3 * I + 2] := T;
+      end;
+  end
+  else if TexType = DWRITE_TEXTURE_CLEARTYPE_3x1 then
     for I := 0 to W * H - 1 do
       FBuffer[I] := (Integer(FBuffer[3 * I]) + FBuffer[3 * I + 1] + FBuffer[3 * I + 2]) div 3;
   // One pixel of padding: bilinear taps never reach a neighbour (glyphs are point-sampled anyway).
-  if not Allocate(W + 1, H + 1, X, Y) then
+  if not Allocate(Texels + 1, H + 1, X, Y) then
     Exit(False);
-  FUpload(X, Y, W, H, @FBuffer[0], W);
+  FUpload(X, Y, Texels, H, @FBuffer[0], Texels);
   AResult.X := X;
   AResult.Y := Y;
   AResult.W := W;
@@ -1115,23 +1164,24 @@ begin
   AResult.Top := Bounds.Top;
 end;
 
-function TFastGlyphCache.Glyph(var AFaceGlyphs: TFastFaceGlyphs; const AGlyph: Word; const ASub: Integer): TFastGlyph;
+function TFastGlyphCache.Glyph(var AFaceGlyphs: TFastFaceGlyphs; const AGlyph: Word; const ASub: Integer;
+  const AKind: TFastGlyphKind): TFastGlyph;
 var
   Key: Cardinal;
   Face: IDWriteFontFace;
   EmSize: Single;
 begin
-  Key := AGlyph or (Cardinal(ASub) shl 16);
+  Key := AGlyph or (Cardinal(ASub) shl 16) or (Cardinal(Ord(AKind)) shl 24);
   if AFaceGlyphs.FGlyphs.TryGetValue(Key, Result) then
     Exit;
-  if not Rasterize(AFaceGlyphs, AGlyph, ASub, Result) then
+  if not Rasterize(AFaceGlyphs, AGlyph, ASub, AKind, Result) then
   begin
     // The atlas is full: start over (the canvas flushes what was drawn with the old content).
     Face := AFaceGlyphs.FFace;
     EmSize := AFaceGlyphs.FEmSize;
     Clear;
     AFaceGlyphs := Self.Face(Face, EmSize);
-    if not Rasterize(AFaceGlyphs, AGlyph, ASub, Result) then
+    if not Rasterize(AFaceGlyphs, AGlyph, ASub, AKind, Result) then
       FillChar(Result, SizeOf(Result), 0);
   end;
   AFaceGlyphs.FGlyphs.Add(Key, Result);

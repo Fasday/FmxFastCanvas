@@ -69,6 +69,11 @@ begin
     Result := Result + ', DirectComposition'
   else
     Result := Result + ', flip';
+  case FastCanvasTextAntialias of
+    TFastTextAntialias.ClearType: Result := Result + ', ClearType';
+    TFastTextAntialias.Aliased: Result := Result + ', aliased text';
+    TFastTextAntialias.System: Result := Result + ', system text antialiasing';
+  end;
 end;
 
 procedure THelloForm.PaintBoxDrawingPaint(Sender: TObject; Canvas: TCanvas);

@@ -16,6 +16,8 @@ cbuffer Frame : register(b0)
     float4 GammaRatios;  // alpha correction for the system text gamma (see TextAlpha)
     uint   RegionFirst;  // a frame that updates part of a window: the boxes of these clip entries (see ClipFactor)
     uint   RegionCount;  // 0: the whole target
+    float  ClearTypeContrast;  // enhanced contrast of the system text rendering parameters (ClearType text)
+    float  ClearTypeLevel;     // 0..1: how far ClearType text separates the channels (see ClearTypeAlpha)
 };
 
 Texture2D Tex0 : register(t0);
@@ -55,6 +57,8 @@ SamplerState WrapSampler : register(s2);   // linear, repeating (bitmap brushes 
 #define CAP_ROUND  2
 
 #define FLAG_DASHED 0x10000   // lines: the paint index is a dash pattern
+#define FLAG_CLEARTYPE 0x20000   // glyphs: ClearType, three atlas texels (R, G, B) per pixel (see GlyphRgb)
+#define FLAG_ALIASED 0x40000     // paths: hard edges (aliased text drawn as outlines)
 
 struct Instance
 {
@@ -375,6 +379,29 @@ float TextAlpha(float alpha, float3 color)
     return a + a * (1.0 - a) * ((g.x * f + g.y) * a + (g.z * f + g.w));
 }
 
+// The same for ClearType text, per channel (DWrite_ClearTypeBlend of the same sources): the coverage of each
+// subpixel, contrast-enhanced with the ClearType contrast, alpha-corrected with the channel of the text color. The
+// ClearType level blends the channels towards their mean (0: grayscale).
+float3 ClearTypeAlpha(float3 alpha, float3 color)
+{
+    alpha = lerp(dot(alpha, 1.0 / 3.0), alpha, ClearTypeLevel);
+    float k = ClearTypeContrast * saturate(dot(color, float3(0.30, 0.59, 0.11) * -4.0) + 3.0);
+    float3 a = alpha * (k + 1.0) / (alpha * k + 1.0);
+    float4 g = GammaRatios;
+    return a + a * (1.0 - a) * ((g.x * color + g.y) * a + (g.z * color + g.w));
+}
+
+// The ClearType coverage of a glyph pixel: its three subpixels are three consecutive atlas texels (R, G, B), and the
+// texture coordinate of the pixel center points at the middle one.
+float3 GlyphRgb(float2 uv)
+{
+    uint w, h;
+    GlyphAtlas.GetDimensions(w, h);
+    int2 t = int2(uv * float2(w, h));
+    return float3(GlyphAtlas.Load(int3(t.x - 1, t.y, 0)), GlyphAtlas.Load(int3(t, 0)),
+        GlyphAtlas.Load(int3(t.x + 1, t.y, 0)));
+}
+
 // Antiderivative of clamp(t, 0, 1).
 float RampIntegral(float t)
 {
@@ -420,8 +447,9 @@ float PathCoverage(float2 l, float w, float4 rect, uint header, uint bands, bool
     return evenOdd ? 1 - abs(1 - fmod(acc, 2)) : saturate(acc);
 }
 
-// The premultiplied color of a pixel of a primitive.
-float4 Shade(Varyings i)
+// The premultiplied color of a pixel of a primitive, and how much of each channel of the target it replaces
+// (dual-source blending, PSMainDual): per channel for ClearType glyphs, the color's alpha for everything else.
+float4 Shade(Varyings i, out float3 weights)
 {
     uint flags = i.Data.y;
     uint kind = flags & 15;
@@ -493,7 +521,7 @@ float4 Shade(Varyings i)
     if (kind == KIND_PATH)
     {
         coverage = PathCoverage(i.Local, w, i.Rect, asuint(i.UvRect.x), asuint(i.UvRect.y), asuint(i.UvRect.z) != 0);
-        if (Aliased > 0.5)
+        if (Aliased > 0.5 || (flags & FLAG_ALIASED) != 0)
             coverage = coverage >= 0.5 ? 1 : 0;
     }
     else if (kind == KIND_GLYPH || kind == KIND_SOLID || Aliased > 0.5)
@@ -504,10 +532,18 @@ float4 Shade(Varyings i)
 
     float4 color;
     float4 tint = UnpackColor(i.Data.x);
+    bool perChannel = false;
+    weights = 0;
     if (kind == KIND_IMAGE)
     {
         // Textures hold premultiplied alpha; the instance color carries the opacity in alpha.
         color = SampleSlot((flags >> 4) & 7, i.Uv, i.UvRect, ((flags >> 7) & 1) != 0) * tint.a;
+    }
+    else if (kind == KIND_GLYPH && (flags & FLAG_CLEARTYPE) != 0)
+    {
+        weights = ClearTypeAlpha(GlyphRgb(i.Uv), tint.rgb) * tint.a;
+        color = float4(tint.rgb * weights, dot(weights, 1.0 / 3.0));
+        perChannel = true;
     }
     else if (kind == KIND_GLYPH)
     {
@@ -535,12 +571,32 @@ float4 Shade(Varyings i)
         }
         color = image ? imageColor : float4(s.rgb * s.a, s.a);
     }
-    return color * coverage;
+    color *= coverage;
+    weights = perChannel ? weights * coverage : color.aaa;
+    return color;
 }
 
 float4 PSMain(Varyings i) : SV_Target
 {
-    return Shade(i);
+    float3 weights;
+    return Shade(i, weights);
+}
+
+struct DualOutput
+{
+    float4 Color : SV_Target0;
+    float4 Weights : SV_Target1;
+};
+
+// Frames of windows with ClearType text: dual-source blending, target = Color + target * (1 - Weights) per channel
+// (the same as PSMain's blending for everything but ClearType glyphs).
+DualOutput PSMainDual(Varyings i)
+{
+    DualOutput o;
+    float3 weights;
+    o.Color = Shade(i, weights);
+    o.Weights = float4(weights, o.Color.a);
+    return o;
 }
 
 // Measurement aid (TFastCanvasOption.HdrLinearBlend, HDR windows): the color turned into linear light before it is
@@ -548,7 +604,8 @@ float4 PSMain(Varyings i) : SV_Target
 // SDR targets.
 float4 PSMainLinear(Varyings i) : SV_Target
 {
-    float4 c = Shade(i);
+    float3 weights;
+    float4 c = Shade(i, weights);
     float3 s = c.a > 0 ? max(c.rgb / c.a, 0) : 0;
     s = s <= 0.04045 ? s / 12.92 : pow((s + 0.055) / 1.055, 2.4);
     return float4(s * c.a, c.a);

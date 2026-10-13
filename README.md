@@ -14,8 +14,8 @@ Direct3D 11 or Direct3D 12. Programs stay standard FMX programs: forms, controls
 - **Ray-traced effects** (Direct3D 12, DXR 1.1): shadows, soft shadows, ambient occlusion and reflections added to any
   FMX 3D scene, with FMX's own materials and lights; application ray passes (compute and pixel shaders over the scene).
 - **Looks like FMX.** Text is antialiased in grayscale with DirectWrite's contrast and gamma, as FMX's Direct2D canvas
-  draws it; windows are shown through DirectComposition, so forms drawn transparent over Mica or Acrylic look as with
-  the stock canvas.
+  draws it (optionally ClearType, aliased or as Windows draws it: `FastCanvasTextAntialias`); windows are shown through
+  DirectComposition, so forms drawn transparent over Mica or Acrylic look as with the stock canvas.
 - **HDR output** (Direct3D 12) on HDR displays, for forms and `TForm3D`: SDR content unchanged, 3D content above SDR
   white (`DrawIntensity`: lamps, screens, the sky brighter than white without shaders; application passes).
 - **Robust.** Device loss (driver update, GPU reset) is recovered and bitmaps keep their pixels; partial repaints on
@@ -110,8 +110,9 @@ msbuild Examples.groupproj /p:Config=Release /p:Platform=Win64
 ```
 
 (the programs are in `example\Win64\Release`). Environment variables of the examples: `FC_BACKEND=11` (Direct3D 11:
-no ray tracing, no HDR), `FC_PRESENT=flip` (windows without DirectComposition), `FC_STOCK=1` (FMX's own canvas and 3D
-context, to compare), `FC_HDR=force` (`HelloForm3D`: HDR output also on an SDR display).
+no ray tracing, no HDR), `FC_PRESENT=flip` (windows without DirectComposition), `FC_TEXT=cleartype|aliased|system`
+(`HelloFastCanvas`: text antialiasing), `FC_STOCK=1` (FMX's own canvas and 3D context, to compare), `FC_HDR=force`
+(`HelloForm3D`: HDR output also on an SDR display).
 
 ## Main settings
 
@@ -142,7 +143,8 @@ Global variables, set before `Application.Initialize`; all of them in [docs/USAG
 ## Limitations
 
 - Windows only (Win64 and Win32); no printing canvas (`TPrinter`).
-- Grayscale text antialiasing (as FMX's Direct2D canvas), not ClearType.
+- ClearType (`FastCanvasTextAntialias`) only in window frames: text in bitmaps (effects, `TLayer3D`, `TForm3D`), in
+  transparent forms and rotated text stays grayscale.
 - Partial repaints and HDR output on Direct3D 12 only; windows with HDR output are opaque.
 - Windows presenting with tearing (`AllowTearing`) take `Flip`.
 - The ray-traced effects do not trace transparent objects.

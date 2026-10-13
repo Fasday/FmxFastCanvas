@@ -13,10 +13,10 @@ patches (`third_party/delphidx12/PROVENANCE.md`).
 
 ## Microsoft Terminal (MIT License)
 
-The grayscale text blending of the canvas (`src/Canvas/Shaders/FastCanvas.hlsl`, function `TextAlpha`, and
-`TGpuRenderer.ReadTextParameters` in `src/Canvas/FastCanvas.Gpu.pas`) follows the formulas of
-`src/renderer/atlas/dwrite_helpers.hlsl` and `dwrite_helpers.cpp` of Microsoft Terminal, which reproduce
-DirectWrite's own grayscale contrast enhancement and gamma correction.
+The grayscale and ClearType text blending of the canvas (`src/Canvas/Shaders/FastCanvas.hlsl`, functions `TextAlpha`
+and `ClearTypeAlpha`, and `TGpuRenderer.ReadTextParameters` in `src/Canvas/FastCanvas.Gpu.pas`) follows the formulas
+of `src/renderer/atlas/dwrite_helpers.hlsl` and `dwrite_helpers.cpp` of Microsoft Terminal, which reproduce
+DirectWrite's own contrast enhancement and gamma correction (`DWrite_GrayscaleBlend`, `DWrite_ClearTypeBlend`).
 
 - Upstream: https://github.com/microsoft/terminal
 
