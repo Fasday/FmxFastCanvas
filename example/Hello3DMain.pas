@@ -15,14 +15,27 @@ interface
 uses
   System.SysUtils, System.Types, System.UITypes, System.Classes, System.Math, System.Math.Vectors,
   FMX.Types, FMX.Controls, FMX.Forms, FMX.Forms3D, FMX.Types3D, FMX.Graphics, FMX.Controls3D, FMX.Objects3D,
-  FMX.MaterialSources, FMX.Layers3D, FMX.Objects, FMX.StdCtrls, FMX.Controls.Presentation, FMX.Ani;
+  FMX.Materials, FMX.MaterialSources, FMX.Layers3D, FMX.Objects, FMX.StdCtrls, FMX.Controls.Presentation, FMX.Ani, FMX.Layouts, FMX.ListBox;
 
 type
+  // An interposer keeps the standard TLayer3D in the FMX designer. At runtime the reader uses this field class.
+  // FMX sorts by material address: a non-nil sorting material puts the screen layer after the scene dummies.
+  TLayer3D = class(FMX.Layers3D.TLayer3D)
+  private
+    FSortMaterial: TMaterial;
+  protected
+    function GetMaterialForSorting: TMaterial; override;
+  public
+    constructor Create(AOwner: TComponent); override;
+    destructor Destroy; override;
+  end;
+
   THello3DForm = class(TForm3D)
     DummyCamera: TDummy;
     Camera1: TCamera;
     FloatAnimationCamera: TFloatAnimation;
     Light1: TLight;
+    DummyScene: TDummy;
     PlaneFloor: TPlane;
     CubeBlue: TCube;
     FloatAnimationCube: TFloatAnimation;
@@ -52,9 +65,15 @@ type
     CheckBoxFloor: TCheckBox;
     CheckBoxHdr: TCheckBox;
     LabelHdr: TLabel;
+    LayoutSettings: TLayout;
+    LayoutDlss: TLayout;
+    CheckBoxDlss: TCheckBox;
+    ComboBoxDlss: TComboBox;
+    LabelDlss: TLabel;
     procedure FormCreate(Sender: TObject);
     procedure RayTracingChange(Sender: TObject);
     procedure HdrChange(Sender: TObject);
+    procedure DlssChange(Sender: TObject);
     procedure TimerHdrTimer(Sender: TObject);
     procedure DummyLampRender(Sender: TObject; Context: TContext3D);
     procedure SphereLampRender(Sender: TObject; Context: TContext3D);
@@ -63,6 +82,7 @@ type
     FLampIntensity: Single;
     function Describe: string;
     procedure UpdateHdr;
+    procedure UpdateDlss;
   end;
 
 var
@@ -77,15 +97,33 @@ var
 implementation
 
 uses
-  FastCanvas.Device, FastCanvas.Canvas, FastCanvas.Context3D12, FastCanvas.Hdr;
+  FastCanvas.Device, FastCanvas.Canvas, FastCanvas.Context3D12, FastCanvas.Hdr, FastCanvas.Dlss;
 
 {$R *.fmx}
+
+constructor TLayer3D.Create(AOwner: TComponent);
+begin
+  inherited;
+  FSortMaterial := TTextureMaterial.Create;
+end;
+
+destructor TLayer3D.Destroy;
+begin
+  FSortMaterial.Free;
+  inherited;
+end;
+
+function TLayer3D.GetMaterialForSorting: TMaterial;
+begin
+  Result := FSortMaterial;
+end;
 
 procedure THello3DForm.FormCreate(Sender: TObject);
 var
   Available: Boolean;
 begin
   FLampIntensity := 1;
+  ComboBoxDlss.ItemIndex := 0;
   // The device is made on first use; what it is decides what the panel offers.
   if FastCanvasInstalled then
     TFastDevice.Ensure;
@@ -120,6 +158,9 @@ begin
   Caption := 'Hello FastCanvas, TForm3D - ' + Describe;
   RayTracingChange(nil);
   HdrChange(nil);
+  CheckBoxDlss.Enabled := FastCanvasInstalled and (TFastDevice.Backend = TFastCanvasBackend.D3D12) and
+    (Context is TFastContext3D12) and TFastContext3D12(Context).DlssAvailable;
+  DlssChange(nil);
 end;
 
 function THello3DForm.Describe: string;
@@ -168,10 +209,32 @@ begin
   Invalidate;
 end;
 
+procedure THello3DForm.DlssChange(Sender: TObject);
+const Modes: array[0..4] of TFastDlssMode = (TFastDlssMode.Quality, TFastDlssMode.Balanced,
+  TFastDlssMode.Performance, TFastDlssMode.UltraPerformance, TFastDlssMode.DLAA);
+var Mode: TFastDlssMode;
+begin
+  if csLoading in ComponentState then Exit;
+  Mode := TFastDlssMode.Off;
+  if CheckBoxDlss.Enabled and CheckBoxDlss.IsChecked then Mode := Modes[EnsureRange(ComboBoxDlss.ItemIndex, 0, 4)];
+  ComboBoxDlss.Enabled := CheckBoxDlss.Enabled and CheckBoxDlss.IsChecked;
+  FastContext3DDlssMode := Mode;
+  if Context is TFastContext3D12 then TFastContext3D12(Context).DlssMode := Mode;
+  UpdateDlss;
+  Invalidate;
+end;
+
+procedure THello3DForm.UpdateDlss;
+begin
+  if Context is TFastContext3D12 then LabelDlss.Text := TFastContext3D12(Context).DlssStatus
+  else LabelDlss.Text := 'Needs FastCanvas on Direct3D 12';
+end;
+
 procedure THello3DForm.TimerHdrTimer(Sender: TObject);
 begin
   // The window may have moved to another display, Windows HDR or the SDR brightness may have changed.
   UpdateHdr;
+  UpdateDlss;
 end;
 
 procedure THello3DForm.UpdateHdr;

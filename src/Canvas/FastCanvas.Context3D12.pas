@@ -40,7 +40,7 @@ interface
 
 uses
   System.Types, System.UITypes, System.SysUtils, System.Math, System.Math.Vectors, System.Generics.Collections,
-  FMX.Types, FMX.Types3D, FMX.Graphics, FastCanvas.Context3D;
+  FMX.Types, FMX.Types3D, FMX.Graphics, FastCanvas.Context3D, FastCanvas.Dlss;
 
 type
   /// <summary>Ray-traced effects of a TFastContext3D12 (DXR tier 1.1 hardware; ignored without it).</summary>
@@ -165,6 +165,15 @@ type
 
   TFastContext3D12 = class(TFastContext3D)
   private
+    FDlssMode, FDlssBuiltMode: TFastDlssMode;
+    FDlssState: IInterface;
+    FDlssPhase: Boolean;
+    function GetDlssAvailable: Boolean;
+    function GetDlssStatus: string;
+    function GetDlssFrames: Int64;
+    procedure FinishDlssScene;
+    procedure RecordDlssMotion(const C: Pointer; const AGeometry: UInt64; const APosition, ACull: Integer);
+  private
     FRay: TFastRayTracing;
     // Application ray passes and the attributes of the draws that enter the scene.
     FRayScene, FRayInclude: Boolean;
@@ -225,6 +234,7 @@ type
     procedure DoCopyToBits(const Bits: Pointer; const Pitch: Integer; const ARect: TRect); override;
     function DoBeginScene: Boolean; override;
     procedure DoEndScene; override;
+    procedure DoSetShaderVariable(const Name: string; const Data: array of TVector3D); overload; override;
     procedure DoClear(const ATarget: TClearTargets; const AColor: TAlphaColor; const ADepth: Single;
       const AStencil: Cardinal); override;
     procedure DoDrawPrimitivesBatch(const AKind: TPrimitivesKind; const Vertices, Indices: Pointer;
@@ -250,6 +260,13 @@ type
     class function RayTracingSupported: Boolean;
     /// <summary>Ray-traced effects; a new context starts with FastContext3DRayTracing. Read at every scene.</summary>
     property RayTracing: TFastRayTracing read FRay write FRay;
+    /// <summary>Native NVIDIA DLSS SR in window contexts. Off preserves the stock resolution/MSAA path.
+    /// The renderer applies mode changes at the next scene and keeps screen-projected UI at output resolution.</summary>
+    property DlssMode: TFastDlssMode read FDlssMode write FDlssMode;
+    property DlssAvailable: Boolean read GetDlssAvailable;
+    property DlssStatus: string read GetDlssStatus;
+    /// <summary>Successful NGX evaluations, for diagnostics (zero is not reported as active DLSS).</summary>
+    property DlssFrames: Int64 read GetDlssFrames;
     property RayShadows: Boolean read FRay.Shadows write FRay.Shadows;
     property RayShadowStrength: Single read FRay.ShadowStrength write FRay.ShadowStrength;
     property RayShadowSoftness: Single read FRay.ShadowSoftness write FRay.ShadowSoftness;
@@ -332,6 +349,8 @@ type
   end;
 
 var
+  /// <summary>Native DLSS SR mode for new Win64 window contexts.</summary>
+  FastContext3DDlssMode: TFastDlssMode = TFastDlssMode.Off;
   /// <summary>Ray-traced effects every new TFastContext3D12 starts with (TViewport3D, TForm3D, filters).</summary>
   FastContext3DRayTracing: TFastRayTracing = (Shadows: False; ShadowStrength: 0.7; ShadowSoftness: 0;
     ShadowSamples: 8; AmbientOcclusion: False; AORadius: 1; AOStrength: 0.6; AOSamples: 8; Reflections: False;
@@ -485,6 +504,9 @@ type
     Samplers: UInt64;
     /// <summary>The blend factor of a scaled pipeline (DrawIntensity, sRGB-encoded); -1: not scaled.</summary>
     Factor: Single;
+    DlssState: Pointer;
+    DlssCurrent, DlssPrevious: TMatrix3D;
+    DlssPosition, DlssCull: Integer;
   end;
 
   TRayTransform = array[0..2, 0..3] of Single;
@@ -1314,6 +1336,7 @@ begin
 end;
 
 {$I FastCanvas.Context3D12.Ray.inc}
+{$I FastCanvas.Context3D12.Dlss.inc}
 
 procedure HandleDraw(const AData: Pointer);
 var
@@ -1459,6 +1482,7 @@ begin
     RayAddObject(C, VB, IB, VRes, VOff, IRes, IOff);
     R.RayObjectTexture := nil;
   end;
+  DlssMotionDraw(C, VB, IB);
 end;
 
 procedure HandleCopy(const AData: Pointer);
@@ -1627,6 +1651,7 @@ constructor TFastContext3D12.CreateFromWindow(const AParent: TWindowHandle; cons
   const AMultisample: TMultisample; const ADepthStencil: Boolean);
 begin
   inherited;
+  FDlssMode := FastContext3DDlssMode;
   FRay := FastContext3DRayTracing;
   FRayInclude := True;
   FRayMask := $FF;
@@ -1678,6 +1703,8 @@ end;
 
 function TFastContext3D12.TargetPixels: TSize;
 begin
+  if FDlssPhase then
+    Exit(TDlssState(FDlssState as TObject).InputSize);
   if Texture <> nil then
     Result := TSize.Create(Texture.Width, Texture.Height)
   else
@@ -1767,6 +1794,7 @@ var
   T: TTexture12;
   Wnd: HWND;
   BufferFormat: TDXGI_FORMAT;
+  Dlss: TDlssState; DepthSize: TSize;
 begin
   S := Shared;
   Px := TargetPixels;
@@ -1837,12 +1865,30 @@ begin
     FHdrColor := NewTexture(Px.Width, Px.Height, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT,
       D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET, D3D12_RESOURCE_STATE_RENDER_TARGET);
   end;
+  FDlssBuiltMode := FDlssMode;
+  DepthSize := Px;
+  if Texture = nil then
+  begin
+    if FDlssState = nil then FDlssState := TDlssState.Create;
+    Dlss := TDlssState(FDlssState as TObject);
+    Dlss.Mode := FDlssMode;
+    Dlss.Active := (FDlssMode <> TFastDlssMode.Off) and DepthStencil and Dlss.Session.Available;
+    if Dlss.Active then
+    begin
+      Dlss.OutputSize := Px;
+      Dlss.InputSize := Dlss.Session.RenderSize(Px, FDlssMode);
+      Dlss.Hdr := FWindowHdr;
+      Dlss.MakeTextures;
+      DepthSize := Dlss.InputSize;
+    end;
+  end;
   case Multisample of
     TMultisample.TwoSamples: Wanted := 2;
     TMultisample.FourSamples: Wanted := 4;
   else
     Wanted := 1;
   end;
+  if (FDlssState <> nil) and TDlssState(FDlssState as TObject).Active then Wanted := 1;
   FSamples := 1;
   while Wanted > 1 do
   begin
@@ -1861,8 +1907,9 @@ begin
     FMSColor := NewTexture(Px.Width, Px.Height, 1, FSamples, TDXGI_FORMAT(FFormat),
       D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET, D3D12_RESOURCE_STATE_RENDER_TARGET);
   if DepthStencil then
-    FDepth := NewTexture(Px.Width, Px.Height, 1, FSamples, DXGI_FORMAT_D24_UNORM_S8_UINT,
+    FDepth := NewTexture(DepthSize.Width, DepthSize.Height, 1, FSamples, DXGI_FORMAT_D24_UNORM_S8_UINT,
       D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL, D3D12_RESOURCE_STATE_DEPTH_WRITE);
+  if FDlssState <> nil then TDlssState(FDlssState as TObject).Depth := FDepth;
 end;
 
 procedure TFastContext3D12.DoCreateBuffer;
@@ -1895,10 +1942,13 @@ begin
       TGpu12Backend.WaitIdle;
     FSwapChain := nil;
   end;
+  FDlssPhase := False;
+  FDlssState := nil;
 end;
 
 function TFastContext3D12.DrawTarget: TObject;
 begin
+  if FDlssPhase then Exit(DlssTexture(TDlssState(FDlssState as TObject).Color));
   if FMSColor <> nil then
     Exit(FMSColor as TObject);
   if FHdrColor <> nil then
@@ -1929,7 +1979,7 @@ begin
   C := Rec(HandleTarget, SizeOf(TCmdTarget), T);
   C.Target := T;
   C.Depth := nil;
-  if FDepth <> nil then
+  if (FDepth <> nil) and ((FDlssState = nil) or not TDlssState(FDlssState as TObject).Active or FDlssPhase) then
   begin
     C.Depth := FDepth as TObject;
     Keep(FDepth);
@@ -1941,9 +1991,15 @@ end;
 
 function TFastContext3D12.DoBeginScene: Boolean;
 var
-  Scale: Single;
+  Scale: Single; Dlss: TDlssState; BeginCmd: PCmdDlssBegin;
 begin
+  FDlssPhase := False;
   RunPendingReset;
+  if (Texture = nil) and (FDlssBuiltMode <> FDlssMode) then
+  begin
+    FreeBuffer;
+    CreateBuffer;
+  end;
   if FSwapChain <> nil then
   begin
     // A window: HDR output switched (FastCanvasHdr, the window on another display, Windows HDR switched): a new swap
@@ -1963,6 +2019,14 @@ begin
   end;
   if FSwapChain <> nil then
     FBuffer := FBuffers[IDXGISwapChain3(FSwapChain).GetCurrentBackBufferIndex mod Cardinal(Length(FBuffers))];
+  if (FDlssState <> nil) and TDlssState(FDlssState as TObject).Active then
+  begin
+    Dlss := TDlssState(FDlssState as TObject);
+    Dlss.NextFrame;
+    FDlssPhase := True;
+    BeginCmd := Rec(HandleDlssBegin, SizeOf(TCmdDlssBegin), FDlssState);
+    BeginCmd.State := Dlss;
+  end;
   Result := (DrawTarget <> nil) and inherited DoBeginScene;
   if not Result then
     Exit;
@@ -2204,6 +2268,7 @@ begin
     for J := 0 to 3 do
       V[I, J] := Src.M[I].V[J];
   Src := CurrentProjectionMatrix;
+  if FDlssPhase then Src := Src * TDlssState(FDlssState as TObject).JitterMatrix;
   for I := 0 to 3 do
     for J := 0 to 3 do
       P[I, J] := Src.M[I].V[J];
@@ -2484,6 +2549,7 @@ var
   O: PCmdOutputHdr;
   P: PCmdPresent;
 begin
+  FinishDlssScene;
   // Where the scene ends: the RGBA16F target (Hdr, a window with HDR output), the window's buffer, the texture.
   T := nil;
   if FHdrColor <> nil then
@@ -2600,6 +2666,8 @@ begin
   if (FVS = nil) or (FPS = nil) or (VertexCount <= 0) or (IndexCount <= 0) or (Length(FVS.Code) = 0) or
     (Length(FPS.Code) = 0) then
     Exit;
+  if FDlssPhase and CurrentStates[TContextState.cs2DScene] then
+    FinishDlssScene;
   T := TTexture12(DrawTarget);
   if T = nil then
     Exit;
@@ -2614,7 +2682,7 @@ begin
   Key.State.Scissor := False;
   Key.Topology := Ord(Types[AKind]);
   Key.Samples := T.Samples;
-  Key.Depth := FDepth <> nil;
+  Key.Depth := (FDepth <> nil) and ((FDlssState = nil) or not TDlssState(FDlssState as TObject).Active or FDlssPhase);
   Key.Format := Ord(T.Format);
   Key.Scaled := FDrawIntensity <> 1;
   VBytes := VertexSize * VertexCount;
@@ -2640,6 +2708,10 @@ begin
     C.Factor := SrgbEncode(Max(FDrawIntensity, 0))
   else
     C.Factor := -1;
+  C.DlssState := nil;
+  if FDlssPhase and (AKind = TPrimitivesKind.Triangles) and CurrentStates[TContextState.cs3DScene] then
+    RecordDlssMotion(C, GeometryKey(Vertices, Indices, VertexSize, VertexCount, IndexSize, IndexCount, Offsets.Position),
+      Offsets.Position, FState.Cull);
   C.Topology := Topologies[AKind];
   C.StencilRef := FStencilRef;
   if FState.Scissor then

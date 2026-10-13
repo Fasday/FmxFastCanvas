@@ -150,6 +150,10 @@
         </BorlandProject>
         <ProjectFileVersion>12</ProjectFileVersion>
     </ProjectExtensions>
+    <!-- NVIDIA DLSS (HelloForm3D on an RTX GPU): nvngx_dlss.dll of the DLSS SDK, put into ..\third_party\nvidia_dlss\bin\win64, is copied next to the program. -->
+    <Target Name="CopyDlssRuntime" AfterTargets="Build" Condition="'$(Platform)'=='Win64' and Exists('..\third_party\nvidia_dlss\bin\win64\nvngx_dlss.dll')">
+        <Copy SourceFiles="..\third_party\nvidia_dlss\bin\win64\nvngx_dlss.dll" DestinationFolder="$(MSBuildProjectDirectory)\$(DCC_ExeOutput)" SkipUnchangedFiles="true"/>
+    </Target>
     <Import Project="$(BDS)\Bin\CodeGear.Delphi.Targets" Condition="Exists('$(BDS)\Bin\CodeGear.Delphi.Targets')"/>
     <Import Project="$(APPDATA)\Embarcadero\$(BDSAPPDATABASEDIR)\$(PRODUCTVERSION)\UserTools.proj" Condition="Exists('$(APPDATA)\Embarcadero\$(BDSAPPDATABASEDIR)\$(PRODUCTVERSION)\UserTools.proj')"/>
 </Project>

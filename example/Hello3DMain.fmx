@@ -47,107 +47,112 @@ object Hello3DForm: THello3DForm
     Height = 1.000000000000000000
     Depth = 1.000000000000000000
   end
-  object PlaneFloor: TPlane
-    Position.Y = 1.500000000000000000
-    RotationAngle.X = 90.000000000000000000
-    Width = 40.000000000000000000
-    Height = 40.000000000000000000
-    Depth = 0.009999999776482582
-    MaterialSource = MaterialFloor
-  end
-  object CubeBlue: TCube
-    Position.X = -3.000000000000000000
-    Position.Y = 0.500000000000000000
-    Position.Z = 0.500000000000000000
-    Width = 2.000000000000000000
-    Height = 2.000000000000000000
-    Depth = 2.000000000000000000
-    MaterialSource = MaterialBlue
-    object FloatAnimationCube: TFloatAnimation
-      Enabled = True
-      Duration = 10.000000000000000000
-      Loop = True
-      PropertyName = 'RotationAngle.Y'
-      StartValue = 0.000000000000000000
-      StopValue = 360.000000000000000000
-    end
-  end
-  object SphereRed: TSphere
-    Position.Y = 0.500000000000000000
-    Position.Z = -1.000000000000000000
-    Width = 2.000000000000000000
-    Height = 2.000000000000000000
-    Depth = 2.000000000000000000
-    SubdivisionsAxes = 32
-    SubdivisionsHeight = 24
-    MaterialSource = MaterialRed
-    object FloatAnimationSphere: TFloatAnimation
-      Enabled = True
-      AnimationType = Out
-      AutoReverse = True
-      Duration = 0.699999988079071000
-      Interpolation = Quadratic
-      Loop = True
-      PropertyName = 'Position.Y'
-      StartValue = 0.500000000000000000
-      StopValue = -1.200000047683716000
-    end
-  end
-  object CylinderGreen: TCylinder
-    Position.X = 3.000000000000000000
-    Position.Y = -0.500000000000000000
-    Position.Z = 1.000000000000000000
-    Width = 0.800000011920929000
-    Height = 4.000000000000000000
-    Depth = 0.800000011920929000
-    SubdivisionsAxes = 24
-    MaterialSource = MaterialGreen
-  end
-  object ConeYellow: TCone
-    Position.X = 0.500000000000000000
-    Position.Y = 0.500000000000000000
-    Position.Z = 3.000000000000000000
-    Width = 1.600000023841858000
-    Height = 2.000000000000000000
-    Depth = 1.600000023841858000
-    SubdivisionsAxes = 24
-    MaterialSource = MaterialYellow
-  end
-  object DummyLamp: TDummy
-    Position.X = -1.200000047683716000
-    Position.Y = -2.599999904632568000
-    Position.Z = 1.000000000000000000
+  object DummyScene: TDummy
     Width = 1.000000000000000000
     Height = 1.000000000000000000
     Depth = 1.000000000000000000
-    OnRender = DummyLampRender
-    object LightLamp: TLight
-      Color = xFF806040
-      LightType = Point
-      SpotCutOff = 180.000000000000000000
+    object PlaneFloor: TPlane
+      Position.Y = 1.500000000000000000
+      RotationAngle.X = 90.000000000000000000
+      Width = 40.000000000000000000
+      Height = 40.000000000000000000
+      Depth = 0.009999999776482582
+      MaterialSource = MaterialFloor
+    end
+    object CubeBlue: TCube
+      Position.X = -3.000000000000000000
+      Position.Y = 0.500000000000000000
+      Position.Z = 0.500000000000000000
+      Width = 2.000000000000000000
+      Height = 2.000000000000000000
+      Depth = 2.000000000000000000
+      MaterialSource = MaterialBlue
+      object FloatAnimationCube: TFloatAnimation
+        Enabled = True
+        Duration = 10.000000000000000000
+        Loop = True
+        PropertyName = 'RotationAngle.Y'
+        StartValue = 0.000000000000000000
+        StopValue = 360.000000000000000000
+      end
+    end
+    object SphereRed: TSphere
+      Position.Y = 0.500000000000000000
+      Position.Z = -1.000000000000000000
+      Width = 2.000000000000000000
+      Height = 2.000000000000000000
+      Depth = 2.000000000000000000
+      SubdivisionsAxes = 32
+      SubdivisionsHeight = 24
+      MaterialSource = MaterialRed
+      object FloatAnimationSphere: TFloatAnimation
+        Enabled = True
+        AnimationType = Out
+        AutoReverse = True
+        Duration = 0.699999988079071000
+        Interpolation = Quadratic
+        Loop = True
+        PropertyName = 'Position.Y'
+        StartValue = 0.500000000000000000
+        StopValue = -1.200000047683716000
+      end
+    end
+    object CylinderGreen: TCylinder
+      Position.X = 3.000000000000000000
+      Position.Y = -0.500000000000000000
+      Position.Z = 1.000000000000000000
+      Width = 0.800000011920929000
+      Height = 4.000000000000000000
+      Depth = 0.800000011920929000
+      SubdivisionsAxes = 24
+      MaterialSource = MaterialGreen
+    end
+    object ConeYellow: TCone
+      Position.X = 0.500000000000000000
+      Position.Y = 0.500000000000000000
+      Position.Z = 3.000000000000000000
+      Width = 1.600000023841858000
+      Height = 2.000000000000000000
+      Depth = 1.600000023841858000
+      SubdivisionsAxes = 24
+      MaterialSource = MaterialYellow
+    end
+    object DummyLamp: TDummy
+      Position.X = -1.200000047683716000
+      Position.Y = -2.599999904632568000
+      Position.Z = 1.000000000000000000
       Width = 1.000000000000000000
       Height = 1.000000000000000000
       Depth = 1.000000000000000000
-    end
-    object SphereLamp: TSphere
-      Width = 0.800000011920929000
-      Height = 0.800000011920929000
-      Depth = 0.800000011920929000
-      SubdivisionsAxes = 24
-      SubdivisionsHeight = 16
-      MaterialSource = MaterialLamp
-      OnRender = SphereLampRender
-    end
-    object FloatAnimationLamp: TFloatAnimation
-      Enabled = True
-      AnimationType = InOut
-      AutoReverse = True
-      Duration = 1.600000023841858000
-      Interpolation = Sinusoidal
-      Loop = True
-      PropertyName = 'Position.Y'
-      StartValue = -2.599999904632568000
-      StopValue = -3.099999904632568000
+      OnRender = DummyLampRender
+      object LightLamp: TLight
+        Color = xFF806040
+        LightType = Point
+        SpotCutOff = 180.000000000000000000
+        Width = 1.000000000000000000
+        Height = 1.000000000000000000
+        Depth = 1.000000000000000000
+      end
+      object SphereLamp: TSphere
+        Width = 0.800000011920929000
+        Height = 0.800000011920929000
+        Depth = 0.800000011920929000
+        SubdivisionsAxes = 24
+        SubdivisionsHeight = 16
+        MaterialSource = MaterialLamp
+        OnRender = SphereLampRender
+      end
+      object FloatAnimationLamp: TFloatAnimation
+        Enabled = True
+        AnimationType = InOut
+        AutoReverse = True
+        Duration = 1.600000023841858000
+        Interpolation = Sinusoidal
+        Loop = True
+        PropertyName = 'Position.Y'
+        StartValue = -2.599999904632568000
+        StopValue = -3.099999904632568000
+      end
     end
   end
   object MaterialFloor: TLightMaterialSource
@@ -209,10 +214,11 @@ object Hello3DForm: THello3DForm
   object LayerPanel: TLayer3D
     Transparency = True
     Projection = Screen
+    ZWrite = False
     Position.X = 146.000000000000000000
-    Position.Y = 147.000000000000000000
+    Position.Y = 207.000000000000000000
     Width = 260.000000000000000000
-    Height = 262.000000000000000000
+    Height = 382.000000000000000000
     object RectanglePanel: TRectangle
       Align = Client
       Fill.Color = xD0202020
@@ -221,135 +227,192 @@ object Hello3DForm: THello3DForm
       Padding.Right = 14.000000000000000000
       Padding.Bottom = 12.000000000000000000
       Size.Width = 260.000000000000000000
-      Size.Height = 262.000000000000000000
+      Size.Height = 382.000000000000000000
       Size.PlatformDefault = False
       Stroke.Color = x30FFFFFF
       XRadius = 8.000000000000000000
       YRadius = 8.000000000000000000
-      object LabelTitle: TLabel
-        Align = Top
-        StyledSettings = [Family, Style]
-        Position.X = 14.000000000000000000
-        Position.Y = 12.000000000000000000
+      object LayoutSettings: TLayout
+        Align = Client
         Size.Width = 232.000000000000000000
-        Size.Height = 26.000000000000000000
+        Size.Height = 358.000000000000000000
         Size.PlatformDefault = False
-        TextSettings.Font.Size = 16.000000000000000000
-        TextSettings.FontColor = claWhite
-        Text = 'Ray tracing (DXR)'
-        TabOrder = 0
-      end
-      object LabelStatus: TLabel
-        Align = Top
-        StyledSettings = [Family, Style]
-        Position.X = 14.000000000000000000
-        Position.Y = 38.000000000000000000
-        Size.Width = 232.000000000000000000
-        Size.Height = 20.000000000000000000
-        Size.PlatformDefault = False
-        TextSettings.Font.Size = 12.000000000000000000
-        TextSettings.FontColor = xFFD0D0D0
-        Text = 'DirectX Raytracing 1.1'
-        TabOrder = 1
-      end
-      object CheckBoxShadows: TCheckBox
-        Align = Top
-        StyledSettings = [Family, Size, Style]
-        IsChecked = True
-        Margins.Top = 6.000000000000000000
-        Position.X = 14.000000000000000000
-        Position.Y = 64.000000000000000000
-        Size.Width = 232.000000000000000000
-        Size.Height = 28.000000000000000000
-        Size.PlatformDefault = False
-        TabOrder = 2
-        Text = 'Shadows'
-        TextSettings.FontColor = claWhite
-        OnChange = RayTracingChange
-      end
-      object CheckBoxSoft: TCheckBox
-        Align = Top
-        StyledSettings = [Family, Size, Style]
-        IsChecked = True
-        Position.X = 14.000000000000000000
-        Position.Y = 92.000000000000000000
-        Size.Width = 232.000000000000000000
-        Size.Height = 28.000000000000000000
-        Size.PlatformDefault = False
-        TabOrder = 3
-        Text = 'Soft shadows'
-        TextSettings.FontColor = claWhite
-        OnChange = RayTracingChange
-      end
-      object CheckBoxAO: TCheckBox
-        Align = Top
-        StyledSettings = [Family, Size, Style]
-        IsChecked = True
-        Position.X = 14.000000000000000000
-        Position.Y = 120.000000000000000000
-        Size.Width = 232.000000000000000000
-        Size.Height = 28.000000000000000000
-        Size.PlatformDefault = False
-        TabOrder = 4
-        Text = 'Ambient occlusion'
-        TextSettings.FontColor = claWhite
-        OnChange = RayTracingChange
-      end
-      object CheckBoxReflections: TCheckBox
-        Align = Top
-        StyledSettings = [Family, Size, Style]
-        IsChecked = True
-        Position.X = 14.000000000000000000
-        Position.Y = 148.000000000000000000
-        Size.Width = 232.000000000000000000
-        Size.Height = 28.000000000000000000
-        Size.PlatformDefault = False
-        TabOrder = 5
-        Text = 'Reflections'
-        TextSettings.FontColor = claWhite
-        OnChange = RayTracingChange
-      end
-      object CheckBoxFloor: TCheckBox
-        Align = Top
-        StyledSettings = [Family, Size, Style]
-        IsChecked = True
-        Position.X = 14.000000000000000000
-        Position.Y = 176.000000000000000000
-        Size.Width = 232.000000000000000000
-        Size.Height = 28.000000000000000000
-        Size.PlatformDefault = False
-        TabOrder = 6
-        Text = 'Floor'
-        TextSettings.FontColor = claWhite
-        OnChange = RayTracingChange
-      end
-      object CheckBoxHdr: TCheckBox
-        Align = Top
-        StyledSettings = [Family, Size, Style]
-        IsChecked = True
-        Position.X = 14.000000000000000000
-        Position.Y = 204.000000000000000000
-        Size.Width = 232.000000000000000000
-        Size.Height = 28.000000000000000000
-        Size.PlatformDefault = False
-        TabOrder = 7
-        Text = 'HDR'
-        TextSettings.FontColor = claWhite
-        OnChange = HdrChange
-      end
-      object LabelHdr: TLabel
-        Align = Top
-        StyledSettings = [Family, Style]
-        Margins.Left = 24.000000000000000000
-        Position.X = 38.000000000000000000
-        Position.Y = 232.000000000000000000
-        Size.Width = 208.000000000000000000
-        Size.Height = 18.000000000000000000
-        Size.PlatformDefault = False
-        TextSettings.Font.Size = 11.000000000000000000
-        TextSettings.FontColor = xFF9A9A9A
-        Text = 'HDR output'
-        TabOrder = 8
+        object LabelTitle: TLabel
+          Align = Top
+          StyledSettings = [Family, Style]
+          Position.X = 14.000000000000000000
+          Position.Y = 12.000000000000000000
+          Size.Width = 232.000000000000000000
+          Size.Height = 26.000000000000000000
+          Size.PlatformDefault = False
+          TextSettings.Font.Size = 16.000000000000000000
+          TextSettings.FontColor = claWhite
+          Text = '3D rendering'
+          TabOrder = 0
+        end
+        object LabelStatus: TLabel
+          Align = Top
+          StyledSettings = [Family, Style]
+          Position.X = 14.000000000000000000
+          Position.Y = 38.000000000000000000
+          Size.Width = 232.000000000000000000
+          Size.Height = 20.000000000000000000
+          Size.PlatformDefault = False
+          TextSettings.Font.Size = 12.000000000000000000
+          TextSettings.FontColor = xFFD0D0D0
+          Text = 'DirectX Raytracing 1.1'
+          TabOrder = 1
+        end
+        object CheckBoxShadows: TCheckBox
+          Align = Top
+          StyledSettings = [Family, Size, Style]
+          IsChecked = True
+          Margins.Top = 6.000000000000000000
+          Position.X = 14.000000000000000000
+          Position.Y = 64.000000000000000000
+          Size.Width = 232.000000000000000000
+          Size.Height = 28.000000000000000000
+          Size.PlatformDefault = False
+          TabOrder = 2
+          Text = 'Shadows'
+          TextSettings.FontColor = claWhite
+          OnChange = RayTracingChange
+        end
+        object CheckBoxSoft: TCheckBox
+          Align = Top
+          StyledSettings = [Family, Size, Style]
+          IsChecked = True
+          Position.X = 14.000000000000000000
+          Position.Y = 92.000000000000000000
+          Size.Width = 232.000000000000000000
+          Size.Height = 28.000000000000000000
+          Size.PlatformDefault = False
+          TabOrder = 3
+          Text = 'Soft shadows'
+          TextSettings.FontColor = claWhite
+          OnChange = RayTracingChange
+        end
+        object CheckBoxAO: TCheckBox
+          Align = Top
+          StyledSettings = [Family, Size, Style]
+          IsChecked = True
+          Position.X = 14.000000000000000000
+          Position.Y = 120.000000000000000000
+          Size.Width = 232.000000000000000000
+          Size.Height = 28.000000000000000000
+          Size.PlatformDefault = False
+          TabOrder = 4
+          Text = 'Ambient occlusion'
+          TextSettings.FontColor = claWhite
+          OnChange = RayTracingChange
+        end
+        object CheckBoxReflections: TCheckBox
+          Align = Top
+          StyledSettings = [Family, Size, Style]
+          IsChecked = True
+          Position.X = 14.000000000000000000
+          Position.Y = 148.000000000000000000
+          Size.Width = 232.000000000000000000
+          Size.Height = 28.000000000000000000
+          Size.PlatformDefault = False
+          TabOrder = 5
+          Text = 'Reflections'
+          TextSettings.FontColor = claWhite
+          OnChange = RayTracingChange
+        end
+        object CheckBoxFloor: TCheckBox
+          Align = Top
+          StyledSettings = [Family, Size, Style]
+          IsChecked = True
+          Position.X = 14.000000000000000000
+          Position.Y = 176.000000000000000000
+          Size.Width = 232.000000000000000000
+          Size.Height = 28.000000000000000000
+          Size.PlatformDefault = False
+          TabOrder = 6
+          Text = 'Floor'
+          TextSettings.FontColor = claWhite
+          OnChange = RayTracingChange
+        end
+        object CheckBoxHdr: TCheckBox
+          Align = Top
+          StyledSettings = [Family, Size, Style]
+          IsChecked = True
+          Position.X = 14.000000000000000000
+          Position.Y = 204.000000000000000000
+          Size.Width = 232.000000000000000000
+          Size.Height = 28.000000000000000000
+          Size.PlatformDefault = False
+          TabOrder = 7
+          Text = 'HDR'
+          TextSettings.FontColor = claWhite
+          OnChange = HdrChange
+        end
+        object LabelHdr: TLabel
+          Align = Top
+          StyledSettings = [Family, Style]
+          Margins.Left = 24.000000000000000000
+          Position.X = 38.000000000000000000
+          Position.Y = 232.000000000000000000
+          Size.Width = 208.000000000000000000
+          Size.Height = 18.000000000000000000
+          Size.PlatformDefault = False
+          TextSettings.Font.Size = 11.000000000000000000
+          TextSettings.FontColor = xFF9A9A9A
+          Text = 'HDR output'
+          TabOrder = 8
+        end
+        object LayoutDlss: TLayout
+          Align = Top
+          Position.Y = 250.000000000000000000
+          Margins.Top = 8.000000000000000000
+          Size.Width = 232.000000000000000000
+          Size.Height = 104.000000000000000000
+          Size.PlatformDefault = False
+          object CheckBoxDlss: TCheckBox
+            Align = Top
+            Size.Width = 232.000000000000000000
+            Size.Height = 28.000000000000000000
+            Size.PlatformDefault = False
+            Text = 'DLSS Super Resolution'
+            StyledSettings = [Family, Size, Style]
+            TextSettings.FontColor = claWhite
+            TabOrder = 0
+            OnChange = DlssChange
+          end
+          object ComboBoxDlss: TComboBox
+            Align = Top
+            Position.Y = 28.000000000000000000
+            Margins.Left = 24.000000000000000000
+            Size.Width = 208.000000000000000000
+            Size.Height = 28.000000000000000000
+            Size.PlatformDefault = False
+            Enabled = False
+            ItemIndex = 0
+            Items.Strings = (
+              'Quality'
+              'Balanced'
+              'Performance'
+              'Ultra Performance'
+              'DLAA')
+            TabOrder = 1
+            OnChange = DlssChange
+          end
+          object LabelDlss: TLabel
+            Align = Top
+            Position.Y = 60.000000000000000000
+            Margins.Left = 24.000000000000000000
+            Margins.Top = 4.000000000000000000
+            Size.Width = 208.000000000000000000
+            Size.Height = 36.000000000000000000
+            Size.PlatformDefault = False
+            StyledSettings = [Family, Style]
+            TextSettings.Font.Size = 11.000000000000000000
+            TextSettings.FontColor = xFF9A9A9A
+            Text = 'Off'
+            TabOrder = 2
+          end
+        end
       end
     end
   end
