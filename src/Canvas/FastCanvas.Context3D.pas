@@ -32,6 +32,37 @@ type
   /// FMX.Materials.pas:300-304, 589-596, 3842-3881) that ray-traced reflections read from the constants.</summary>
   TFastMaterialValue = (Diffuse, Specular, Ambient, Emission, Opts, Color, Modulation);
 
+  /// <summary>Ray-traced effects of the 3D contexts that trace rays (TFastContext3D12: DXR tier 1.1; TFastContext3DVk:
+  /// ray queries); ignored without the hardware.</summary>
+  TFastRayTracing = record
+    /// <summary>Shadows of the opaque 3D objects from the lights of the scene (TLight).</summary>
+    Shadows: Boolean;
+    /// <summary>0..1: the share of a light's contribution a shadow takes away.</summary>
+    ShadowStrength: Single;
+    /// <summary>0: hard shadows (one ray per light and pixel); more: softer (the lights' angular radius, as its
+    /// tangent: 0.05 is about 3 degrees), traced at half resolution and smoothed.</summary>
+    ShadowSoftness: Single;
+    /// <summary>Rays per light and pixel for soft shadows.</summary>
+    ShadowSamples: Integer;
+    /// <summary>Ambient occlusion: surfaces darken where other surfaces are near (corners, gaps, contacts). Traced at
+    /// half resolution and smoothed.</summary>
+    AmbientOcclusion: Boolean;
+    /// <summary>How far occluders count, in scene units.</summary>
+    AORadius: Single;
+    /// <summary>0..1: how dark a fully occluded surface gets.</summary>
+    AOStrength: Single;
+    /// <summary>Rays per pixel for ambient occlusion.</summary>
+    AOSamples: Integer;
+    /// <summary>Mirror reflections of the scene in the surfaces of TLightMaterial (TLightMaterialSource): as strong
+    /// as their specular color times Shininess / 128, more at grazing angles (Fresnel). The surfaces seen in them
+    /// are shaded as FMX shades them (colors, textures, lights, shadows when Shadows is on); a ray that leaves the
+    /// scene sees the scene's clear color. One more ray per pixel, plus one per light for shadows in reflections.
+    /// </summary>
+    Reflections: Boolean;
+    /// <summary>0..1: scales every reflection.</summary>
+    ReflectionStrength: Single;
+  end;
+
   /// <summary>A shader of FMX as the devices see it; TContextShader.Handle points to it.</summary>
   TFastShader = class
   public
@@ -317,6 +348,13 @@ type
   end;
 
   TFastContext3DClass = class of TFastContext3D;
+
+var
+  /// <summary>Ray-traced effects every new 3D context that traces rays starts with (TViewport3D, TForm3D, filters).
+  /// </summary>
+  FastContext3DRayTracing: TFastRayTracing = (Shadows: False; ShadowStrength: 0.7; ShadowSoftness: 0;
+    ShadowSamples: 8; AmbientOcclusion: False; AORadius: 1; AOStrength: 0.6; AOSamples: 8; Reflections: False;
+    ReflectionStrength: 1);
 
 /// <summary>Bytes of a block (compressed formats: 4 x 4 pixels) or pixel of a raw texture format.</summary>
 function FastTextureBlockBytes(const AFormat: TFastTextureFormat): Integer;

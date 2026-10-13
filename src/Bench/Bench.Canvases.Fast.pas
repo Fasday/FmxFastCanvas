@@ -9,7 +9,8 @@ implementation
 
 uses
   System.SysUtils, System.TypInfo, FMX.Graphics, Bench.Config, Bench.Canvases,
-  FastCanvas.Context3D11, FastCanvas.Context3D12, FastCanvas.Device, FastCanvas.Hdr, FastCanvas.Canvas;
+  FastCanvas.Context3D11, FastCanvas.Context3D12, FastCanvas.Context3DVk, FastCanvas.Device, FastCanvas.Hdr,
+  FastCanvas.Canvas;
 
 
 function FastCanvasOptionsText(const AOptions: TFastCanvasOptions): string;
@@ -117,11 +118,12 @@ begin
         FastCanvasTextAntialias := TFastTextAntialias.Grayscale;
       InstallFastCanvas;
       // The 3D context (TEffect filters, TViewport3D) on the canvas device: our own; SeparateContext3D keeps the stock
-      // context on its own device. Vulkan has no 3D context of its own yet.
+      // context on its own device.
       if not (ABaseOptions + ',' + AConfig.CanvasOpts).Contains('SeparateContext3D') then
         case FastCanvasBackend of
           TFastCanvasBackend.D3D11: InstallFastContext3D11;
           TFastCanvasBackend.D3D12: InstallFastContext3D12;
+          TFastCanvasBackend.Vulkan: InstallFastContext3DVk;
         end;
     end,
     procedure(const AConfig: TBenchConfig; out AGeometry, AText: string)
@@ -238,7 +240,9 @@ begin
   RegisterFastCanvas('fcdx12dc',
     'FastCanvas on Direct3D 12 with windows shown by DirectComposition (composition swap chains)',
     'D3D12,Composition');
-  RegisterFastCanvas('fcvk', 'FastCanvas on Vulkan', 'Vulkan,SeparateContext3D');
+  RegisterFastCanvas('fcvk', 'FastCanvas on Vulkan (canvas and own 3D context)', 'Vulkan');
+  RegisterFastCanvas('fcvksep', 'FastCanvas on Vulkan with the stock 3D context on its own device',
+    'Vulkan,SeparateContext3D');
   RegisterFastCanvas('fcst', 'FastCanvas without the render thread (commands executed on the main thread)',
     'MainThread');
   RegisterFastCanvas('fcheapsleep', 'FastCanvas with the memory manager sleeping on lock contention (RTL default)',

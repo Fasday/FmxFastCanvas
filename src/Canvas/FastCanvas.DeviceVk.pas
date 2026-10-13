@@ -67,6 +67,8 @@ type
     FDualSource: Boolean;
     FBufferDeviceAddress, FAccelerationStructure, FRayQuery: Boolean;
     FFifoLatestReady: Boolean;
+    FPushDescriptor: Boolean;
+    FDepthFormat: TVkFormat;
     procedure CreateInstance;
     procedure PickDevice(const APreferSoftware: Boolean);
     procedure CreateDevice;
@@ -133,6 +135,11 @@ type
     /// <summary>VK_PRESENT_MODE_FIFO_LATEST_READY_KHR is enabled (a swap chain may use it where the surface offers
     /// it).</summary>
     property FifoLatestReady: Boolean read FFifoLatestReady;
+    /// <summary>VK_KHR_push_descriptor is enabled (the 3D context needs it).</summary>
+    property PushDescriptor: Boolean read FPushDescriptor;
+    /// <summary>The depth and stencil format of the 3D context: D32_SFLOAT_S8_UINT, else D24_UNORM_S8_UINT (as
+    /// attachment and sampled); VK_FORMAT_UNDEFINED: none.</summary>
+    property DepthFormat: TVkFormat read FDepthFormat;
   end;
 
 implementation
@@ -585,6 +592,10 @@ var
   Res: TVkResult;
   Ray: Boolean;
   FifoName: PAnsiChar;
+  Depth: TVkFormat;
+  Props: TVkFormatProperties;
+const
+  DepthNeeds = Ord(VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT) or Ord(VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT);
 begin
   Count := 0;
   FInstanceVk.EnumerateDeviceExtensionProperties(FPhysical, nil, @Count, nil);
@@ -662,6 +673,9 @@ begin
   Features.pNext := @F13;
   if FDualSource then
     Features.features.dualSrcBlend := VK_TRUE;
+  FPushDescriptor := HasExtension(Exts, VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME);
+  if FPushDescriptor then
+    Names := Names + [PAnsiChar(VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME)];
   if FFifoLatestReady then
   begin
     FillChar(FifoFeatures, SizeOf(FifoFeatures), 0);
@@ -691,6 +705,16 @@ begin
   LoadVulkanDeviceCommands(vkGetDeviceProcAddr, FDevice, Cmds);
   FVk := TVulkan.Create(Cmds);
   FVk.GetDeviceQueue(FDevice, FQueueFamily, 0, @FQueue);
+  FDepthFormat := VK_FORMAT_UNDEFINED;
+  for Depth in [VK_FORMAT_D32_SFLOAT_S8_UINT, VK_FORMAT_D24_UNORM_S8_UINT] do
+  begin
+    FInstanceVk.GetPhysicalDeviceFormatProperties(FPhysical, Depth, @Props);
+    if (Props.optimalTilingFeatures and DepthNeeds) = DepthNeeds then
+    begin
+      FDepthFormat := Depth;
+      Break;
+    end;
+  end;
 end;
 
 function TFastVulkan.Track(const ARes: TVkResult): TVkResult;

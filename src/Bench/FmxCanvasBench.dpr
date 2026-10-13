@@ -32,6 +32,7 @@ uses
   FastCanvas.Context3D in '..\Canvas\FastCanvas.Context3D.pas',
   FastCanvas.Context3D11 in '..\Canvas\FastCanvas.Context3D11.pas',
   FastCanvas.Context3D12 in '..\Canvas\FastCanvas.Context3D12.pas',
+  FastCanvas.Context3DVk in '..\Canvas\FastCanvas.Context3DVk.pas',
   Bench.Config in 'Bench.Config.pas',
   Bench.Canvases in 'Bench.Canvases.pas',
   Bench.Canvases.Builtin in 'Bench.Canvases.Builtin.pas',

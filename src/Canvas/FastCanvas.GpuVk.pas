@@ -44,14 +44,39 @@ const
   /// thread does for its copy.</summary>
   FramesInFlight = 3;
 
+  // Stages and accesses of synchronization2 (64-bit masks; the header's enumerations hold only their low 32 bits).
+  StageNone = UInt64(0);
+  StageVertexInput = UInt64($4);
+  StageVertexShader = UInt64($8);
+  StageFragmentShader = UInt64($80);
+  StageEarlyTests = UInt64($100);
+  StageLateTests = UInt64($200);
+  StageColorOutput = UInt64($400);
+  StageComputeShader = UInt64($800);
+  StageTransfer = UInt64($1000);
+  StageHost = UInt64($4000);
+  StageAllCommands = UInt64($10000);
+  StageAccelerationBuild = UInt64($02000000);
+  AccessShaderRead = UInt64($20);
+  AccessShaderWrite = UInt64($40);
+  AccessColorRead = UInt64($80);
+  AccessColorWrite = UInt64($100);
+  AccessDepthRead = UInt64($200);
+  AccessDepthWrite = UInt64($400);
+  AccessTransferRead = UInt64($800);
+  AccessTransferWrite = UInt64($1000);
+  AccessHostRead = UInt64($2000);
+  AccessAccelerationRead = UInt64($00200000);
+  AccessAccelerationWrite = UInt64($00400000);
+
 type
   TGpuVkSurface = class;
   TGpuVkWindow = class;
 
   {$SCOPEDENUMS ON}
   /// <summary>What an image (or a table buffer) is used for next: its layout, and the stages and accesses barriers
-  /// wait for and make visible.</summary>
-  TGpuVkUse = (Undefined, ShaderRead, ColorTarget, TransferSrc, TransferDst);
+  /// wait for and make visible. DepthTarget and DepthRead: depth and stencil images (the 3D context).</summary>
+  TGpuVkUse = (Undefined, ShaderRead, ColorTarget, TransferSrc, TransferDst, DepthTarget, DepthRead);
 
   /// <summary>Kinds of Vulkan objects that Retire keeps until the GPU is done with them (Memory: a TFastVkAllocation).
   /// </summary>
@@ -114,7 +139,9 @@ type
     FPoolSets: Integer;
     FBusyPools: TList<TGpuVkPool>;
     FFreePools: TList<TVkDescriptorPool>;
-    FRendering: TGpuVkSurface;
+    /// <summary>What the active rendering instance draws into: a surface of the canvas, or the object another
+    /// renderer began it for (BeginRenderingInfo); nil: none.</summary>
+    FRendering: TObject;
     FSurfaces: TList<TGpuVkSurface>;
     FWindows: TList<TGpuVkWindow>;
     FUniformAlign: Integer;
@@ -124,7 +151,6 @@ type
     function TakePage(const ASize: NativeInt): TGpuVkPage;
     procedure FreePage(const APage: TGpuVkPage);
     procedure NextPool;
-    procedure DestroyObject(const AKind: TGpuVkObject; const AHandle: UInt64);
   public
     constructor Create;
     destructor Destroy; override;
@@ -149,13 +175,18 @@ type
     /// <summary>Destroys AHandle once the GPU has executed everything recorded so far (VK_NULL_HANDLE: nothing).
     /// </summary>
     procedure Retire(const AKind: TGpuVkObject; const AHandle: UInt64);
+    /// <summary>Destroys AHandle now (the GPU does not use it).</summary>
+    procedure DestroyObject(const AKind: TGpuVkObject; const AHandle: UInt64);
     /// <summary>Records a layout change of an image (issued by FlushBarriers, before the next command). ADiscard:
     /// the content is not kept (the next command replaces all of it).</summary>
     procedure Transition(const AImage: TVkImage; var AUse: TGpuVkUse; const ANew: TGpuVkUse;
-      const ADiscard: Boolean = False);
-    /// <summary>An image barrier as given (swap chain images: the acquire semaphore's stage).</summary>
+      const ADiscard: Boolean = False; const ARange: PVkImageSubresourceRange = nil);
+    /// <summary>An image barrier as given (swap chain images: the acquire semaphore's stage). ARange: nil for the
+    /// color of the first mip level.</summary>
     procedure ImageBarrier(const AImage: TVkImage; const ASrcStage, ASrcAccess, ADstStage, ADstAccess: UInt64;
-      const AOld, ANew: TVkImageLayout);
+      const AOld, ANew: TVkImageLayout; const ARange: PVkImageSubresourceRange = nil);
+    /// <summary>Barriers are recorded but not issued yet.</summary>
+    function HasBarriers: Boolean; inline;
     /// <summary>Records a change of use of a buffer (a global memory barrier).</summary>
     procedure BufferUse(var AUse: TGpuVkUse; const ANew: TGpuVkUse);
     procedure MemoryBarrier(const ASrcStage, ASrcAccess, ADstStage, ADstAccess: UInt64);
@@ -163,9 +194,10 @@ type
     /// <summary>ASize bytes of upload memory for the open command buffer: the CPU address; ABuffer and AOffset for
     /// the GPU.</summary>
     function Upload(const ASize: NativeInt; const AAlign: Integer; out ABuffer: TVkBuffer; out AOffset: UInt64): PByte;
-    /// <summary>Copies rows of pixels into an image (records the copy; the image is left in TransferDst).</summary>
+    /// <summary>Copies rows of pixels into a mip level of an image (records the copy; the image is left in
+    /// TransferDst: an image with mip levels is moved there by the caller, with all of them).</summary>
     procedure CopyToImage(const AImage: TVkImage; var AUse: TGpuVkUse; const ABytesPerPixel, X, Y, W, H: Integer;
-      const AData: Pointer; const APitch: Integer);
+      const AData: Pointer; const APitch: Integer; const ALevel: Integer = 0);
     procedure CopyToBuffer(const ABuffer: TVkBuffer; var AUse: TGpuVkUse; const AOffset: UInt64; const AData: Pointer;
       const ASize: NativeInt);
     /// <summary>Fills a whole image with one color (the image is left in TransferDst).</summary>
@@ -183,7 +215,13 @@ type
     /// <summary>Rendering into ATarget (begun if it is not the current one, after the barriers so far); AClear: the
     /// whole target is filled with that color first.</summary>
     procedure BeginRendering(const ATarget: TGpuVkSurface; const AClear: PVkClearColorValue = nil);
+    /// <summary>Rendering of another renderer (the 3D context), identified by AOwner (Rendering): the active one ends
+    /// and the barriers so far are issued first.</summary>
+    procedure BeginRenderingInfo(const AOwner: TObject; const AInfo: TVkRenderingInfo);
     procedure EndRendering;
+    /// <summary>What the active rendering instance draws into (a canvas surface, another renderer's object), nil
+    /// outside rendering.</summary>
+    property Rendering: TObject read FRendering;
     property Fast: TFastVulkan read FFast;
     property Vk: TVulkan read FVk;
     property Device: TVkDevice read FDevice;
@@ -223,6 +261,8 @@ type
     procedure GpuWritten; override;
     property Image: TVkImage read FImage;
     property View: TVkImageView read FView;
+    /// <summary>The use the image is in (render thread).</summary>
+    property State: TGpuVkUse read FUse;
   end;
 
   TGpuVkPresenter = class;
@@ -405,6 +445,14 @@ function GpuVk: TGpuVkContext;
 function GpuVkCurrent: TGpuVkContext;
 /// <summary>The handle TGpuVkContext.Retire and DestroyObject take for memory (TGpuVkObject.Memory).</summary>
 function MemoryHandle(const AMemory: TFastVkAllocation): UInt64; inline;
+/// <summary>The subresources of the first mip level's color.</summary>
+function ColorRange: TVkImageSubresourceRange;
+function ColorLayers: TVkImageSubresourceLayers;
+
+var
+  /// <summary>Set by the 3D context: the recording context shuts down (the GPU is idle; device lock held): every
+  /// Vulkan object made outside it goes now.</summary>
+  GpuVkShutdownHook: procedure(const AContext: TGpuVkContext);
 
 implementation
 
@@ -427,29 +475,16 @@ const
   /// <summary>Waits on the timeline are cut into slices of this many nanoseconds (to notice a lost device).</summary>
   WaitSlice = 2000000000;
 
-  // Stages and accesses of synchronization2 (64-bit masks; the header's enumerations hold only their low 32 bits).
-  StageNone = UInt64(0);
-  StageFragmentShader = UInt64($80);
-  StageColorOutput = UInt64($400);
-  StageTransfer = UInt64($1000);
-  StageHost = UInt64($4000);
-  StageAllCommands = UInt64($10000);
-  AccessShaderRead = UInt64($20);
-  AccessColorRead = UInt64($80);
-  AccessColorWrite = UInt64($100);
-  AccessTransferRead = UInt64($800);
-  AccessTransferWrite = UInt64($1000);
-  AccessHostRead = UInt64($2000);
-
   UseLayout: array[TGpuVkUse] of TVkImageLayout = (VK_IMAGE_LAYOUT_UNDEFINED,
     VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-    VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+    VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL);
   UseStage: array[TGpuVkUse] of UInt64 = (StageNone, StageFragmentShader, StageColorOutput, StageTransfer,
-    StageTransfer);
+    StageTransfer, StageEarlyTests or StageLateTests, StageFragmentShader or StageEarlyTests or StageLateTests);
   UseAccess: array[TGpuVkUse] of UInt64 = (0, AccessShaderRead, AccessColorRead or AccessColorWrite,
-    AccessTransferRead, AccessTransferWrite);
+    AccessTransferRead, AccessTransferWrite, AccessDepthRead or AccessDepthWrite, AccessShaderRead or AccessDepthRead);
   /// <summary>The writes of a use, which a barrier makes available.</summary>
-  UseWrites: array[TGpuVkUse] of UInt64 = (0, 0, AccessColorWrite, 0, AccessTransferWrite);
+  UseWrites: array[TGpuVkUse] of UInt64 = (0, 0, AccessColorWrite, 0, AccessTransferWrite, AccessDepthWrite, 0);
 
 var
   GCtx: TGpuVkContext;
@@ -545,6 +580,9 @@ var
   S: TGpuVkSurface;
 begin
   WaitIdle;
+  // The 3D context lets go of what it made on the device (textures FMX still holds, pipelines).
+  if Assigned(GpuVkShutdownHook) then
+    GpuVkShutdownHook(Self);
   // Presentation too: swap chains and their semaphores go now.
   FFast.LockQueue;
   try
@@ -886,8 +924,13 @@ begin
   FRetired.Add(R);
 end;
 
+function TGpuVkContext.HasBarriers: Boolean;
+begin
+  Result := (FBarrierCount > 0) or (FMemSrcStage <> 0) or (FMemDstStage <> 0);
+end;
+
 procedure TGpuVkContext.ImageBarrier(const AImage: TVkImage; const ASrcStage, ASrcAccess, ADstStage,
-  ADstAccess: UInt64; const AOld, ANew: TVkImageLayout);
+  ADstAccess: UInt64; const AOld, ANew: TVkImageLayout; const ARange: PVkImageSubresourceRange);
 var
   B: PVkImageMemoryBarrier2;
 begin
@@ -905,12 +948,15 @@ begin
   B.srcQueueFamilyIndex := VK_QUEUE_FAMILY_IGNORED;
   B.dstQueueFamilyIndex := VK_QUEUE_FAMILY_IGNORED;
   B.image := AImage;
-  B.subresourceRange := ColorRange;
+  if ARange <> nil then
+    B.subresourceRange := ARange^
+  else
+    B.subresourceRange := ColorRange;
   Inc(FBarrierCount);
 end;
 
 procedure TGpuVkContext.Transition(const AImage: TVkImage; var AUse: TGpuVkUse; const ANew: TGpuVkUse;
-  const ADiscard: Boolean);
+  const ADiscard: Boolean; const ARange: PVkImageSubresourceRange);
 var
   I: Integer;
   Old: TVkImageLayout;
@@ -942,7 +988,8 @@ begin
   Old := UseLayout[AUse];
   if ADiscard then
     Old := VK_IMAGE_LAYOUT_UNDEFINED;
-  ImageBarrier(AImage, UseStage[AUse], UseWrites[AUse], UseStage[ANew], UseAccess[ANew], Old, UseLayout[ANew]);
+  ImageBarrier(AImage, UseStage[AUse], UseWrites[AUse], UseStage[ANew], UseAccess[ANew], Old, UseLayout[ANew],
+    ARange);
   AUse := ANew;
 end;
 
@@ -1074,7 +1121,7 @@ begin
 end;
 
 procedure TGpuVkContext.CopyToImage(const AImage: TVkImage; var AUse: TGpuVkUse; const ABytesPerPixel, X, Y, W,
-  H: Integer; const AData: Pointer; const APitch: Integer);
+  H: Integer; const AData: Pointer; const APitch: Integer; const ALevel: Integer);
 var
   Row, I: Integer;
   P: PByte;
@@ -1095,6 +1142,7 @@ begin
   FillChar(Region, SizeOf(Region), 0);
   Region.bufferOffset := Off;
   Region.imageSubresource := ColorLayers;
+  Region.imageSubresource.mipLevel := ALevel;
   Region.imageOffset.x := X;
   Region.imageOffset.y := Y;
   Region.imageExtent.width := W;
@@ -1342,6 +1390,14 @@ begin
   Info.pColorAttachments := @Attachment;
   FVk.CmdBeginRendering(Cmd, @Info);
   FRendering := ATarget;
+end;
+
+procedure TGpuVkContext.BeginRenderingInfo(const AOwner: TObject; const AInfo: TVkRenderingInfo);
+begin
+  EndRendering;
+  FlushBarriers;
+  FVk.CmdBeginRendering(Cmd, @AInfo);
+  FRendering := AOwner;
 end;
 
 procedure TGpuVkContext.EndRendering;

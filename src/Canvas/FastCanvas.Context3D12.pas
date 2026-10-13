@@ -43,35 +43,9 @@ uses
   FMX.Types, FMX.Types3D, FMX.Graphics, FastCanvas.Context3D, FastCanvas.Dlss;
 
 type
-  /// <summary>Ray-traced effects of a TFastContext3D12 (DXR tier 1.1 hardware; ignored without it).</summary>
-  TFastRayTracing = record
-    /// <summary>Shadows of the opaque 3D objects from the lights of the scene (TLight).</summary>
-    Shadows: Boolean;
-    /// <summary>0..1: the share of a light's contribution a shadow takes away.</summary>
-    ShadowStrength: Single;
-    /// <summary>0: hard shadows (one ray per light and pixel); more: softer (the lights' angular radius, as its
-    /// tangent: 0.05 is about 3 degrees), traced at half resolution and smoothed.</summary>
-    ShadowSoftness: Single;
-    /// <summary>Rays per light and pixel for soft shadows.</summary>
-    ShadowSamples: Integer;
-    /// <summary>Ambient occlusion: surfaces darken where other surfaces are near (corners, gaps, contacts). Traced at
-    /// half resolution and smoothed.</summary>
-    AmbientOcclusion: Boolean;
-    /// <summary>How far occluders count, in scene units.</summary>
-    AORadius: Single;
-    /// <summary>0..1: how dark a fully occluded surface gets.</summary>
-    AOStrength: Single;
-    /// <summary>Rays per pixel for ambient occlusion.</summary>
-    AOSamples: Integer;
-    /// <summary>Mirror reflections of the scene in the surfaces of TLightMaterial (TLightMaterialSource): as strong
-    /// as their specular color times Shininess / 128, more at grazing angles (Fresnel). The surfaces seen in them
-    /// are shaded as FMX shades them (colors, textures, lights, shadows when Shadows is on); a ray that leaves the
-    /// scene sees the scene's clear color. One more ray per pixel, plus one per light for shadows in reflections.
-    /// </summary>
-    Reflections: Boolean;
-    /// <summary>0..1: scales every reflection.</summary>
-    ReflectionStrength: Single;
-  end;
+  /// <summary>Ray-traced effects of a TFastContext3D12 (DXR tier 1.1 hardware; ignored without it): see
+  /// FastCanvas.Context3D.</summary>
+  TFastRayTracing = FastCanvas.Context3D.TFastRayTracing;
 
   /// <summary>Pixel formats of TFastRayImage: unsigned normalized (R8, RGBA8), float (F) and unsigned integer (UI,
   /// read and written in HLSL through AppUTextures / AppUImages).</summary>
@@ -367,10 +341,9 @@ type
 var
   /// <summary>Native DLSS SR mode for new Win64 window contexts.</summary>
   FastContext3DDlssMode: TFastDlssMode = TFastDlssMode.Off;
-  /// <summary>Ray-traced effects every new TFastContext3D12 starts with (TViewport3D, TForm3D, filters).</summary>
-  FastContext3DRayTracing: TFastRayTracing = (Shadows: False; ShadowStrength: 0.7; ShadowSoftness: 0;
-    ShadowSamples: 8; AmbientOcclusion: False; AORadius: 1; AOStrength: 0.6; AOSamples: 8; Reflections: False;
-    ReflectionStrength: 1);
+  /// <summary>Ray-traced effects every new TFastContext3D12 starts with (TViewport3D, TForm3D, filters): the one of
+  /// FastCanvas.Context3D, which the Vulkan 3D context takes too.</summary>
+  FastContext3DRayTracing: TFastRayTracing absolute FastCanvas.Context3D.FastContext3DRayTracing;
 
 /// <summary>Makes TFastContext3D12 the default 3D context. Call before Application.Initialize, after the canvas
 /// (FastCanvas.Canvas.InstallFastCanvas) with FastCanvasBackend = D3D12. FastContext3DFragile

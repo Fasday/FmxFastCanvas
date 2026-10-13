@@ -4,7 +4,9 @@
   - FastCanvas.hlsl and FastOutput.hlsl with fxc (vs_4_0 / ps_4_0) into src\Canvas\FastCanvas.Shaders.inc, and with
     the Vulkan SDK's dxc into SPIR-V, src\Canvas\FastCanvas.VkShaders.inc (validated by spirv-val);
   - FastRay.hlsl with dxc (shader model 6.5, inline ray queries) into src\Canvas\FastCanvas.RayShaders.inc;
-  - FastDlss.hlsl with fxc (vs_5_0 / ps_5_0) into src\Canvas\FastCanvas.DlssShaders.inc.
+  - FastDlss.hlsl with fxc (vs_5_0 / ps_5_0) into src\Canvas\FastCanvas.DlssShaders.inc;
+  - FMX's own shaders as SPIR-V for the Vulkan 3D context (tools\compile-fmx-shaders-vk.ps1) into
+    src\Canvas\FastCanvas.VkFmxShaders.inc.
 
 .DESCRIPTION
   The generated includes hold the bytecode as Pascal byte arrays, so building the canvas needs neither the compilers
@@ -177,6 +179,14 @@ try {
   }
   [IO.File]::WriteAllText($out, $sb.ToString(), [Text.Encoding]::ASCII)
   Write-Host "Wrote $out"
+
+  # FMX's own shaders for the Vulkan 3D context (GLSL from FMX's sources, glslangValidator of the Vulkan SDK).
+  $glslang = if ($vkSdk) { Join-Path $vkSdk 'Bin\glslangValidator.exe' } else { '' }
+  if ($glslang -and (Test-Path $glslang)) {
+    & (Join-Path $PSScriptRoot 'compile-fmx-shaders-vk.ps1') -Glslang $glslang -SpirvVal $SpirvVal
+  } else {
+    Write-Warning 'glslangValidator not found (Vulkan SDK): src\Canvas\FastCanvas.VkFmxShaders.inc not regenerated'
+  }
 }
 finally {
   Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
