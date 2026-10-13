@@ -237,8 +237,12 @@ type
     /// <summary>Window: the size and device generation of the last frame recorded for presenting, which a partial
     /// frame starts from; FKeptW = 0: none.</summary>
     FKeptW, FKeptH, FKeptGen: Integer;
-    /// <summary>The frame in progress updates part of the window (only these rectangles, in pixels).</summary>
+    /// <summary>The scene in progress updates part of its target (only these rectangles, in pixels): a partial window
+    /// frame, or a bitmap scene FMX gave clip rectangles (TLayer3D).</summary>
     FRegion: TArray<TRectF>;
+    /// <summary>The canvas whose region was in force when this one's began (a bitmap scene in a partial window
+    /// frame), in force again after this scene.</summary>
+    FOuterRegion: TFastCanvas;
     /// <summary>The bitmap of the paint PaintOf made last (bitmap brushes), taken by the next AddInstance.</summary>
     FPaintTexture: TFastBitmap;
     /// <summary>Window: a frame was recorded for its own swap chain (FastCanvasPresentation = Flip); a new window
@@ -247,6 +251,7 @@ type
     procedure QueueRecreateWindow;
     procedure RecRegion;
     procedure PartialRegion(const ARects: TClipRects);
+    procedure RegionOf(const ARects: TClipRects);
     function DeviceBox(const R: TRectF): TRectF;
     function Visible(const R: TRectF; const AGrow: Single): Boolean;
     function ClipIndex: Cardinal;
@@ -580,7 +585,8 @@ var
   GBitmapsLock: TObject;
   /// <summary>The canvas service shut down (ShutdownFastCanvas).</summary>
   GFinished: Boolean;
-  // The window canvas whose partial frame is being recorded (its region is recorded again after ResetTables).
+  // The canvas whose region is in force (a partial window frame, a bitmap scene with clip rectangles); with its
+  // FOuterRegion chain, the regions recorded again after ResetTables.
   GRegionCanvas: TFastCanvas;
   // Set by the render thread: a partial frame found no frame to start from and was not presented; the main thread
   // repaints the windows in full (CheckPartialFrames).
@@ -879,14 +885,21 @@ begin
 end;
 
 procedure ResetTables;
+var
+  C: TFastCanvas;
 begin
   // The render thread draws what refers to the old entries before they are overwritten.
   RecFlush;
   GClipCount := 1;
   GPaintCount := 0;
   Inc(GEpoch);
-  if GRegionCanvas <> nil then
-    GRegionCanvas.RecRegion;
+  // The regions in force: of the scene in progress and of the scenes it is drawn in.
+  C := GRegionCanvas;
+  while C <> nil do
+  begin
+    C.RecRegion;
+    C := C.FOuterRegion;
+  end;
 end;
 
 function RecPaint(const APaint: TGpuPaint): Cardinal;
@@ -1635,8 +1648,9 @@ begin
     Exit;
   if GClipCount + Length(FRegion) > GpuMaxClips then
   begin
-    // Never twice in a row: a reset leaves room for any region (at most 20 rectangles).
-    GRegionCanvas := nil;
+    // Never twice in a row: a reset leaves room for any region (at most 20 rectangles each). It records the regions
+    // this one is drawn in; this one follows.
+    GRegionCanvas := FOuterRegion;
     ResetTables;
     GRegionCanvas := Self;
   end;
@@ -1720,15 +1734,21 @@ begin
   FClip.Index := 0;
   FClip.Epoch := GEpoch;
   FRegion := nil;
-  if (FTarget.Kind <> TTargetKind.Bitmap) and (AClipRects <> nil) then
-    PartialRegion(AClipRects^);
+  if AClipRects <> nil then
+    if FTarget.Kind <> TTargetKind.Bitmap then
+      PartialRegion(AClipRects^)
+    else if TCanvasStyle.SupportClipRects in GetCanvasStyle then
+      // FMX clears only these rectangles and paints only the controls in them (TLayer3D): the rest of the bitmap
+      // must stay as it is.
+      RegionOf(AClipRects^);
   RecTarget(Self);
   C := RecAlloc(TCmd.BeginFrame, SizeOf(TCmdBegin), B);
   C.Width := FPixelW;
   C.Height := FPixelH;
   C.Aliased := Quality = TCanvasQuality.HighPerformance;
   C.Tearing := TFastCanvasOption.AllowTearing in FastCanvasOptions;
-  C.Partial := FRegion <> nil;
+  // A partial window frame starts from the last one; a bitmap keeps its pixels anyway.
+  C.Partial := (FRegion <> nil) and (FTarget.Kind <> TTargetKind.Bitmap);
   // Tearing needs a swap chain of the window.
   C.Composition := (FTarget.Kind = TTargetKind.Window) and
     (FastCanvasPresentation = TFastCanvasPresentation.Composition) and not C.Tearing;
@@ -1753,6 +1773,7 @@ begin
     for I := 1 to High(FRegion) do
       FClip.Clip.Box := TRectF.Union(FClip.Clip.Box, FRegion[I]);
     FClip.Index := -1;
+    FOuterRegion := GRegionCanvas;
     GRegionCanvas := Self;
     RecRegion;
   end;
@@ -1787,20 +1808,27 @@ end;
 /// leave part of the window as it was and the last frame recorded for presenting has the same size on the same
 /// device; else nil (the frame draws the whole window).</summary>
 procedure TFastCanvas.PartialRegion(const ARects: TClipRects);
+begin
+  if (FKeptW <> FPixelW) or (FKeptH <> FPixelH) or (FKeptGen <> GDeviceGen) or
+    (TFastDevice.Backend <> TFastCanvasBackend.D3D12) then
+    Exit;
+  RegionOf(ARects);
+end;
+
+/// <summary>FRegion := the rectangles, in pixels (whole pixels around them, inside the target); nil when there are
+/// none or one of them is the whole target.</summary>
+procedure TFastCanvas.RegionOf(const ARects: TClipRects);
 var
   I, N: Integer;
   R: TRectF;
-  Gen: Integer;
 begin
   N := Length(ARects);
-  Gen := GDeviceGen;
-  if (N = 0) or (FKeptW <> FPixelW) or (FKeptH <> FPixelH) or (FKeptGen <> Gen) or
-    (TFastDevice.Backend <> TFastCanvasBackend.D3D12) then
+  if N = 0 then
     Exit;
   SetLength(FRegion, N);
   for I := 0 to N - 1 do
   begin
-    // FMX gives them in logical units: whole pixels around them, inside the window.
+    // FMX gives them in logical units.
     R := TRectF.Create(ARects[I].Left * Scale, ARects[I].Top * Scale, ARects[I].Right * Scale,
       ARects[I].Bottom * Scale);
     R := TRectF.Create(Floor(R.Left), Floor(R.Top), Ceil(R.Right), Ceil(R.Bottom));
@@ -1810,7 +1838,6 @@ begin
     FRegion[I] := R;
     if (R.Left <= 0) and (R.Top <= 0) and (R.Right >= FPixelW) and (R.Bottom >= FPixelH) then
     begin
-      // One of them is the whole window.
       FRegion := nil;
       Exit;
     end;
@@ -1826,7 +1853,8 @@ var
 begin
   if GRegionCanvas = Self then
   begin
-    GRegionCanvas := nil;
+    GRegionCanvas := FOuterRegion;
+    FOuterRegion := nil;
     R := RecAlloc(TCmd.Region, SizeOf(TCmdRegion));
     R.First := 0;
     R.Count := 0;

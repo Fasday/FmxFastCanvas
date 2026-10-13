@@ -75,7 +75,9 @@ stream is executed on the recording thread at `EndScene`.
   testing each pixel against them when there are several. The rectangles hold only while the window is the target:
   scenes of bitmap canvases that run in the middle of the window's frame (image lists, effects) draw everywhere, and
   the window's draws after them are tested again. A frame with nothing to start from (a new or resized swap chain) is
-  not presented, and the forms repaint in full.
+  not presented, and the forms repaint in full. The style is global, so FMX also gives bitmap scenes the rectangles
+  it repaints (`TLayer3D` clears and paints only the controls in them): a bitmap scene draws inside them the same
+  way, and the region of the window frame it runs in holds again after it.
 - `FastCanvasPresentation`: `Flip` gives every window a swap chain of its own (`CreateSwapChainForHwnd`,
   alpha ignored: DWM shows it opaque). `Composition` (default) makes a composition swap chain (`CreateSwapChainForComposition`,
   premultiplied alpha, same buffers and partial frames) that one DirectComposition visual shows in the window
