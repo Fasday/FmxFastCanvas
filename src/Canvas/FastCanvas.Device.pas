@@ -157,6 +157,8 @@ begin
   // finalizations, and the canvas service shuts the device down then (FastCanvas.Service).
   FCreateLock := TObject.Create;
   New(FRefs);
+  // New sets the managed fields only.
+  FRefs.Vulkan := nil;
 end;
 
 class function TFastDevice.GetD3D: ID3D11Device;

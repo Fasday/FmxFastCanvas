@@ -242,10 +242,44 @@ public static class FmxGlsl
     static readonly Regex SamplerRe = new Regex(@"^uniform\s+sampler2D\s+(\w+)\s*;\s*$");
     static readonly Regex UniformRe = new Regex(@"^uniform\s+(\w+)\s+(\w+)\s*(?:\[(\d+)\])?\s*;\s*$");
 
+    /// <summary>Where FMX's GLSL computes otherwise than its Direct3D bytecode (fxc /dumpbin): flips of y for
+    /// OpenGL's textures (Vulkan takes Direct3D's coordinates), a saturation Cg lerped with the red component only,
+    /// a color left uninitialized. Shader, pattern, replacement, matches expected.</summary>
+    static readonly string[][] Patches = {
+        new[] { "crop.fps", @"_newCoord = vec2\(TEX0\.x, 1\.0 - TEX0\.y\);", "_newCoord = TEX0.xy;", "1" },
+        new[] { "crop.fps", @"\n\s*_newCoord = vec2\(_newCoord\.x, 1\.0 - _newCoord\.y\);", "", "1" },
+        new[] { "affine.fps", @"_newCoord = vec2\(TEX0\.x, 1\.0 - TEX0\.y\);", "_newCoord = TEX0.xy;", "1" },
+        new[] { "affine.fps", @"vec2\((_newval\w+)\.x, 1\.0 - \1\.y\)", "$1", "1" },
+        new[] { "Reflection.fps", @"\(1\.0 - TEX0\.y\)/_Length", "TEX0.y/_Length", "1" },
+        new[] { "SwipeFlatTransition.fps", @"\n\s*(_SomePoint\w+)\.y = 1\.0 - \1\.y;", "", "3" },
+        new[] { "Bloom.fps", @"(\w+) = (\w+) \+ (\w+)\*\((\w+)\.x - \2\);\n(\s*)(\w+) = vec3\(\1, \1, \1\)\*(\w+);",
+            "$6 = (vec3($2) + $3*($4 - vec3($2)))*$7;", "2" },
+        new[] { "Gloom.fps", @"(\w+) = (\w+) \+ (\w+)\*\((\w+)\.x - \2\);\n(\s*)(\w+) = vec3\(\1, \1, \1\)\*(\w+);",
+            "$6 = (vec3($2) + $3*($4 - vec3($2)))*$7;", "2" },
+        new[] { "BrightTransition.fps", @"(_leastBright\w+) = 1\.0;", "$1 = 1.0;\n    _leastBrightColor0006 = vec4(0.0);",
+            "1" },
+    };
+
+    static string Patch(FmxShader s, string src)
+    {
+        foreach (var p in Patches)
+        {
+            if (p[0] != s.Name)
+                continue;
+            var re = new Regex(p[1]);
+            int found = re.Matches(src).Count;
+            if (found != int.Parse(p[3]))
+                throw new Exception(string.Format("{0}: patch {1} matches {2} times", s.Name, p[1], found));
+            src = re.Replace(src, p[2]);
+            s.Notes.Add("patched: " + p[1]);
+        }
+        return src;
+    }
+
     public static void Rewrite(FmxShader s, Dictionary<string, int> varyings)
     {
         bool vertex = s.Kind == "VertexShader";
-        string src = Encoding.ASCII.GetString(s.Glsl).Replace("\r\n", "\n");
+        string src = Patch(s, Encoding.ASCII.GetString(s.Glsl).Replace("\r\n", "\n"));
         var structs = new Dictionary<string, Struct>();
         foreach (Match m in StructRe.Matches(src))
         {
