@@ -87,17 +87,21 @@ For Direct3D 11 leave `FastCanvasBackend` at its default and use `FastCanvas.Con
 
 ## Example
 
-[example/HelloFastCanvas.dpr](example/HelloFastCanvas.dpr) is a one-file program (a form made in code): animated 2D
-drawing, a button with a shadow effect, a lit 3D cube over a floor and a switch for ray-traced shadows. The window
-title tells what draws it. Open it in the IDE (Win64, search path as above) or build it from the command line:
+[example/HelloFastCanvas.dproj](example/HelloFastCanvas.dproj): a form with animated 2D drawing, a button with a shadow
+effect, a lit 3D cube over a floor and a switch for ray-traced shadows. The window title tells what draws it. All the
+components are on the form in the designer (`HelloMain.fmx`); FastCanvas is installed in `HelloFastCanvas.dpr`.
+
+Open `HelloFastCanvas.dproj` in RAD Studio and run it: the project targets Win64 and already has the search path
+(`..\src\Canvas;..\third_party\delphidx12\src`). From the command line:
 
 ```
 cd example
-dcc64 -B -NSSystem;Winapi;FMX;System.Win -U..\src\Canvas;..\third_party\delphidx12\src HelloFastCanvas.dpr
+"C:\Program Files (x86)\Embarcadero\Studio\37.0\bin\rsvars.bat"
+msbuild HelloFastCanvas.dproj /p:Config=Release /p:Platform=Win64
 ```
 
-Environment variables of the example: `FC_BACKEND=11` (Direct3D 11), `FC_PRESENT=flip` (windows without
-DirectComposition), `FC_STOCK=1` (FMX's own canvas, to compare).
+(the program is `example\Win64\Release\HelloFastCanvas.exe`). Environment variables of the example: `FC_BACKEND=11`
+(Direct3D 11), `FC_PRESENT=flip` (windows without DirectComposition), `FC_STOCK=1` (FMX's own canvas, to compare).
 
 ## Main settings
 
@@ -118,7 +122,7 @@ Global variables, set before `Application.Initialize`; all of them in [docs/USAG
 |---|---|
 | `src/Canvas` | FastCanvas: canvas, renderer, Direct3D 11/12 back ends, 3D contexts, shaders (HLSL and compiled) |
 | `third_party/delphidx12` | Direct3D 12 / DXGI headers (DelphiDX12, Apache 2.0) |
-| `example` | `HelloFastCanvas`, the smallest check |
+| `example` | `HelloFastCanvas`, the smallest check (a RAD Studio project) |
 | `docs` | [USAGE.md](docs/USAGE.md) (settings, ray tracing, HDR, threads), [ARCHITECTURE.md](docs/ARCHITECTURE.md) (how it works), [BENCHMARKS.md](docs/BENCHMARKS.md) |
 | `tools` | `compile-shaders.ps1`: the HLSL into the Pascal includes (only after changing the shaders) |
 

@@ -8,6 +8,7 @@
 *.dsk
 *.identcache
 *.local
+*.delphilsp.json
 *.stat
 *.tvsconfig
 __history/

@@ -1,0 +1,121 @@
+object HelloForm: THelloForm
+  Left = 0
+  Top = 0
+  Caption = 'Hello FastCanvas'
+  ClientHeight = 600
+  ClientWidth = 960
+  Fill.Color = xFF1E1F24
+  Fill.Kind = Solid
+  FormFactor.Width = 320
+  FormFactor.Height = 480
+  FormFactor.Devices = [Desktop]
+  OnCreate = FormCreate
+  DesignerMasterStyle = 0
+  object LayoutTop: TLayout
+    Align = Top
+    Padding.Left = 12.000000000000000000
+    Padding.Top = 8.000000000000000000
+    Padding.Right = 12.000000000000000000
+    Padding.Bottom = 8.000000000000000000
+    Size.Width = 960.000000000000000000
+    Size.Height = 48.000000000000000000
+    Size.PlatformDefault = False
+    TabOrder = 0
+    object ButtonHello: TButton
+      Align = Left
+      Position.X = 12.000000000000000000
+      Position.Y = 8.000000000000000000
+      Size.Width = 140.000000000000000000
+      Size.Height = 32.000000000000000000
+      Size.PlatformDefault = False
+      TabOrder = 0
+      Text = 'A button'
+      object ShadowEffectButton: TShadowEffect
+        Distance = 3.000000000000000000
+        Direction = 45.000000000000000000
+        Softness = 0.300000011920929000
+        Opacity = 0.600000023841857900
+        ShadowColor = claBlack
+      end
+    end
+    object CheckBoxShadows: TCheckBox
+      Align = Left
+      StyledSettings = [Family, Size, Style]
+      Margins.Left = 16.000000000000000000
+      Position.X = 168.000000000000000000
+      Position.Y = 8.000000000000000000
+      Size.Width = 300.000000000000000000
+      Size.Height = 32.000000000000000000
+      Size.PlatformDefault = False
+      TabOrder = 1
+      Text = 'Ray-traced shadows (DXR, Direct3D 12)'
+      TextSettings.FontColor = claWhite
+      OnChange = CheckBoxShadowsChange
+    end
+  end
+  object PaintBoxDrawing: TPaintBox
+    Align = Left
+    Position.Y = 48.000000000000000000
+    Size.Width = 480.000000000000000000
+    Size.Height = 552.000000000000000000
+    Size.PlatformDefault = False
+    OnPaint = PaintBoxDrawingPaint
+  end
+  object Viewport3D1: TViewport3D
+    Align = Client
+    Color = claNull
+    Size.Width = 480.000000000000000000
+    Size.Height = 552.000000000000000000
+    Size.PlatformDefault = False
+    object Light1: TLight
+      Color = claWhite
+      LightType = Point
+      SpotCutOff = 180.000000000000000000
+      Position.X = -4.000000000000000000
+      Position.Y = -6.000000000000000000
+      Position.Z = -6.000000000000000000
+      Width = 1.000000000000000000
+      Height = 1.000000000000000000
+      Depth = 1.000000000000000000
+    end
+    object Cube1: TCube
+      Position.Y = -0.500000000000000000
+      Width = 2.500000000000000000
+      Height = 2.500000000000000000
+      Depth = 2.500000000000000000
+      MaterialSource = LightMaterialSourceCube
+    end
+    object PlaneFloor: TPlane
+      Position.Y = 1.500000000000000000
+      RotationAngle.X = 90.000000000000000000
+      Width = 14.000000000000000000
+      Height = 14.000000000000000000
+      Depth = 0.009999999776482582
+      MaterialSource = LightMaterialSourceFloor
+    end
+  end
+  object LightMaterialSourceCube: TLightMaterialSource
+    Diffuse = xFF3C8DDE
+    Ambient = xFF203040
+    Emissive = claNull
+    Specular = xFF606060
+    Shininess = 30
+    Left = 720
+    Top = 72
+  end
+  object LightMaterialSourceFloor: TLightMaterialSource
+    Diffuse = xFF808080
+    Ambient = xFF303030
+    Emissive = claNull
+    Specular = xFF202020
+    Shininess = 30
+    Left = 720
+    Top = 136
+  end
+  object TimerAnimate: TTimer
+    Interval = 15
+    OnTimer = TimerAnimateTimer
+    Left = 720
+    Top = 200
+  end
+end

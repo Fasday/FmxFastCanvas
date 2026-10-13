@@ -91,18 +91,22 @@ end.
 
 ## Пример
 
-[example/HelloFastCanvas.dpr](example/HelloFastCanvas.dpr) — программа в одном файле (форма создаётся в коде):
-анимированная 2D-графика, кнопка с эффектом тени, освещённый 3D-куб над полом и переключатель теней трассировкой
-лучей. В заголовке окна написано, чем оно рисуется. Открыть в IDE (Win64, пути поиска как выше) или собрать из
-командной строки:
+[example/HelloFastCanvas.dproj](example/HelloFastCanvas.dproj) — форма с анимированной 2D-графикой, кнопкой с эффектом
+тени, освещённым 3D-кубом над полом и переключателем теней трассировкой лучей. В заголовке окна написано, чем оно
+рисуется. Все компоненты лежат на форме в дизайнере (`HelloMain.fmx`); FastCanvas устанавливается в
+`HelloFastCanvas.dpr`.
+
+Откройте `HelloFastCanvas.dproj` в RAD Studio и запустите: проект собирается под Win64, пути поиска
+(`..\src\Canvas;..\third_party\delphidx12\src`) уже прописаны. Из командной строки:
 
 ```
 cd example
-dcc64 -B -NSSystem;Winapi;FMX;System.Win -U..\src\Canvas;..\third_party\delphidx12\src HelloFastCanvas.dpr
+"C:\Program Files (x86)\Embarcadero\Studio\37.0\bin\rsvars.bat"
+msbuild HelloFastCanvas.dproj /p:Config=Release /p:Platform=Win64
 ```
 
-Переменные окружения примера: `FC_BACKEND=11` (Direct3D 11), `FC_PRESENT=flip` (вывод окон без DirectComposition),
-`FC_STOCK=1` (штатный канвас FMX для сравнения).
+(программа — `example\Win64\Release\HelloFastCanvas.exe`). Переменные окружения примера: `FC_BACKEND=11`
+(Direct3D 11), `FC_PRESENT=flip` (вывод окон без DirectComposition), `FC_STOCK=1` (штатный канвас FMX для сравнения).
 
 ## Главные настройки
 
@@ -123,7 +127,7 @@ dcc64 -B -NSSystem;Winapi;FMX;System.Win -U..\src\Canvas;..\third_party\delphidx
 |---|---|
 | `src/Canvas` | FastCanvas: канвас, рендерер, бэкенды Direct3D 11/12, 3D-контексты, шейдеры (HLSL и скомпилированные) |
 | `third_party/delphidx12` | Заголовки Direct3D 12 / DXGI (DelphiDX12, Apache 2.0) |
-| `example` | `HelloFastCanvas` — самая короткая проверка |
+| `example` | `HelloFastCanvas` — самая короткая проверка (проект RAD Studio) |
 | `docs` | [USAGE.md](docs/USAGE.md) (настройки, трассировка лучей, HDR, потоки), [ARCHITECTURE.md](docs/ARCHITECTURE.md) (как устроено), [BENCHMARKS.md](docs/BENCHMARKS.md) — на английском |
 | `tools` | `compile-shaders.ps1`: HLSL в Pascal-включения (нужен только после изменения шейдеров) |
 
