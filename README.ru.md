@@ -42,7 +42,8 @@ Skia и Skia Vulkan.
 | `TViewport3D`, 160 освещённых объектов | 8.53 | 7.64 (`skiavk`) | 0.562 | 0.519 |
 
 Все 26 сцен, два размера, методика и стоимость трассировки лучей: [docs/BENCHMARKS.md](docs/BENCHMARKS.md)
-(на английском).
+(на английском). Программа замеров, её скрипты, сводки и каждый прогон (окружение, командная строка, статистика) лежат
+в репозитории (`src/Bench`, `tools`, `results`): цифры можно проверить и перемерить на другой машине.
 
 ## Требования
 
@@ -134,7 +135,10 @@ msbuild Examples.groupproj /p:Config=Release /p:Platform=Win64
 | `third_party/delphidx12` | Заголовки Direct3D 12 / DXGI (DelphiDX12, Apache 2.0) |
 | `example` | `HelloFastCanvas` и `HelloForm3D` — самые короткие проверки (проекты RAD Studio) |
 | `docs` | [USAGE.md](docs/USAGE.md) (настройки, трассировка лучей, HDR, потоки), [ARCHITECTURE.md](docs/ARCHITECTURE.md) (как устроено), [BENCHMARKS.md](docs/BENCHMARKS.md) — на английском |
-| `tools` | `compile-shaders.ps1`: HLSL в Pascal-включения (нужен только после изменения шейдеров) |
+| `src/Bench`, `src/Common` | Бенчмарк `FmxCanvasBench` (сцены, канвасы, замер) и вспомогательные модули |
+| `results` | Сводки замеров (`.md`, `.csv`), в `raw` — каждый их прогон |
+| `tools` | `run-bench.ps1`, `summarize-bench.ps1` и помощники: запуск и сводка бенчмарка; `compile-shaders.ps1`: HLSL в Pascal-включения (нужен только после изменения шейдеров) |
+| `build.ps1`, `res` | Сборка бенчмарка из командной строки (dcc64) |
 
 ## Ограничения
 

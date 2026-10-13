@@ -1,0 +1,814 @@
+=== 2026-10-09 10:13:44 run-bench.ps1 label=raytracing resume=False force=False
+exe: bin\Win64\Release\FmxCanvasBench.exe (2026-10-09 07:42:51), git HEAD b2286e9470af
+canvases=fcdx12,fcdx12rt,fcdx12ao,fcdx12soft,fcdx12refl scenes=shadows3d,mirror3d,viewport3d presets=light,medium,heavy modes=throughput repeats=3 warmup=2 duration=5 size=1920x1080 quality=default monitor=primary (\\.\DISPLAY2) runs=135 skipped=0
+[2026-10-09 10:13:44] [1/135] "bin\Win64\Release\FmxCanvasBench.exe" --canvas=fcdx12 --scene=shadows3d --preset=light --mode=throughput --size=1920x1080 --monitor=primary --quality=default --warmup=2 --duration=5 --tag=raytracing/r1 --out=results\raw\2026-10-09_raytracing\runs.csv
+  exit=0 duration=7.5 s (start delay 0.3 s: mutex wait + startup) status=ok fps=6119.72 frame=0.049 ms
+  | fcdx12/shadows3d n=8 throughput q=default: status=ok class=TFastCanvas
+  |   frames=30599 fps=6119.7 frame median=0.049 p95=0.124 p99=0.297 max=1.021 ms
+  |   begin=0.002 record=0.032 end=0.004 ms (medians)
+  |   interval median=0.139 p99=0.474 max=1.242 ms, in budget 100.0%, missed 0, cpu paint=0.038 frame=0.118 ms, render thread=0.118 ms
+[2026-10-09 10:13:51] [2/135] "bin\Win64\Release\FmxCanvasBench.exe" --canvas=fcdx12rt --scene=shadows3d --preset=light --mode=throughput --size=1920x1080 --monitor=primary --quality=default --warmup=2 --duration=5 --tag=raytracing/r1 --out=results\raw\2026-10-09_raytracing\runs.csv
+  exit=0 duration=7.5 s (start delay 0.2 s: mutex wait + startup) status=ok fps=4013.55 frame=0.143 ms
+  | fcdx12rt/shadows3d n=8 throughput q=default: status=ok class=TFastCanvas
+  |   frames=20067 fps=4013.5 frame median=0.143 p95=0.267 p99=0.458 max=1.159 ms
+  |   begin=0.002 record=0.033 end=0.106 ms (medians)
+  |   interval median=0.226 p99=0.662 max=1.317 ms, in budget 100.0%, missed 0, cpu paint=0.042 frame=0.122 ms, render thread=0.236 ms
+[2026-10-09 10:13:59] [3/135] "bin\Win64\Release\FmxCanvasBench.exe" --canvas=fcdx12ao --scene=shadows3d --preset=light --mode=throughput --size=1920x1080 --monitor=primary --quality=default --warmup=2 --duration=5 --tag=raytracing/r1 --out=results\raw\2026-10-09_raytracing\runs.csv
+  exit=0 duration=7.4 s (start delay 0.2 s: mutex wait + startup) status=ok fps=3072.48 frame=0.223 ms
+  | fcdx12ao/shadows3d n=8 throughput q=default: status=ok class=TFastCanvas
+  |   frames=15363 fps=3072.5 frame median=0.223 p95=0.347 p99=0.530 max=1.185 ms
+  |   begin=0.002 record=0.033 end=0.187 ms (medians)
+  |   interval median=0.301 p99=0.717 max=1.273 ms, in budget 100.0%, missed 0, cpu paint=0.042 frame=0.123 ms, render thread=0.321 ms
+[2026-10-09 10:14:06] [4/135] "bin\Win64\Release\FmxCanvasBench.exe" --canvas=fcdx12soft --scene=shadows3d --preset=light --mode=throughput --size=1920x1080 --monitor=primary --quality=default --warmup=2 --duration=5 --tag=raytracing/r1 --out=results\raw\2026-10-09_raytracing\runs.csv
+  exit=0 duration=7.4 s (start delay 0.2 s: mutex wait + startup) status=ok fps=2637.65 frame=0.275 ms
+  | fcdx12soft/shadows3d n=8 throughput q=default: status=ok class=TFastCanvas
+  |   frames=13189 fps=2637.6 frame median=0.275 p95=0.403 p99=0.549 max=0.940 ms
+  |   begin=0.002 record=0.036 end=0.238 ms (medians)
+  |   interval median=0.360 p99=0.737 max=1.362 ms, in budget 100.0%, missed 0, cpu paint=0.045 frame=0.133 ms, render thread=0.377 ms
+[2026-10-09 10:14:13] [5/135] "bin\Win64\Release\FmxCanvasBench.exe" --canvas=fcdx12refl --scene=shadows3d --preset=light --mode=throughput --size=1920x1080 --monitor=primary --quality=default --warmup=2 --duration=5 --tag=raytracing/r1 --out=results\raw\2026-10-09_raytracing\runs.csv
+  exit=0 duration=7.5 s (start delay 0.2 s: mutex wait + startup) status=ok fps=2536.20 frame=0.292 ms
+  | fcdx12refl/shadows3d n=8 throughput q=default: status=ok class=TFastCanvas
+  |   frames=12682 fps=2536.2 frame median=0.292 p95=0.413 p99=0.544 max=0.983 ms
+  |   begin=0.002 record=0.036 end=0.254 ms (medians)
+  |   interval median=0.376 p99=0.724 max=1.251 ms, in budget 100.0%, missed 0, cpu paint=0.046 frame=0.133 ms, render thread=0.393 ms
+[2026-10-09 10:14:21] [6/135] "bin\Win64\Release\FmxCanvasBench.exe" --canvas=fcdx12 --scene=shadows3d --preset=medium --mode=throughput --size=1920x1080 --monitor=primary --quality=default --warmup=2 --duration=5 --tag=raytracing/r1 --out=results\raw\2026-10-09_raytracing\runs.csv --screenshot=results\raw\2026-10-09_raytracing\shots\shadows3d_fcdx12.png
+  exit=0 duration=7.5 s (start delay 0.2 s: mutex wait + startup) status=ok fps=3163.39 frame=0.105 ms
+  | fcdx12/shadows3d n=32 throughput q=default: status=ok class=TFastCanvas
+  |   frames=15817 fps=3163.4 frame median=0.105 p95=0.150 p99=0.208 max=0.518 ms
+  |   begin=0.002 record=0.099 end=0.003 ms (medians)
+  |   interval median=0.293 p99=0.581 max=1.070 ms, in budget 100.0%, missed 0, cpu paint=0.104 frame=0.280 ms, render thread=0.133 ms
+[2026-10-09 10:14:28] [7/135] "bin\Win64\Release\FmxCanvasBench.exe" --canvas=fcdx12rt --scene=shadows3d --preset=medium --mode=throughput --size=1920x1080 --monitor=primary --quality=default --warmup=2 --duration=5 --tag=raytracing/r1 --out=results\raw\2026-10-09_raytracing\runs.csv --screenshot=results\raw\2026-10-09_raytracing\shots\shadows3d_fcdx12rt.png
+  exit=0 duration=7.5 s (start delay 0.2 s: mutex wait + startup) status=ok fps=3139.51 frame=0.104 ms
+  | fcdx12rt/shadows3d n=32 throughput q=default: status=ok class=TFastCanvas
+  |   frames=15698 fps=3139.5 frame median=0.104 p95=0.156 p99=0.227 max=0.428 ms
+  |   begin=0.002 record=0.099 end=0.003 ms (medians)
+  |   interval median=0.288 p99=0.645 max=1.303 ms, in budget 100.0%, missed 0, cpu paint=0.104 frame=0.278 ms, render thread=0.152 ms
+[2026-10-09 10:14:36] [8/135] "bin\Win64\Release\FmxCanvasBench.exe" --canvas=fcdx12ao --scene=shadows3d --preset=medium --mode=throughput --size=1920x1080 --monitor=primary --quality=default --warmup=2 --duration=5 --tag=raytracing/r1 --out=results\raw\2026-10-09_raytracing\runs.csv --screenshot=results\raw\2026-10-09_raytracing\shots\shadows3d_fcdx12ao.png
+  exit=0 duration=7.5 s (start delay 0.2 s: mutex wait + startup) status=ok fps=2734.22 frame=0.154 ms
+  | fcdx12ao/shadows3d n=32 throughput q=default: status=ok class=TFastCanvas
+  |   frames=13672 fps=2734.2 frame median=0.154 p95=0.271 p99=0.388 max=1.014 ms
+  |   begin=0.002 record=0.100 end=0.005 ms (medians)
+  |   interval median=0.339 p99=0.801 max=1.383 ms, in budget 100.0%, missed 0, cpu paint=0.108 frame=0.281 ms, render thread=0.290 ms
+[2026-10-09 10:14:43] [9/135] "bin\Win64\Release\FmxCanvasBench.exe" --canvas=fcdx12soft --scene=shadows3d --preset=medium --mode=throughput --size=1920x1080 --monitor=primary --quality=default --warmup=2 --duration=5 --tag=raytracing/r1 --out=results\raw\2026-10-09_raytracing\runs.csv --screenshot=results\raw\2026-10-09_raytracing\shots\shadows3d_fcdx12soft.png
+  exit=0 duration=7.5 s (start delay 0.2 s: mutex wait + startup) status=ok fps=2281.81 frame=0.236 ms
+  | fcdx12soft/shadows3d n=32 throughput q=default: status=ok class=TFastCanvas
+  |   frames=11410 fps=2281.8 frame median=0.236 p95=0.373 p99=0.490 max=1.066 ms
+  |   begin=0.002 record=0.102 end=0.131 ms (medians)
+  |   interval median=0.412 p99=0.883 max=1.657 ms, in budget 100.0%, missed 0, cpu paint=0.110 frame=0.286 ms, render thread=0.409 ms
+[2026-10-09 10:14:51] [10/135] "bin\Win64\Release\FmxCanvasBench.exe" --canvas=fcdx12refl --scene=shadows3d --preset=medium --mode=throughput --size=1920x1080 --monitor=primary --quality=default --warmup=2 --duration=5 --tag=raytracing/r1 --out=results\raw\2026-10-09_raytracing\runs.csv --screenshot=results\raw\2026-10-09_raytracing\shots\shadows3d_fcdx12refl.png
+  exit=0 duration=7.5 s (start delay 0.2 s: mutex wait + startup) status=ok fps=2164.54 frame=0.259 ms
+  | fcdx12refl/shadows3d n=32 throughput q=default: status=ok class=TFastCanvas
+  |   frames=10823 fps=2164.5 frame median=0.259 p95=0.382 p99=0.487 max=1.048 ms
+  |   begin=0.002 record=0.105 end=0.152 ms (medians)
+  |   interval median=0.437 p99=0.850 max=1.253 ms, in budget 100.0%, missed 0, cpu paint=0.113 frame=0.293 ms, render thread=0.442 ms
+[2026-10-09 10:14:59] [11/135] "bin\Win64\Release\FmxCanvasBench.exe" --canvas=fcdx12 --scene=shadows3d --preset=heavy --mode=throughput --size=1920x1080 --monitor=primary --quality=default --warmup=2 --duration=5 --tag=raytracing/r1 --out=results\raw\2026-10-09_raytracing\runs.csv
+  exit=0 duration=7.4 s (start delay 0.2 s: mutex wait + startup) status=ok fps=1003.52 frame=0.363 ms
+  | fcdx12/shadows3d n=120 throughput q=default: status=ok class=TFastCanvas
+  |   frames=5018 fps=1003.5 frame median=0.363 p95=0.493 p99=0.603 max=0.793 ms
+  |   begin=0.003 record=0.360 end=0.001 ms (medians)
+  |   interval median=0.964 p99=1.483 max=2.238 ms, in budget 100.0%, missed 0, cpu paint=0.363 frame=0.912 ms, render thread=0.300 ms
+[2026-10-09 10:15:06] [12/135] "bin\Win64\Release\FmxCanvasBench.exe" --canvas=fcdx12rt --scene=shadows3d --preset=heavy --mode=throughput --size=1920x1080 --monitor=primary --quality=default --warmup=2 --duration=5 --tag=raytracing/r1 --out=results\raw\2026-10-09_raytracing\runs.csv
+  exit=0 duration=7.5 s (start delay 0.2 s: mutex wait + startup) status=ok fps=991.88 frame=0.376 ms
+  | fcdx12rt/shadows3d n=120 throughput q=default: status=ok class=TFastCanvas
+  |   frames=4960 fps=991.9 frame median=0.376 p95=0.511 p99=0.617 max=0.822 ms
+  |   begin=0.003 record=0.372 end=0.001 ms (medians)
+  |   interval median=0.982 p99=1.451 max=1.779 ms, in budget 100.0%, missed 0, cpu paint=0.375 frame=0.919 ms, render thread=0.318 ms
+[2026-10-09 10:15:13] [13/135] "bin\Win64\Release\FmxCanvasBench.exe" --canvas=fcdx12ao --scene=shadows3d --preset=heavy --mode=throughput --size=1920x1080 --monitor=primary --quality=default --warmup=2 --duration=5 --tag=raytracing/r1 --out=results\raw\2026-10-09_raytracing\runs.csv
+  exit=0 duration=7.5 s (start delay 0.2 s: mutex wait + startup) status=ok fps=1006.95 frame=0.366 ms
+  | fcdx12ao/shadows3d n=120 throughput q=default: status=ok class=TFastCanvas
+  |   frames=5035 fps=1006.9 frame median=0.366 p95=0.509 p99=0.629 max=1.013 ms
+  |   begin=0.003 record=0.363 end=0.001 ms (medians)
+  |   interval median=0.958 p99=1.491 max=2.167 ms, in budget 100.0%, missed 0, cpu paint=0.367 frame=0.908 ms, render thread=0.332 ms
+[2026-10-09 10:15:21] [14/135] "bin\Win64\Release\FmxCanvasBench.exe" --canvas=fcdx12soft --scene=shadows3d --preset=heavy --mode=throughput --size=1920x1080 --monitor=primary --quality=default --warmup=2 --duration=5 --tag=raytracing/r1 --out=results\raw\2026-10-09_raytracing\runs.csv
+  exit=0 duration=7.5 s (start delay 0.2 s: mutex wait + startup) status=ok fps=1001.52 frame=0.366 ms
+  | fcdx12soft/shadows3d n=120 throughput q=default: status=ok class=TFastCanvas
+  |   frames=5008 fps=1001.5 frame median=0.366 p95=0.508 p99=0.623 max=0.821 ms
+  |   begin=0.002 record=0.362 end=0.001 ms (medians)
+  |   interval median=0.960 p99=1.564 max=2.226 ms, in budget 100.0%, missed 0, cpu paint=0.366 frame=0.911 ms, render thread=0.332 ms
+[2026-10-09 10:15:28] [15/135] "bin\Win64\Release\FmxCanvasBench.exe" --canvas=fcdx12refl --scene=shadows3d --preset=heavy --mode=throughput --size=1920x1080 --monitor=primary --quality=default --warmup=2 --duration=5 --tag=raytracing/r1 --out=results\raw\2026-10-09_raytracing\runs.csv
+  exit=0 duration=7.5 s (start delay 0.3 s: mutex wait + startup) status=ok fps=984.92 frame=0.375 ms
+  | fcdx12refl/shadows3d n=120 throughput q=default: status=ok class=TFastCanvas
+  |   frames=4925 fps=984.9 frame median=0.375 p95=0.524 p99=0.635 max=0.935 ms
+  |   begin=0.003 record=0.371 end=0.001 ms (medians)
+  |   interval median=0.982 p99=1.566 max=2.875 ms, in budget 100.0%, missed 0, cpu paint=0.387 frame=0.957 ms, render thread=0.334 ms
+[2026-10-09 10:15:36] [16/135] "bin\Win64\Release\FmxCanvasBench.exe" --canvas=fcdx12 --scene=mirror3d --preset=light --mode=throughput --size=1920x1080 --monitor=primary --quality=default --warmup=2 --duration=5 --tag=raytracing/r1 --out=results\raw\2026-10-09_raytracing\runs.csv
+  exit=0 duration=7.5 s (start delay 0.2 s: mutex wait + startup) status=ok fps=6040.82 frame=0.052 ms
+  | fcdx12/mirror3d n=8 throughput q=default: status=ok class=TFastCanvas
+  |   frames=30204 fps=6040.8 frame median=0.052 p95=0.134 p99=0.297 max=1.307 ms
+  |   begin=0.002 record=0.032 end=0.004 ms (medians)
+  |   interval median=0.140 p99=0.482 max=1.442 ms, in budget 100.0%, missed 0, cpu paint=0.039 frame=0.118 ms, render thread=0.124 ms
+[2026-10-09 10:15:43] [17/135] "bin\Win64\Release\FmxCanvasBench.exe" --canvas=fcdx12rt --scene=mirror3d --preset=light --mode=throughput --size=1920x1080 --monitor=primary --quality=default --warmup=2 --duration=5 --tag=raytracing/r1 --out=results\raw\2026-10-09_raytracing\runs.csv
+  exit=0 duration=7.4 s (start delay 0.2 s: mutex wait + startup) status=ok fps=4026.78 frame=0.145 ms
+  | fcdx12rt/mirror3d n=8 throughput q=default: status=ok class=TFastCanvas
+  |   frames=20134 fps=4026.8 frame median=0.145 p95=0.271 p99=0.423 max=1.167 ms
+  |   begin=0.002 record=0.033 end=0.111 ms (medians)
+  |   interval median=0.224 p99=0.638 max=1.256 ms, in budget 100.0%, missed 0, cpu paint=0.041 frame=0.119 ms, render thread=0.236 ms
+[2026-10-09 10:15:51] [18/135] "bin\Win64\Release\FmxCanvasBench.exe" --canvas=fcdx12ao --scene=mirror3d --preset=light --mode=throughput --size=1920x1080 --monitor=primary --quality=default --warmup=2 --duration=5 --tag=raytracing/r1 --out=results\raw\2026-10-09_raytracing\runs.csv
+  exit=0 duration=7.5 s (start delay 0.2 s: mutex wait + startup) status=ok fps=3064.71 frame=0.225 ms
+  | fcdx12ao/mirror3d n=8 throughput q=default: status=ok class=TFastCanvas
+  |   frames=15324 fps=3064.7 frame median=0.225 p95=0.348 p99=0.526 max=1.328 ms
+  |   begin=0.002 record=0.033 end=0.190 ms (medians)
+  |   interval median=0.303 p99=0.710 max=1.465 ms, in budget 100.0%, missed 0, cpu paint=0.042 frame=0.122 ms, render thread=0.322 ms
+[2026-10-09 10:15:58] [19/135] "bin\Win64\Release\FmxCanvasBench.exe" --canvas=fcdx12soft --scene=mirror3d --preset=light --mode=throughput --size=1920x1080 --monitor=primary --quality=default --warmup=2 --duration=5 --tag=raytracing/r1 --out=results\raw\2026-10-09_raytracing\runs.csv
+  exit=0 duration=7.5 s (start delay 0.2 s: mutex wait + startup) status=ok fps=2603.72 frame=0.282 ms
+  | fcdx12soft/mirror3d n=8 throughput q=default: status=ok class=TFastCanvas
+  |   frames=13019 fps=2603.7 frame median=0.282 p95=0.408 p99=0.603 max=1.295 ms
+  |   begin=0.002 record=0.035 end=0.246 ms (medians)
+  |   interval median=0.364 p99=0.754 max=1.391 ms, in budget 100.0%, missed 0, cpu paint=0.044 frame=0.129 ms, render thread=0.382 ms
+[2026-10-09 10:16:06] [20/135] "bin\Win64\Release\FmxCanvasBench.exe" --canvas=fcdx12refl --scene=mirror3d --preset=light --mode=throughput --size=1920x1080 --monitor=primary --quality=default --warmup=2 --duration=5 --tag=raytracing/r1 --out=results\raw\2026-10-09_raytracing\runs.csv
+  exit=0 duration=7.5 s (start delay 0.2 s: mutex wait + startup) status=ok fps=2499.18 frame=0.299 ms
+  | fcdx12refl/mirror3d n=8 throughput q=default: status=ok class=TFastCanvas
+  |   frames=12496 fps=2499.2 frame median=0.299 p95=0.437 p99=0.563 max=1.545 ms
+  |   begin=0.002 record=0.036 end=0.261 ms (medians)
+  |   interval median=0.381 p99=0.763 max=1.689 ms, in budget 100.0%, missed 0, cpu paint=0.046 frame=0.132 ms, render thread=0.398 ms
+[2026-10-09 10:16:13] [21/135] "bin\Win64\Release\FmxCanvasBench.exe" --canvas=fcdx12 --scene=mirror3d --preset=medium --mode=throughput --size=1920x1080 --monitor=primary --quality=default --warmup=2 --duration=5 --tag=raytracing/r1 --out=results\raw\2026-10-09_raytracing\runs.csv --screenshot=results\raw\2026-10-09_raytracing\shots\mirror3d_fcdx12.png
+  exit=0 duration=7.5 s (start delay 0.2 s: mutex wait + startup) status=ok fps=3144.71 frame=0.105 ms
+  | fcdx12/mirror3d n=32 throughput q=default: status=ok class=TFastCanvas
+  |   frames=15724 fps=3144.7 frame median=0.105 p95=0.149 p99=0.208 max=0.551 ms
+  |   begin=0.002 record=0.099 end=0.003 ms (medians)
+  |   interval median=0.292 p99=0.596 max=1.064 ms, in budget 100.0%, missed 0, cpu paint=0.104 frame=0.282 ms, render thread=0.136 ms
+[2026-10-09 10:16:21] [22/135] "bin\Win64\Release\FmxCanvasBench.exe" --canvas=fcdx12rt --scene=mirror3d --preset=medium --mode=throughput --size=1920x1080 --monitor=primary --quality=default --warmup=2 --duration=5 --tag=raytracing/r1 --out=results\raw\2026-10-09_raytracing\runs.csv --screenshot=results\raw\2026-10-09_raytracing\shots\mirror3d_fcdx12rt.png
+  exit=0 duration=7.5 s (start delay 0.2 s: mutex wait + startup) status=ok fps=3141.26 frame=0.105 ms
+  | fcdx12rt/mirror3d n=32 throughput q=default: status=ok class=TFastCanvas
+  |   frames=15707 fps=3141.3 frame median=0.105 p95=0.154 p99=0.218 max=0.514 ms
+  |   begin=0.002 record=0.100 end=0.003 ms (medians)
+  |   interval median=0.288 p99=0.610 max=1.315 ms, in budget 100.0%, missed 0, cpu paint=0.105 frame=0.280 ms, render thread=0.154 ms
+[2026-10-09 10:16:28] [23/135] "bin\Win64\Release\FmxCanvasBench.exe" --canvas=fcdx12ao --scene=mirror3d --preset=medium --mode=throughput --size=1920x1080 --monitor=primary --quality=default --warmup=2 --duration=5 --tag=raytracing/r1 --out=results\raw\2026-10-09_raytracing\runs.csv --screenshot=results\raw\2026-10-09_raytracing\shots\mirror3d_fcdx12ao.png
+  exit=0 duration=7.5 s (start delay 0.2 s: mutex wait + startup) status=ok fps=2734.83 frame=0.148 ms
+  | fcdx12ao/mirror3d n=32 throughput q=default: status=ok class=TFastCanvas
+  |   frames=13675 fps=2734.8 frame median=0.148 p95=0.252 p99=0.374 max=1.072 ms
+  |   begin=0.002 record=0.105 end=0.004 ms (medians)
+  |   interval median=0.343 p99=0.742 max=1.295 ms, in budget 100.0%, missed 0, cpu paint=0.112 frame=0.295 ms, render thread=0.284 ms
+[2026-10-09 10:16:36] [24/135] "bin\Win64\Release\FmxCanvasBench.exe" --canvas=fcdx12soft --scene=mirror3d --preset=medium --mode=throughput --size=1920x1080 --monitor=primary --quality=default --warmup=2 --duration=5 --tag=raytracing/r1 --out=results\raw\2026-10-09_raytracing\runs.csv --screenshot=results\raw\2026-10-09_raytracing\shots\mirror3d_fcdx12soft.png
+  exit=0 duration=7.5 s (start delay 0.2 s: mutex wait + startup) status=ok fps=2286.69 frame=0.232 ms
+  | fcdx12soft/mirror3d n=32 throughput q=default: status=ok class=TFastCanvas
+  |   frames=11434 fps=2286.7 frame median=0.232 p95=0.351 p99=0.466 max=1.154 ms
+  |   begin=0.003 record=0.104 end=0.124 ms (medians)
+  |   interval median=0.414 p99=0.810 max=1.672 ms, in budget 100.0%, missed 0, cpu paint=0.113 frame=0.294 ms, render thread=0.413 ms
+[2026-10-09 10:16:43] [25/135] "bin\Win64\Release\FmxCanvasBench.exe" --canvas=fcdx12refl --scene=mirror3d --preset=medium --mode=throughput --size=1920x1080 --monitor=primary --quality=default --warmup=2 --duration=5 --tag=raytracing/r1 --out=results\raw\2026-10-09_raytracing\runs.csv --screenshot=results\raw\2026-10-09_raytracing\shots\mirror3d_fcdx12refl.png
+  exit=0 duration=7.5 s (start delay 0.2 s: mutex wait + startup) status=ok fps=2155.40 frame=0.254 ms
+  | fcdx12refl/mirror3d n=32 throughput q=default: status=ok class=TFastCanvas
+  |   frames=10777 fps=2155.4 frame median=0.254 p95=0.384 p99=0.522 max=1.146 ms
+  |   begin=0.003 record=0.108 end=0.143 ms (medians)
+  |   interval median=0.438 p99=0.876 max=1.720 ms, in budget 100.0%, missed 0, cpu paint=0.117 frame=0.301 ms, render thread=0.444 ms
+[2026-10-09 10:16:51] [26/135] "bin\Win64\Release\FmxCanvasBench.exe" --canvas=fcdx12 --scene=mirror3d --preset=heavy --mode=throughput --size=1920x1080 --monitor=primary --quality=default --warmup=2 --duration=5 --tag=raytracing/r1 --out=results\raw\2026-10-09_raytracing\runs.csv
+  exit=0 duration=7.4 s (start delay 0.2 s: mutex wait + startup) status=ok fps=1015.23 frame=0.359 ms
+  | fcdx12/mirror3d n=120 throughput q=default: status=ok class=TFastCanvas
+  |   frames=5077 fps=1015.2 frame median=0.359 p95=0.485 p99=0.611 max=0.911 ms
+  |   begin=0.003 record=0.355 end=0.001 ms (medians)
+  |   interval median=0.953 p99=1.475 max=1.979 ms, in budget 100.0%, missed 0, cpu paint=0.359 frame=0.899 ms, render thread=0.303 ms
+[2026-10-09 10:16:58] [27/135] "bin\Win64\Release\FmxCanvasBench.exe" --canvas=fcdx12rt --scene=mirror3d --preset=heavy --mode=throughput --size=1920x1080 --monitor=primary --quality=default --warmup=2 --duration=5 --tag=raytracing/r1 --out=results\raw\2026-10-09_raytracing\runs.csv
+  exit=0 duration=7.5 s (start delay 0.2 s: mutex wait + startup) status=ok fps=998.48 frame=0.371 ms
+  | fcdx12rt/mirror3d n=120 throughput q=default: status=ok class=TFastCanvas
+  |   frames=4993 fps=998.5 frame median=0.371 p95=0.503 p99=0.617 max=0.988 ms
+  |   begin=0.003 record=0.368 end=0.001 ms (medians)
+  |   interval median=0.972 p99=1.465 max=2.231 ms, in budget 100.0%, missed 0, cpu paint=0.370 frame=0.908 ms, render thread=0.324 ms
+[2026-10-09 10:17:06] [28/135] "bin\Win64\Release\FmxCanvasBench.exe" --canvas=fcdx12ao --scene=mirror3d --preset=heavy --mode=throughput --size=1920x1080 --monitor=primary --quality=default --warmup=2 --duration=5 --tag=raytracing/r1 --out=results\raw\2026-10-09_raytracing\runs.csv
+  exit=0 duration=7.5 s (start delay 0.2 s: mutex wait + startup) status=ok fps=1007.50 frame=0.369 ms
+  | fcdx12ao/mirror3d n=120 throughput q=default: status=ok class=TFastCanvas
+  |   frames=5038 fps=1007.5 frame median=0.369 p95=0.505 p99=0.615 max=0.811 ms
+  |   begin=0.002 record=0.365 end=0.001 ms (medians)
+  |   interval median=0.964 p99=1.445 max=1.867 ms, in budget 100.0%, missed 0, cpu paint=0.369 frame=0.904 ms, render thread=0.333 ms
+[2026-10-09 10:17:13] [29/135] "bin\Win64\Release\FmxCanvasBench.exe" --canvas=fcdx12soft --scene=mirror3d --preset=heavy --mode=throughput --size=1920x1080 --monitor=primary --quality=default --warmup=2 --duration=5 --tag=raytracing/r1 --out=results\raw\2026-10-09_raytracing\runs.csv
+  exit=0 duration=7.5 s (start delay 0.2 s: mutex wait + startup) status=ok fps=995.90 frame=0.370 ms
+  | fcdx12soft/mirror3d n=120 throughput q=default: status=ok class=TFastCanvas
+  |   frames=4980 fps=995.9 frame median=0.370 p95=0.509 p99=0.642 max=0.861 ms
+  |   begin=0.003 record=0.366 end=0.001 ms (medians)
+  |   interval median=0.972 p99=1.495 max=8.287 ms, in budget 100.0%, missed 2, cpu paint=0.370 frame=0.915 ms, render thread=0.334 ms
+[2026-10-09 10:17:21] [30/135] "bin\Win64\Release\FmxCanvasBench.exe" --canvas=fcdx12refl --scene=mirror3d --preset=heavy --mode=throughput --size=1920x1080 --monitor=primary --quality=default --warmup=2 --duration=5 --tag=raytracing/r1 --out=results\raw\2026-10-09_raytracing\runs.csv
+  exit=0 duration=7.5 s (start delay 0.2 s: mutex wait + startup) status=ok fps=990.64 frame=0.379 ms
+  | fcdx12refl/mirror3d n=120 throughput q=default: status=ok class=TFastCanvas
+  |   frames=4954 fps=990.6 frame median=0.379 p95=0.518 p99=0.636 max=0.916 ms
+  |   begin=0.003 record=0.376 end=0.001 ms (medians)
+  |   interval median=0.979 p99=1.478 max=2.017 ms, in budget 100.0%, missed 0, cpu paint=0.397 frame=0.963 ms, render thread=0.338 ms
+[2026-10-09 10:17:28] [31/135] "bin\Win64\Release\FmxCanvasBench.exe" --canvas=fcdx12 --scene=viewport3d --preset=light --mode=throughput --size=1920x1080 --monitor=primary --quality=default --warmup=2 --duration=5 --tag=raytracing/r1 --out=results\raw\2026-10-09_raytracing\runs.csv
+  exit=0 duration=7.4 s (start delay 0.2 s: mutex wait + startup) status=ok fps=4369.51 frame=0.070 ms
+  | fcdx12/viewport3d n=20 throughput q=default: status=ok class=TFastCanvas
+  |   frames=21848 fps=4369.5 frame median=0.070 p95=0.116 p99=0.231 max=0.731 ms
+  |   begin=0.002 record=0.063 end=0.003 ms (medians)
+  |   interval median=0.209 p99=0.493 max=0.987 ms, in budget 100.0%, missed 0, cpu paint=0.068 frame=0.197 ms, render thread=0.124 ms
+[2026-10-09 10:17:36] [32/135] "bin\Win64\Release\FmxCanvasBench.exe" --canvas=fcdx12rt --scene=viewport3d --preset=light --mode=throughput --size=1920x1080 --monitor=primary --quality=default --warmup=2 --duration=5 --tag=raytracing/r1 --out=results\raw\2026-10-09_raytracing\runs.csv
+  exit=0 duration=7.5 s (start delay 0.2 s: mutex wait + startup) status=ok fps=4249.57 frame=0.072 ms
+  | fcdx12rt/viewport3d n=20 throughput q=default: status=ok class=TFastCanvas
+  |   frames=21248 fps=4249.6 frame median=0.072 p95=0.130 p99=0.261 max=0.994 ms
+  |   begin=0.002 record=0.064 end=0.003 ms (medians)
+  |   interval median=0.212 p99=0.536 max=1.308 ms, in budget 100.0%, missed 0, cpu paint=0.070 frame=0.197 ms, render thread=0.140 ms
+[2026-10-09 10:17:43] [33/135] "bin\Win64\Release\FmxCanvasBench.exe" --canvas=fcdx12ao --scene=viewport3d --preset=light --mode=throughput --size=1920x1080 --monitor=primary --quality=default --warmup=2 --duration=5 --tag=raytracing/r1 --out=results\raw\2026-10-09_raytracing\runs.csv
+  exit=0 duration=7.5 s (start delay 0.2 s: mutex wait + startup) status=ok fps=3398.97 frame=0.141 ms
+  | fcdx12ao/viewport3d n=20 throughput q=default: status=ok class=TFastCanvas
+  |   frames=16995 fps=3399.0 frame median=0.141 p95=0.249 p99=0.399 max=1.095 ms
+  |   begin=0.002 record=0.067 end=0.066 ms (medians)
+  |   interval median=0.273 p99=0.683 max=1.307 ms, in budget 100.0%, missed 0, cpu paint=0.074 frame=0.203 ms, render thread=0.258 ms
+[2026-10-09 10:17:50] [34/135] "bin\Win64\Release\FmxCanvasBench.exe" --canvas=fcdx12soft --scene=viewport3d --preset=light --mode=throughput --size=1920x1080 --monitor=primary --quality=default --warmup=2 --duration=5 --tag=raytracing/r1 --out=results\raw\2026-10-09_raytracing\runs.csv
+  exit=0 duration=7.5 s (start delay 0.2 s: mutex wait + startup) status=ok fps=3105.99 frame=0.171 ms
+  | fcdx12soft/viewport3d n=20 throughput q=default: status=ok class=TFastCanvas
+  |   frames=15530 fps=3106.0 frame median=0.171 p95=0.277 p99=0.413 max=1.089 ms
+  |   begin=0.002 record=0.067 end=0.101 ms (medians)
+  |   interval median=0.302 p99=0.685 max=1.217 ms, in budget 100.0%, missed 0, cpu paint=0.075 frame=0.206 ms, render thread=0.299 ms
+[2026-10-09 10:17:58] [35/135] "bin\Win64\Release\FmxCanvasBench.exe" --canvas=fcdx12refl --scene=viewport3d --preset=light --mode=throughput --size=1920x1080 --monitor=primary --quality=default --warmup=2 --duration=5 --tag=raytracing/r1 --out=results\raw\2026-10-09_raytracing\runs.csv
+  exit=0 duration=7.5 s (start delay 0.2 s: mutex wait + startup) status=ok fps=3171.54 frame=0.161 ms
+  | fcdx12refl/viewport3d n=20 throughput q=default: status=ok class=TFastCanvas
+  |   frames=15858 fps=3171.5 frame median=0.161 p95=0.277 p99=0.408 max=1.152 ms
+  |   begin=0.002 record=0.067 end=0.090 ms (medians)
+  |   interval median=0.290 p99=0.682 max=1.457 ms, in budget 100.0%, missed 0, cpu paint=0.076 frame=0.203 ms, render thread=0.286 ms
+[2026-10-09 10:18:05] [36/135] "bin\Win64\Release\FmxCanvasBench.exe" --canvas=fcdx12 --scene=viewport3d --preset=medium --mode=throughput --size=1920x1080 --monitor=primary --quality=default --warmup=2 --duration=5 --tag=raytracing/r1 --out=results\raw\2026-10-09_raytracing\runs.csv --screenshot=results\raw\2026-10-09_raytracing\shots\viewport3d_fcdx12.png
+  exit=0 duration=7.5 s (start delay 0.2 s: mutex wait + startup) status=ok fps=755.76 frame=0.489 ms
+  | fcdx12/viewport3d n=160 throughput q=default: status=ok class=TFastCanvas
+  |   frames=3779 fps=755.8 frame median=0.489 p95=0.673 p99=0.813 max=1.019 ms
+  |   begin=0.003 record=0.486 end=0.001 ms (medians)
+  |   interval median=1.289 p99=1.902 max=3.693 ms, in budget 100.0%, missed 0, cpu paint=0.488 frame=1.198 ms, render thread=0.405 ms
+[2026-10-09 10:18:13] [37/135] "bin\Win64\Release\FmxCanvasBench.exe" --canvas=fcdx12rt --scene=viewport3d --preset=medium --mode=throughput --size=1920x1080 --monitor=primary --quality=default --warmup=2 --duration=5 --tag=raytracing/r1 --out=results\raw\2026-10-09_raytracing\runs.csv --screenshot=results\raw\2026-10-09_raytracing\shots\viewport3d_fcdx12rt.png
+  exit=0 duration=7.5 s (start delay 0.2 s: mutex wait + startup) status=ok fps=765.04 frame=0.496 ms
+  | fcdx12rt/viewport3d n=160 throughput q=default: status=ok class=TFastCanvas
+  |   frames=3826 fps=765.0 frame median=0.496 p95=0.675 p99=0.827 max=1.050 ms
+  |   begin=0.003 record=0.493 end=0.001 ms (medians)
+  |   interval median=1.270 p99=1.809 max=2.398 ms, in budget 100.0%, missed 0, cpu paint=0.496 frame=1.198 ms, render thread=0.424 ms
+[2026-10-09 10:18:20] [38/135] "bin\Win64\Release\FmxCanvasBench.exe" --canvas=fcdx12ao --scene=viewport3d --preset=medium --mode=throughput --size=1920x1080 --monitor=primary --quality=default --warmup=2 --duration=5 --tag=raytracing/r1 --out=results\raw\2026-10-09_raytracing\runs.csv --screenshot=results\raw\2026-10-09_raytracing\shots\viewport3d_fcdx12ao.png
+  exit=0 duration=7.5 s (start delay 0.2 s: mutex wait + startup) status=ok fps=766.70 frame=0.492 ms
+  | fcdx12ao/viewport3d n=160 throughput q=default: status=ok class=TFastCanvas
+  |   frames=3834 fps=766.7 frame median=0.492 p95=0.679 p99=0.802 max=1.026 ms
+  |   begin=0.003 record=0.489 end=0.001 ms (medians)
+  |   interval median=1.265 p99=1.851 max=2.523 ms, in budget 100.0%, missed 0, cpu paint=0.491 frame=1.190 ms, render thread=0.432 ms
+[2026-10-09 10:18:28] [39/135] "bin\Win64\Release\FmxCanvasBench.exe" --canvas=fcdx12soft --scene=viewport3d --preset=medium --mode=throughput --size=1920x1080 --monitor=primary --quality=default --warmup=2 --duration=5 --tag=raytracing/r1 --out=results\raw\2026-10-09_raytracing\runs.csv --screenshot=results\raw\2026-10-09_raytracing\shots\viewport3d_fcdx12soft.png
+  exit=0 duration=7.5 s (start delay 0.2 s: mutex wait + startup) status=ok fps=765.30 frame=0.491 ms
+  | fcdx12soft/viewport3d n=160 throughput q=default: status=ok class=TFastCanvas
+  |   frames=3827 fps=765.3 frame median=0.491 p95=0.690 p99=0.830 max=1.016 ms
+  |   begin=0.003 record=0.488 end=0.001 ms (medians)
+  |   interval median=1.262 p99=1.865 max=2.479 ms, in budget 100.0%, missed 0, cpu paint=0.491 frame=1.194 ms, render thread=0.438 ms
+[2026-10-09 10:18:36] [40/135] "bin\Win64\Release\FmxCanvasBench.exe" --canvas=fcdx12refl --scene=viewport3d --preset=medium --mode=throughput --size=1920x1080 --monitor=primary --quality=default --warmup=2 --duration=5 --tag=raytracing/r1 --out=results\raw\2026-10-09_raytracing\runs.csv --screenshot=results\raw\2026-10-09_raytracing\shots\viewport3d_fcdx12refl.png
+  exit=0 duration=7.6 s (start delay 0.2 s: mutex wait + startup) status=ok fps=763.29 frame=0.501 ms
+  | fcdx12refl/viewport3d n=160 throughput q=default: status=ok class=TFastCanvas
+  |   frames=3817 fps=763.3 frame median=0.501 p95=0.688 p99=0.842 max=1.057 ms
+  |   begin=0.003 record=0.498 end=0.001 ms (medians)
+  |   interval median=1.267 p99=1.843 max=2.240 ms, in budget 100.0%, missed 0, cpu paint=0.501 frame=1.201 ms, render thread=0.442 ms
+[2026-10-09 10:18:43] [41/135] "bin\Win64\Release\FmxCanvasBench.exe" --canvas=fcdx12 --scene=viewport3d --preset=heavy --mode=throughput --size=1920x1080 --monitor=primary --quality=default --warmup=2 --duration=5 --tag=raytracing/r1 --out=results\raw\2026-10-09_raytracing\runs.csv
+  exit=0 duration=7.5 s (start delay 0.2 s: mutex wait + startup) status=ok fps=263.26 frame=1.483 ms
+  | fcdx12/viewport3d n=480 throughput q=default: status=ok class=TFastCanvas
+  |   frames=1317 fps=263.3 frame median=1.483 p95=1.982 p99=2.167 max=2.439 ms
+  |   begin=0.003 record=1.480 end=0.001 ms (medians)
+  |   interval median=3.747 p99=4.676 max=6.218 ms, in budget 100.0%, missed 0, cpu paint=1.459 frame=3.500 ms, render thread=1.043 ms
+[2026-10-09 10:18:51] [42/135] "bin\Win64\Release\FmxCanvasBench.exe" --canvas=fcdx12rt --scene=viewport3d --preset=heavy --mode=throughput --size=1920x1080 --monitor=primary --quality=default --warmup=2 --duration=5 --tag=raytracing/r1 --out=results\raw\2026-10-09_raytracing\runs.csv
+  exit=0 duration=7.5 s (start delay 0.2 s: mutex wait + startup) status=ok fps=263.21 frame=1.502 ms
+  | fcdx12rt/viewport3d n=480 throughput q=default: status=ok class=TFastCanvas
+  |   frames=1317 fps=263.2 frame median=1.502 p95=2.051 p99=2.242 max=2.486 ms
+  |   begin=0.003 record=1.499 end=0.001 ms (medians)
+  |   interval median=3.716 p99=4.709 max=5.208 ms, in budget 100.0%, missed 0, cpu paint=1.492 frame=3.518 ms, render thread=1.085 ms
+[2026-10-09 10:18:58] [43/135] "bin\Win64\Release\FmxCanvasBench.exe" --canvas=fcdx12ao --scene=viewport3d --preset=heavy --mode=throughput --size=1920x1080 --monitor=primary --quality=default --warmup=2 --duration=5 --tag=raytracing/r1 --out=results\raw\2026-10-09_raytracing\runs.csv
+  exit=0 duration=7.6 s (start delay 0.2 s: mutex wait + startup) status=ok fps=255.97 frame=1.678 ms
+  | fcdx12ao/viewport3d n=480 throughput q=default: status=ok class=TFastCanvas
+  |   frames=1280 fps=256.0 frame median=1.678 p95=2.049 p99=2.206 max=2.393 ms
+  |   begin=0.003 record=1.673 end=0.001 ms (medians)
+  |   interval median=3.917 p99=4.712 max=4.911 ms, in budget 100.0%, missed 0, cpu paint=1.508 frame=3.572 ms, render thread=1.029 ms
+[2026-10-09 10:19:06] [44/135] "bin\Win64\Release\FmxCanvasBench.exe" --canvas=fcdx12soft --scene=viewport3d --preset=heavy --mode=throughput --size=1920x1080 --monitor=primary --quality=default --warmup=2 --duration=5 --tag=raytracing/r1 --out=results\raw\2026-10-09_raytracing\runs.csv
+  exit=0 duration=7.6 s (start delay 0.2 s: mutex wait + startup) status=ok fps=259.93 frame=1.527 ms
+  | fcdx12soft/viewport3d n=480 throughput q=default: status=ok class=TFastCanvas
+  |   frames=1300 fps=259.9 frame median=1.527 p95=2.057 p99=2.226 max=2.699 ms
+  |   begin=0.003 record=1.522 end=0.001 ms (medians)
+  |   interval median=3.787 p99=4.722 max=5.294 ms, in budget 100.0%, missed 0, cpu paint=1.499 frame=3.559 ms, render thread=1.075 ms
+[2026-10-09 10:19:13] [45/135] "bin\Win64\Release\FmxCanvasBench.exe" --canvas=fcdx12refl --scene=viewport3d --preset=heavy --mode=throughput --size=1920x1080 --monitor=primary --quality=default --warmup=2 --duration=5 --tag=raytracing/r1 --out=results\raw\2026-10-09_raytracing\runs.csv
+  exit=0 duration=7.6 s (start delay 0.2 s: mutex wait + startup) status=ok fps=256.91 frame=1.639 ms
+  | fcdx12refl/viewport3d n=480 throughput q=default: status=ok class=TFastCanvas
+  |   frames=1285 fps=256.9 frame median=1.639 p95=2.066 p99=2.253 max=2.659 ms
+  |   begin=0.003 record=1.636 end=0.001 ms (medians)
+  |   interval median=3.862 p99=4.711 max=5.185 ms, in budget 100.0%, missed 0, cpu paint=1.545 frame=3.608 ms, render thread=1.062 ms
+[2026-10-09 10:19:21] [46/135] "bin\Win64\Release\FmxCanvasBench.exe" --canvas=fcdx12 --scene=shadows3d --preset=light --mode=throughput --size=1920x1080 --monitor=primary --quality=default --warmup=2 --duration=5 --tag=raytracing/r2 --out=results\raw\2026-10-09_raytracing\runs.csv
+  exit=0 duration=7.5 s (start delay 0.2 s: mutex wait + startup) status=ok fps=6082.00 frame=0.048 ms
+  | fcdx12/shadows3d n=8 throughput q=default: status=ok class=TFastCanvas
+  |   frames=30410 fps=6082.0 frame median=0.048 p95=0.125 p99=0.283 max=1.084 ms
+  |   begin=0.002 record=0.033 end=0.003 ms (medians)
+  |   interval median=0.141 p99=0.462 max=1.340 ms, in budget 100.0%, missed 0, cpu paint=0.039 frame=0.119 ms, render thread=0.118 ms
+[2026-10-09 10:19:28] [47/135] "bin\Win64\Release\FmxCanvasBench.exe" --canvas=fcdx12rt --scene=shadows3d --preset=light --mode=throughput --size=1920x1080 --monitor=primary --quality=default --warmup=2 --duration=5 --tag=raytracing/r2 --out=results\raw\2026-10-09_raytracing\runs.csv
+  exit=0 duration=7.5 s (start delay 0.3 s: mutex wait + startup) status=ok fps=4065.02 frame=0.139 ms
+  | fcdx12rt/shadows3d n=8 throughput q=default: status=ok class=TFastCanvas
+  |   frames=20325 fps=4065.0 frame median=0.139 p95=0.259 p99=0.419 max=1.501 ms
+  |   begin=0.002 record=0.033 end=0.104 ms (medians)
+  |   interval median=0.218 p99=0.645 max=1.596 ms, in budget 100.0%, missed 0, cpu paint=0.042 frame=0.122 ms, render thread=0.234 ms
+[2026-10-09 10:19:36] [48/135] "bin\Win64\Release\FmxCanvasBench.exe" --canvas=fcdx12ao --scene=shadows3d --preset=light --mode=throughput --size=1920x1080 --monitor=primary --quality=default --warmup=2 --duration=5 --tag=raytracing/r2 --out=results\raw\2026-10-09_raytracing\runs.csv
+  exit=0 duration=7.5 s (start delay 0.2 s: mutex wait + startup) status=ok fps=3074.07 frame=0.216 ms
+  | fcdx12ao/shadows3d n=8 throughput q=default: status=ok class=TFastCanvas
+  |   frames=15371 fps=3074.1 frame median=0.216 p95=0.356 p99=0.599 max=1.235 ms
+  |   begin=0.002 record=0.034 end=0.180 ms (medians)
+  |   interval median=0.301 p99=0.770 max=1.398 ms, in budget 100.0%, missed 0, cpu paint=0.044 frame=0.127 ms, render thread=0.320 ms
+[2026-10-09 10:19:43] [49/135] "bin\Win64\Release\FmxCanvasBench.exe" --canvas=fcdx12soft --scene=shadows3d --preset=light --mode=throughput --size=1920x1080 --monitor=primary --quality=default --warmup=2 --duration=5 --tag=raytracing/r2 --out=results\raw\2026-10-09_raytracing\runs.csv
+  exit=0 duration=7.5 s (start delay 0.2 s: mutex wait + startup) status=ok fps=2663.20 frame=0.266 ms
+  | fcdx12soft/shadows3d n=8 throughput q=default: status=ok class=TFastCanvas
+  |   frames=13316 fps=2663.2 frame median=0.266 p95=0.416 p99=0.567 max=1.094 ms
+  |   begin=0.002 record=0.035 end=0.230 ms (medians)
+  |   interval median=0.350 p99=0.767 max=1.254 ms, in budget 100.0%, missed 0, cpu paint=0.044 frame=0.129 ms, render thread=0.373 ms
+[2026-10-09 10:19:51] [50/135] "bin\Win64\Release\FmxCanvasBench.exe" --canvas=fcdx12refl --scene=shadows3d --preset=light --mode=throughput --size=1920x1080 --monitor=primary --quality=default --warmup=2 --duration=5 --tag=raytracing/r2 --out=results\raw\2026-10-09_raytracing\runs.csv
+  exit=0 duration=7.4 s (start delay 0.2 s: mutex wait + startup) status=ok fps=2560.34 frame=0.284 ms
+  | fcdx12refl/shadows3d n=8 throughput q=default: status=ok class=TFastCanvas
+  |   frames=12802 fps=2560.3 frame median=0.284 p95=0.416 p99=0.554 max=1.101 ms
+  |   begin=0.002 record=0.035 end=0.247 ms (medians)
+  |   interval median=0.365 p99=0.751 max=1.195 ms, in budget 100.0%, missed 0, cpu paint=0.044 frame=0.126 ms, render thread=0.389 ms
+[2026-10-09 10:19:58] [51/135] "bin\Win64\Release\FmxCanvasBench.exe" --canvas=fcdx12 --scene=shadows3d --preset=medium --mode=throughput --size=1920x1080 --monitor=primary --quality=default --warmup=2 --duration=5 --tag=raytracing/r2 --out=results\raw\2026-10-09_raytracing\runs.csv
+  exit=0 duration=7.4 s (start delay 0.2 s: mutex wait + startup) status=ok fps=3161.42 frame=0.104 ms
+  | fcdx12/shadows3d n=32 throughput q=default: status=ok class=TFastCanvas
+  |   frames=15808 fps=3161.4 frame median=0.104 p95=0.147 p99=0.206 max=0.515 ms
+  |   begin=0.002 record=0.098 end=0.003 ms (medians)
+  |   interval median=0.291 p99=0.590 max=1.284 ms, in budget 100.0%, missed 0, cpu paint=0.103 frame=0.280 ms, render thread=0.134 ms
+[2026-10-09 10:20:06] [52/135] "bin\Win64\Release\FmxCanvasBench.exe" --canvas=fcdx12rt --scene=shadows3d --preset=medium --mode=throughput --size=1920x1080 --monitor=primary --quality=default --warmup=2 --duration=5 --tag=raytracing/r2 --out=results\raw\2026-10-09_raytracing\runs.csv
+  exit=0 duration=7.5 s (start delay 0.2 s: mutex wait + startup) status=ok fps=3150.87 frame=0.104 ms
+  | fcdx12rt/shadows3d n=32 throughput q=default: status=ok class=TFastCanvas
+  |   frames=15755 fps=3150.9 frame median=0.104 p95=0.154 p99=0.228 max=0.631 ms
+  |   begin=0.002 record=0.099 end=0.003 ms (medians)
+  |   interval median=0.288 p99=0.598 max=1.226 ms, in budget 100.0%, missed 0, cpu paint=0.104 frame=0.279 ms, render thread=0.152 ms
+[2026-10-09 10:20:13] [53/135] "bin\Win64\Release\FmxCanvasBench.exe" --canvas=fcdx12ao --scene=shadows3d --preset=medium --mode=throughput --size=1920x1080 --monitor=primary --quality=default --warmup=2 --duration=5 --tag=raytracing/r2 --out=results\raw\2026-10-09_raytracing\runs.csv
+  exit=0 duration=7.5 s (start delay 0.2 s: mutex wait + startup) status=ok fps=2756.08 frame=0.148 ms
+  | fcdx12ao/shadows3d n=32 throughput q=default: status=ok class=TFastCanvas
+  |   frames=13781 fps=2756.1 frame median=0.148 p95=0.252 p99=0.374 max=1.030 ms
+  |   begin=0.002 record=0.102 end=0.004 ms (medians)
+  |   interval median=0.336 p99=0.726 max=1.371 ms, in budget 100.0%, missed 0, cpu paint=0.109 frame=0.285 ms, render thread=0.278 ms
+[2026-10-09 10:20:21] [54/135] "bin\Win64\Release\FmxCanvasBench.exe" --canvas=fcdx12soft --scene=shadows3d --preset=medium --mode=throughput --size=1920x1080 --monitor=primary --quality=default --warmup=2 --duration=5 --tag=raytracing/r2 --out=results\raw\2026-10-09_raytracing\runs.csv
+  exit=0 duration=7.4 s (start delay 0.2 s: mutex wait + startup) status=ok fps=2301.58 frame=0.228 ms
+  | fcdx12soft/shadows3d n=32 throughput q=default: status=ok class=TFastCanvas
+  |   frames=11508 fps=2301.6 frame median=0.228 p95=0.347 p99=0.461 max=1.175 ms
+  |   begin=0.002 record=0.102 end=0.123 ms (medians)
+  |   interval median=0.407 p99=0.825 max=1.365 ms, in budget 100.0%, missed 0, cpu paint=0.110 frame=0.288 ms, render thread=0.412 ms
+[2026-10-09 10:20:28] [55/135] "bin\Win64\Release\FmxCanvasBench.exe" --canvas=fcdx12refl --scene=shadows3d --preset=medium --mode=throughput --size=1920x1080 --monitor=primary --quality=default --warmup=2 --duration=5 --tag=raytracing/r2 --out=results\raw\2026-10-09_raytracing\runs.csv
+  exit=0 duration=7.5 s (start delay 0.2 s: mutex wait + startup) status=ok fps=2178.04 frame=0.253 ms
+  | fcdx12refl/shadows3d n=32 throughput q=default: status=ok class=TFastCanvas
+  |   frames=10891 fps=2178.0 frame median=0.253 p95=0.382 p99=0.486 max=1.059 ms
+  |   begin=0.002 record=0.105 end=0.145 ms (medians)
+  |   interval median=0.429 p99=0.860 max=1.532 ms, in budget 100.0%, missed 0, cpu paint=0.114 frame=0.293 ms, render thread=0.440 ms
+[2026-10-09 10:20:36] [56/135] "bin\Win64\Release\FmxCanvasBench.exe" --canvas=fcdx12 --scene=shadows3d --preset=heavy --mode=throughput --size=1920x1080 --monitor=primary --quality=default --warmup=2 --duration=5 --tag=raytracing/r2 --out=results\raw\2026-10-09_raytracing\runs.csv
+  exit=0 duration=7.4 s (start delay 0.2 s: mutex wait + startup) status=ok fps=1010.37 frame=0.359 ms
+  | fcdx12/shadows3d n=120 throughput q=default: status=ok class=TFastCanvas
+  |   frames=5052 fps=1010.4 frame median=0.359 p95=0.492 p99=0.603 max=0.946 ms
+  |   begin=0.002 record=0.355 end=0.001 ms (medians)
+  |   interval median=0.960 p99=1.463 max=2.149 ms, in budget 100.0%, missed 0, cpu paint=0.359 frame=0.898 ms, render thread=0.302 ms
+[2026-10-09 10:20:43] [57/135] "bin\Win64\Release\FmxCanvasBench.exe" --canvas=fcdx12rt --scene=shadows3d --preset=heavy --mode=throughput --size=1920x1080 --monitor=primary --quality=default --warmup=2 --duration=5 --tag=raytracing/r2 --out=results\raw\2026-10-09_raytracing\runs.csv
+  exit=0 duration=7.5 s (start delay 0.2 s: mutex wait + startup) status=ok fps=1006.11 frame=0.367 ms
+  | fcdx12rt/shadows3d n=120 throughput q=default: status=ok class=TFastCanvas
+  |   frames=5031 fps=1006.1 frame median=0.367 p95=0.498 p99=0.619 max=0.800 ms
+  |   begin=0.002 record=0.364 end=0.001 ms (medians)
+  |   interval median=0.963 p99=1.482 max=2.493 ms, in budget 100.0%, missed 0, cpu paint=0.366 frame=0.901 ms, render thread=0.323 ms
+[2026-10-09 10:20:50] [58/135] "bin\Win64\Release\FmxCanvasBench.exe" --canvas=fcdx12ao --scene=shadows3d --preset=heavy --mode=throughput --size=1920x1080 --monitor=primary --quality=default --warmup=2 --duration=5 --tag=raytracing/r2 --out=results\raw\2026-10-09_raytracing\runs.csv
+  exit=0 duration=7.5 s (start delay 0.2 s: mutex wait + startup) status=ok fps=982.75 frame=0.398 ms
+  | fcdx12ao/shadows3d n=120 throughput q=default: status=ok class=TFastCanvas
+  |   frames=4914 fps=982.8 frame median=0.398 p95=0.527 p99=0.633 max=0.865 ms
+  |   begin=0.003 record=0.394 end=0.001 ms (medians)
+  |   interval median=0.986 p99=1.526 max=1.927 ms, in budget 100.0%, missed 0, cpu paint=0.374 frame=0.924 ms, render thread=0.319 ms
+[2026-10-09 10:20:58] [59/135] "bin\Win64\Release\FmxCanvasBench.exe" --canvas=fcdx12soft --scene=shadows3d --preset=heavy --mode=throughput --size=1920x1080 --monitor=primary --quality=default --warmup=2 --duration=5 --tag=raytracing/r2 --out=results\raw\2026-10-09_raytracing\runs.csv
+  exit=0 duration=7.5 s (start delay 0.2 s: mutex wait + startup) status=ok fps=992.58 frame=0.376 ms
+  | fcdx12soft/shadows3d n=120 throughput q=default: status=ok class=TFastCanvas
+  |   frames=4963 fps=992.6 frame median=0.376 p95=0.510 p99=0.626 max=1.157 ms
+  |   begin=0.003 record=0.373 end=0.001 ms (medians)
+  |   interval median=0.976 p99=1.505 max=2.128 ms, in budget 100.0%, missed 0, cpu paint=0.368 frame=0.916 ms, render thread=0.326 ms
+[2026-10-09 10:21:05] [60/135] "bin\Win64\Release\FmxCanvasBench.exe" --canvas=fcdx12refl --scene=shadows3d --preset=heavy --mode=throughput --size=1920x1080 --monitor=primary --quality=default --warmup=2 --duration=5 --tag=raytracing/r2 --out=results\raw\2026-10-09_raytracing\runs.csv
+  exit=0 duration=7.5 s (start delay 0.2 s: mutex wait + startup) status=ok fps=974.82 frame=0.389 ms
+  | fcdx12refl/shadows3d n=120 throughput q=default: status=ok class=TFastCanvas
+  |   frames=4875 fps=974.8 frame median=0.389 p95=0.553 p99=0.658 max=1.015 ms
+  |   begin=0.003 record=0.386 end=0.001 ms (medians)
+  |   interval median=0.992 p99=1.518 max=3.612 ms, in budget 100.0%, missed 0, cpu paint=0.379 frame=0.936 ms, render thread=0.329 ms
+[2026-10-09 10:21:13] [61/135] "bin\Win64\Release\FmxCanvasBench.exe" --canvas=fcdx12 --scene=mirror3d --preset=light --mode=throughput --size=1920x1080 --monitor=primary --quality=default --warmup=2 --duration=5 --tag=raytracing/r2 --out=results\raw\2026-10-09_raytracing\runs.csv
+  exit=0 duration=7.5 s (start delay 0.2 s: mutex wait + startup) status=ok fps=6074.11 frame=0.049 ms
+  | fcdx12/mirror3d n=8 throughput q=default: status=ok class=TFastCanvas
+  |   frames=30370 fps=6074.1 frame median=0.049 p95=0.128 p99=0.285 max=1.119 ms
+  |   begin=0.002 record=0.032 end=0.004 ms (medians)
+  |   interval median=0.140 p99=0.466 max=1.214 ms, in budget 100.0%, missed 0, cpu paint=0.039 frame=0.118 ms, render thread=0.119 ms
+[2026-10-09 10:21:20] [62/135] "bin\Win64\Release\FmxCanvasBench.exe" --canvas=fcdx12rt --scene=mirror3d --preset=light --mode=throughput --size=1920x1080 --monitor=primary --quality=default --warmup=2 --duration=5 --tag=raytracing/r2 --out=results\raw\2026-10-09_raytracing\runs.csv
+  exit=0 duration=7.4 s (start delay 0.2 s: mutex wait + startup) status=ok fps=4034.50 frame=0.146 ms
+  | fcdx12rt/mirror3d n=8 throughput q=default: status=ok class=TFastCanvas
+  |   frames=20173 fps=4034.5 frame median=0.146 p95=0.263 p99=0.408 max=1.238 ms
+  |   begin=0.002 record=0.035 end=0.108 ms (medians)
+  |   interval median=0.226 p99=0.636 max=1.327 ms, in budget 100.0%, missed 0, cpu paint=0.043 frame=0.121 ms, render thread=0.237 ms
+[2026-10-09 10:21:28] [63/135] "bin\Win64\Release\FmxCanvasBench.exe" --canvas=fcdx12ao --scene=mirror3d --preset=light --mode=throughput --size=1920x1080 --monitor=primary --quality=default --warmup=2 --duration=5 --tag=raytracing/r2 --out=results\raw\2026-10-09_raytracing\runs.csv
+  exit=0 duration=7.4 s (start delay 0.2 s: mutex wait + startup) status=ok fps=3075.55 frame=0.225 ms
+  | fcdx12ao/mirror3d n=8 throughput q=default: status=ok class=TFastCanvas
+  |   frames=15378 fps=3075.5 frame median=0.225 p95=0.349 p99=0.550 max=1.181 ms
+  |   begin=0.002 record=0.033 end=0.190 ms (medians)
+  |   interval median=0.301 p99=0.719 max=1.600 ms, in budget 100.0%, missed 0, cpu paint=0.041 frame=0.119 ms, render thread=0.322 ms
+[2026-10-09 10:21:35] [64/135] "bin\Win64\Release\FmxCanvasBench.exe" --canvas=fcdx12soft --scene=mirror3d --preset=light --mode=throughput --size=1920x1080 --monitor=primary --quality=default --warmup=2 --duration=5 --tag=raytracing/r2 --out=results\raw\2026-10-09_raytracing\runs.csv
+  exit=0 duration=7.4 s (start delay 0.2 s: mutex wait + startup) status=ok fps=2635.63 frame=0.280 ms
+  | fcdx12soft/mirror3d n=8 throughput q=default: status=ok class=TFastCanvas
+  |   frames=13179 fps=2635.6 frame median=0.280 p95=0.414 p99=0.573 max=1.321 ms
+  |   begin=0.002 record=0.033 end=0.245 ms (medians)
+  |   interval median=0.356 p99=0.734 max=1.408 ms, in budget 100.0%, missed 0, cpu paint=0.041 frame=0.119 ms, render thread=0.378 ms
+[2026-10-09 10:21:43] [65/135] "bin\Win64\Release\FmxCanvasBench.exe" --canvas=fcdx12refl --scene=mirror3d --preset=light --mode=throughput --size=1920x1080 --monitor=primary --quality=default --warmup=2 --duration=5 --tag=raytracing/r2 --out=results\raw\2026-10-09_raytracing\runs.csv
+  exit=0 duration=7.5 s (start delay 0.2 s: mutex wait + startup) status=ok fps=2526.21 frame=0.296 ms
+  | fcdx12refl/mirror3d n=8 throughput q=default: status=ok class=TFastCanvas
+  |   frames=12632 fps=2526.2 frame median=0.296 p95=0.430 p99=0.556 max=0.997 ms
+  |   begin=0.002 record=0.034 end=0.260 ms (medians)
+  |   interval median=0.374 p99=0.739 max=1.389 ms, in budget 100.0%, missed 0, cpu paint=0.042 frame=0.123 ms, render thread=0.394 ms
+[2026-10-09 10:21:50] [66/135] "bin\Win64\Release\FmxCanvasBench.exe" --canvas=fcdx12 --scene=mirror3d --preset=medium --mode=throughput --size=1920x1080 --monitor=primary --quality=default --warmup=2 --duration=5 --tag=raytracing/r2 --out=results\raw\2026-10-09_raytracing\runs.csv
+  exit=0 duration=7.4 s (start delay 0.2 s: mutex wait + startup) status=ok fps=3177.24 frame=0.104 ms
+  | fcdx12/mirror3d n=32 throughput q=default: status=ok class=TFastCanvas
+  |   frames=15887 fps=3177.2 frame median=0.104 p95=0.148 p99=0.197 max=0.533 ms
+  |   begin=0.002 record=0.098 end=0.003 ms (medians)
+  |   interval median=0.287 p99=0.586 max=1.069 ms, in budget 100.0%, missed 0, cpu paint=0.103 frame=0.277 ms, render thread=0.136 ms
+[2026-10-09 10:21:58] [67/135] "bin\Win64\Release\FmxCanvasBench.exe" --canvas=fcdx12rt --scene=mirror3d --preset=medium --mode=throughput --size=1920x1080 --monitor=primary --quality=default --warmup=2 --duration=5 --tag=raytracing/r2 --out=results\raw\2026-10-09_raytracing\runs.csv
+  exit=0 duration=7.4 s (start delay 0.2 s: mutex wait + startup) status=ok fps=3158.64 frame=0.105 ms
+  | fcdx12rt/mirror3d n=32 throughput q=default: status=ok class=TFastCanvas
+  |   frames=15794 fps=3158.6 frame median=0.105 p95=0.156 p99=0.217 max=0.851 ms
+  |   begin=0.002 record=0.100 end=0.003 ms (medians)
+  |   interval median=0.285 p99=0.592 max=1.239 ms, in budget 100.0%, missed 0, cpu paint=0.105 frame=0.278 ms, render thread=0.152 ms
+[2026-10-09 10:22:05] [68/135] "bin\Win64\Release\FmxCanvasBench.exe" --canvas=fcdx12ao --scene=mirror3d --preset=medium --mode=throughput --size=1920x1080 --monitor=primary --quality=default --warmup=2 --duration=5 --tag=raytracing/r2 --out=results\raw\2026-10-09_raytracing\runs.csv
+  exit=0 duration=7.5 s (start delay 0.2 s: mutex wait + startup) status=ok fps=2736.43 frame=0.156 ms
+  | fcdx12ao/mirror3d n=32 throughput q=default: status=ok class=TFastCanvas
+  |   frames=13683 fps=2736.4 frame median=0.156 p95=0.268 p99=0.387 max=1.050 ms
+  |   begin=0.002 record=0.101 end=0.006 ms (medians)
+  |   interval median=0.340 p99=0.734 max=1.222 ms, in budget 100.0%, missed 0, cpu paint=0.108 frame=0.281 ms, render thread=0.294 ms
+[2026-10-09 10:22:13] [69/135] "bin\Win64\Release\FmxCanvasBench.exe" --canvas=fcdx12soft --scene=mirror3d --preset=medium --mode=throughput --size=1920x1080 --monitor=primary --quality=default --warmup=2 --duration=5 --tag=raytracing/r2 --out=results\raw\2026-10-09_raytracing\runs.csv
+  exit=0 duration=7.5 s (start delay 0.2 s: mutex wait + startup) status=ok fps=2264.56 frame=0.237 ms
+  | fcdx12soft/mirror3d n=32 throughput q=default: status=ok class=TFastCanvas
+  |   frames=11323 fps=2264.6 frame median=0.237 p95=0.367 p99=0.486 max=1.206 ms
+  |   begin=0.002 record=0.103 end=0.131 ms (medians)
+  |   interval median=0.414 p99=0.864 max=3.433 ms, in budget 100.0%, missed 0, cpu paint=0.111 frame=0.289 ms, render thread=0.415 ms
+[2026-10-09 10:22:20] [70/135] "bin\Win64\Release\FmxCanvasBench.exe" --canvas=fcdx12refl --scene=mirror3d --preset=medium --mode=throughput --size=1920x1080 --monitor=primary --quality=default --warmup=2 --duration=5 --tag=raytracing/r2 --out=results\raw\2026-10-09_raytracing\runs.csv
+  exit=0 duration=7.5 s (start delay 0.2 s: mutex wait + startup) status=ok fps=2154.88 frame=0.254 ms
+  | fcdx12refl/mirror3d n=32 throughput q=default: status=ok class=TFastCanvas
+  |   frames=10775 fps=2154.9 frame median=0.254 p95=0.384 p99=0.505 max=1.201 ms
+  |   begin=0.002 record=0.107 end=0.143 ms (medians)
+  |   interval median=0.438 p99=0.886 max=1.543 ms, in budget 100.0%, missed 0, cpu paint=0.116 frame=0.302 ms, render thread=0.442 ms
+[2026-10-09 10:22:28] [71/135] "bin\Win64\Release\FmxCanvasBench.exe" --canvas=fcdx12 --scene=mirror3d --preset=heavy --mode=throughput --size=1920x1080 --monitor=primary --quality=default --warmup=2 --duration=5 --tag=raytracing/r2 --out=results\raw\2026-10-09_raytracing\runs.csv
+  exit=0 duration=7.4 s (start delay 0.2 s: mutex wait + startup) status=ok fps=1009.78 frame=0.363 ms
+  | fcdx12/mirror3d n=120 throughput q=default: status=ok class=TFastCanvas
+  |   frames=5049 fps=1009.8 frame median=0.363 p95=0.486 p99=0.607 max=0.959 ms
+  |   begin=0.003 record=0.360 end=0.001 ms (medians)
+  |   interval median=0.962 p99=1.454 max=1.929 ms, in budget 100.0%, missed 0, cpu paint=0.363 frame=0.903 ms, render thread=0.300 ms
+[2026-10-09 10:22:35] [72/135] "bin\Win64\Release\FmxCanvasBench.exe" --canvas=fcdx12rt --scene=mirror3d --preset=heavy --mode=throughput --size=1920x1080 --monitor=primary --quality=default --warmup=2 --duration=5 --tag=raytracing/r2 --out=results\raw\2026-10-09_raytracing\runs.csv
+  exit=0 duration=7.5 s (start delay 0.2 s: mutex wait + startup) status=ok fps=997.81 frame=0.374 ms
+  | fcdx12rt/mirror3d n=120 throughput q=default: status=ok class=TFastCanvas
+  |   frames=4990 fps=997.8 frame median=0.374 p95=0.507 p99=0.618 max=0.956 ms
+  |   begin=0.003 record=0.371 end=0.001 ms (medians)
+  |   interval median=0.972 p99=1.491 max=2.162 ms, in budget 100.0%, missed 0, cpu paint=0.370 frame=0.904 ms, render thread=0.319 ms
+[2026-10-09 10:22:42] [73/135] "bin\Win64\Release\FmxCanvasBench.exe" --canvas=fcdx12ao --scene=mirror3d --preset=heavy --mode=throughput --size=1920x1080 --monitor=primary --quality=default --warmup=2 --duration=5 --tag=raytracing/r2 --out=results\raw\2026-10-09_raytracing\runs.csv
+  exit=0 duration=7.5 s (start delay 0.2 s: mutex wait + startup) status=ok fps=990.44 frame=0.375 ms
+  | fcdx12ao/mirror3d n=120 throughput q=default: status=ok class=TFastCanvas
+  |   frames=4953 fps=990.4 frame median=0.375 p95=0.513 p99=0.651 max=1.053 ms
+  |   begin=0.003 record=0.372 end=0.001 ms (medians)
+  |   interval median=0.977 p99=1.522 max=2.253 ms, in budget 100.0%, missed 0, cpu paint=0.370 frame=0.919 ms, render thread=0.325 ms
+[2026-10-09 10:22:50] [74/135] "bin\Win64\Release\FmxCanvasBench.exe" --canvas=fcdx12soft --scene=mirror3d --preset=heavy --mode=throughput --size=1920x1080 --monitor=primary --quality=default --warmup=2 --duration=5 --tag=raytracing/r2 --out=results\raw\2026-10-09_raytracing\runs.csv
+  exit=0 duration=7.5 s (start delay 0.2 s: mutex wait + startup) status=ok fps=993.27 frame=0.375 ms
+  | fcdx12soft/mirror3d n=120 throughput q=default: status=ok class=TFastCanvas
+  |   frames=4967 fps=993.3 frame median=0.375 p95=0.514 p99=0.639 max=0.975 ms
+  |   begin=0.003 record=0.372 end=0.001 ms (medians)
+  |   interval median=0.977 p99=1.489 max=2.208 ms, in budget 100.0%, missed 0, cpu paint=0.375 frame=0.919 ms, render thread=0.331 ms
+[2026-10-09 10:22:57] [75/135] "bin\Win64\Release\FmxCanvasBench.exe" --canvas=fcdx12refl --scene=mirror3d --preset=heavy --mode=throughput --size=1920x1080 --monitor=primary --quality=default --warmup=2 --duration=5 --tag=raytracing/r2 --out=results\raw\2026-10-09_raytracing\runs.csv
+  exit=0 duration=7.5 s (start delay 0.2 s: mutex wait + startup) status=ok fps=988.10 frame=0.382 ms
+  | fcdx12refl/mirror3d n=120 throughput q=default: status=ok class=TFastCanvas
+  |   frames=4941 fps=988.1 frame median=0.382 p95=0.533 p99=0.663 max=0.844 ms
+  |   begin=0.002 record=0.378 end=0.001 ms (medians)
+  |   interval median=0.981 p99=1.497 max=2.688 ms, in budget 100.0%, missed 0, cpu paint=0.381 frame=0.919 ms, render thread=0.332 ms
+[2026-10-09 10:23:05] [76/135] "bin\Win64\Release\FmxCanvasBench.exe" --canvas=fcdx12 --scene=viewport3d --preset=light --mode=throughput --size=1920x1080 --monitor=primary --quality=default --warmup=2 --duration=5 --tag=raytracing/r2 --out=results\raw\2026-10-09_raytracing\runs.csv
+  exit=0 duration=7.4 s (start delay 0.2 s: mutex wait + startup) status=ok fps=4352.12 frame=0.070 ms
+  | fcdx12/viewport3d n=20 throughput q=default: status=ok class=TFastCanvas
+  |   frames=21761 fps=4352.1 frame median=0.070 p95=0.121 p99=0.229 max=0.585 ms
+  |   begin=0.002 record=0.063 end=0.003 ms (medians)
+  |   interval median=0.210 p99=0.497 max=1.207 ms, in budget 100.0%, missed 0, cpu paint=0.068 frame=0.197 ms, render thread=0.124 ms
+[2026-10-09 10:23:12] [77/135] "bin\Win64\Release\FmxCanvasBench.exe" --canvas=fcdx12rt --scene=viewport3d --preset=light --mode=throughput --size=1920x1080 --monitor=primary --quality=default --warmup=2 --duration=5 --tag=raytracing/r2 --out=results\raw\2026-10-09_raytracing\runs.csv
+  exit=0 duration=7.4 s (start delay 0.2 s: mutex wait + startup) status=ok fps=4246.50 frame=0.072 ms
+  | fcdx12rt/viewport3d n=20 throughput q=default: status=ok class=TFastCanvas
+  |   frames=21233 fps=4246.5 frame median=0.072 p95=0.133 p99=0.262 max=0.980 ms
+  |   begin=0.002 record=0.064 end=0.003 ms (medians)
+  |   interval median=0.207 p99=0.528 max=1.154 ms, in budget 100.0%, missed 0, cpu paint=0.070 frame=0.196 ms, render thread=0.142 ms
+[2026-10-09 10:23:20] [78/135] "bin\Win64\Release\FmxCanvasBench.exe" --canvas=fcdx12ao --scene=viewport3d --preset=light --mode=throughput --size=1920x1080 --monitor=primary --quality=default --warmup=2 --duration=5 --tag=raytracing/r2 --out=results\raw\2026-10-09_raytracing\runs.csv
+  exit=0 duration=7.4 s (start delay 0.2 s: mutex wait + startup) status=ok fps=3430.78 frame=0.133 ms
+  | fcdx12ao/viewport3d n=20 throughput q=default: status=ok class=TFastCanvas
+  |   frames=17154 fps=3430.8 frame median=0.133 p95=0.245 p99=0.409 max=1.317 ms
+  |   begin=0.002 record=0.066 end=0.054 ms (medians)
+  |   interval median=0.264 p99=0.687 max=1.462 ms, in budget 100.0%, missed 0, cpu paint=0.074 frame=0.202 ms, render thread=0.254 ms
+[2026-10-09 10:23:27] [79/135] "bin\Win64\Release\FmxCanvasBench.exe" --canvas=fcdx12soft --scene=viewport3d --preset=light --mode=throughput --size=1920x1080 --monitor=primary --quality=default --warmup=2 --duration=5 --tag=raytracing/r2 --out=results\raw\2026-10-09_raytracing\runs.csv
+  exit=0 duration=7.4 s (start delay 0.2 s: mutex wait + startup) status=ok fps=3117.87 frame=0.161 ms
+  | fcdx12soft/viewport3d n=20 throughput q=default: status=ok class=TFastCanvas
+  |   frames=15590 fps=3117.9 frame median=0.161 p95=0.283 p99=0.492 max=1.321 ms
+  |   begin=0.002 record=0.067 end=0.091 ms (medians)
+  |   interval median=0.295 p99=0.761 max=1.482 ms, in budget 100.0%, missed 0, cpu paint=0.076 frame=0.207 ms, render thread=0.293 ms
+[2026-10-09 10:23:35] [80/135] "bin\Win64\Release\FmxCanvasBench.exe" --canvas=fcdx12refl --scene=viewport3d --preset=light --mode=throughput --size=1920x1080 --monitor=primary --quality=default --warmup=2 --duration=5 --tag=raytracing/r2 --out=results\raw\2026-10-09_raytracing\runs.csv
+  exit=0 duration=7.4 s (start delay 0.2 s: mutex wait + startup) status=ok fps=3159.22 frame=0.159 ms
+  | fcdx12refl/viewport3d n=20 throughput q=default: status=ok class=TFastCanvas
+  |   frames=15797 fps=3159.2 frame median=0.159 p95=0.276 p99=0.482 max=1.305 ms
+  |   begin=0.002 record=0.068 end=0.088 ms (medians)
+  |   interval median=0.289 p99=0.732 max=1.481 ms, in budget 100.0%, missed 0, cpu paint=0.076 frame=0.205 ms, render thread=0.287 ms
+[2026-10-09 10:23:42] [81/135] "bin\Win64\Release\FmxCanvasBench.exe" --canvas=fcdx12 --scene=viewport3d --preset=medium --mode=throughput --size=1920x1080 --monitor=primary --quality=default --warmup=2 --duration=5 --tag=raytracing/r2 --out=results\raw\2026-10-09_raytracing\runs.csv
+  exit=0 duration=7.5 s (start delay 0.2 s: mutex wait + startup) status=ok fps=757.17 frame=0.491 ms
+  | fcdx12/viewport3d n=160 throughput q=default: status=ok class=TFastCanvas
+  |   frames=3786 fps=757.2 frame median=0.491 p95=0.693 p99=0.835 max=1.055 ms
+  |   begin=0.003 record=0.487 end=0.001 ms (medians)
+  |   interval median=1.278 p99=1.951 max=2.793 ms, in budget 100.0%, missed 0, cpu paint=0.491 frame=1.197 ms, render thread=0.412 ms
+[2026-10-09 10:23:50] [82/135] "bin\Win64\Release\FmxCanvasBench.exe" --canvas=fcdx12rt --scene=viewport3d --preset=medium --mode=throughput --size=1920x1080 --monitor=primary --quality=default --warmup=2 --duration=5 --tag=raytracing/r2 --out=results\raw\2026-10-09_raytracing\runs.csv
+  exit=0 duration=7.5 s (start delay 0.2 s: mutex wait + startup) status=ok fps=765.83 frame=0.493 ms
+  | fcdx12rt/viewport3d n=160 throughput q=default: status=ok class=TFastCanvas
+  |   frames=3830 fps=765.8 frame median=0.493 p95=0.681 p99=0.808 max=1.020 ms
+  |   begin=0.003 record=0.489 end=0.001 ms (medians)
+  |   interval median=1.268 p99=1.836 max=2.329 ms, in budget 100.0%, missed 0, cpu paint=0.492 frame=1.188 ms, render thread=0.418 ms
+[2026-10-09 10:23:57] [83/135] "bin\Win64\Release\FmxCanvasBench.exe" --canvas=fcdx12ao --scene=viewport3d --preset=medium --mode=throughput --size=1920x1080 --monitor=primary --quality=default --warmup=2 --duration=5 --tag=raytracing/r2 --out=results\raw\2026-10-09_raytracing\runs.csv
+  exit=0 duration=7.5 s (start delay 0.2 s: mutex wait + startup) status=ok fps=763.48 frame=0.492 ms
+  | fcdx12ao/viewport3d n=160 throughput q=default: status=ok class=TFastCanvas
+  |   frames=3818 fps=763.5 frame median=0.492 p95=0.680 p99=0.797 max=1.114 ms
+  |   begin=0.003 record=0.489 end=0.001 ms (medians)
+  |   interval median=1.272 p99=1.843 max=2.253 ms, in budget 100.0%, missed 0, cpu paint=0.492 frame=1.197 ms, render thread=0.430 ms
+[2026-10-09 10:24:05] [84/135] "bin\Win64\Release\FmxCanvasBench.exe" --canvas=fcdx12soft --scene=viewport3d --preset=medium --mode=throughput --size=1920x1080 --monitor=primary --quality=default --warmup=2 --duration=5 --tag=raytracing/r2 --out=results\raw\2026-10-09_raytracing\runs.csv
+  exit=0 duration=7.5 s (start delay 0.2 s: mutex wait + startup) status=ok fps=748.42 frame=0.504 ms
+  | fcdx12soft/viewport3d n=160 throughput q=default: status=ok class=TFastCanvas
+  |   frames=3743 fps=748.4 frame median=0.504 p95=0.712 p99=0.864 max=1.077 ms
+  |   begin=0.003 record=0.500 end=0.001 ms (medians)
+  |   interval median=1.298 p99=1.925 max=2.435 ms, in budget 100.0%, missed 0, cpu paint=0.501 frame=1.216 ms, render thread=0.427 ms
+[2026-10-09 10:24:12] [85/135] "bin\Win64\Release\FmxCanvasBench.exe" --canvas=fcdx12refl --scene=viewport3d --preset=medium --mode=throughput --size=1920x1080 --monitor=primary --quality=default --warmup=2 --duration=5 --tag=raytracing/r2 --out=results\raw\2026-10-09_raytracing\runs.csv
+  exit=0 duration=7.5 s (start delay 0.2 s: mutex wait + startup) status=ok fps=755.44 frame=0.508 ms
+  | fcdx12refl/viewport3d n=160 throughput q=default: status=ok class=TFastCanvas
+  |   frames=3778 fps=755.4 frame median=0.508 p95=0.706 p99=0.824 max=1.197 ms
+  |   begin=0.003 record=0.505 end=0.001 ms (medians)
+  |   interval median=1.287 p99=1.874 max=2.237 ms, in budget 100.0%, missed 0, cpu paint=0.507 frame=1.212 ms, render thread=0.433 ms
+[2026-10-09 10:24:20] [86/135] "bin\Win64\Release\FmxCanvasBench.exe" --canvas=fcdx12 --scene=viewport3d --preset=heavy --mode=throughput --size=1920x1080 --monitor=primary --quality=default --warmup=2 --duration=5 --tag=raytracing/r2 --out=results\raw\2026-10-09_raytracing\runs.csv
+  exit=0 duration=7.5 s (start delay 0.2 s: mutex wait + startup) status=ok fps=259.30 frame=1.581 ms
+  | fcdx12/viewport3d n=480 throughput q=default: status=ok class=TFastCanvas
+  |   frames=1297 fps=259.3 frame median=1.581 p95=2.013 p99=2.204 max=2.644 ms
+  |   begin=0.003 record=1.577 end=0.001 ms (medians)
+  |   interval median=3.831 p99=4.846 max=5.304 ms, in budget 100.0%, missed 0, cpu paint=1.479 frame=3.548 ms, render thread=1.038 ms
+[2026-10-09 10:24:27] [87/135] "bin\Win64\Release\FmxCanvasBench.exe" --canvas=fcdx12rt --scene=viewport3d --preset=heavy --mode=throughput --size=1920x1080 --monitor=primary --quality=default --warmup=2 --duration=5 --tag=raytracing/r2 --out=results\raw\2026-10-09_raytracing\runs.csv
+  exit=0 duration=7.6 s (start delay 0.2 s: mutex wait + startup) status=ok fps=257.83 frame=1.639 ms
+  | fcdx12rt/viewport3d n=480 throughput q=default: status=ok class=TFastCanvas
+  |   frames=1290 fps=257.8 frame median=1.639 p95=2.057 p99=2.251 max=2.971 ms
+  |   begin=0.003 record=1.634 end=0.001 ms (medians)
+  |   interval median=3.865 p99=4.742 max=5.517 ms, in budget 100.0%, missed 0, cpu paint=1.509 frame=3.560 ms, render thread=1.041 ms
+[2026-10-09 10:24:35] [88/135] "bin\Win64\Release\FmxCanvasBench.exe" --canvas=fcdx12ao --scene=viewport3d --preset=heavy --mode=throughput --size=1920x1080 --monitor=primary --quality=default --warmup=2 --duration=5 --tag=raytracing/r2 --out=results\raw\2026-10-09_raytracing\runs.csv
+  exit=0 duration=7.6 s (start delay 0.3 s: mutex wait + startup) status=ok fps=257.70 frame=1.607 ms
+  | fcdx12ao/viewport3d n=480 throughput q=default: status=ok class=TFastCanvas
+  |   frames=1289 fps=257.7 frame median=1.607 p95=2.082 p99=2.281 max=2.621 ms
+  |   begin=0.003 record=1.603 end=0.001 ms (medians)
+  |   interval median=3.816 p99=4.906 max=5.571 ms, in budget 100.0%, missed 0, cpu paint=1.517 frame=3.587 ms, render thread=1.066 ms
+[2026-10-09 10:24:42] [89/135] "bin\Win64\Release\FmxCanvasBench.exe" --canvas=fcdx12soft --scene=viewport3d --preset=heavy --mode=throughput --size=1920x1080 --monitor=primary --quality=default --warmup=2 --duration=5 --tag=raytracing/r2 --out=results\raw\2026-10-09_raytracing\runs.csv
+  exit=0 duration=7.5 s (start delay 0.2 s: mutex wait + startup) status=ok fps=258.48 frame=1.561 ms
+  | fcdx12soft/viewport3d n=480 throughput q=default: status=ok class=TFastCanvas
+  |   frames=1293 fps=258.5 frame median=1.561 p95=2.092 p99=2.285 max=2.535 ms
+  |   begin=0.003 record=1.558 end=0.001 ms (medians)
+  |   interval median=3.822 p99=4.874 max=5.203 ms, in budget 100.0%, missed 0, cpu paint=1.519 frame=3.578 ms, render thread=1.067 ms
+[2026-10-09 10:24:50] [90/135] "bin\Win64\Release\FmxCanvasBench.exe" --canvas=fcdx12refl --scene=viewport3d --preset=heavy --mode=throughput --size=1920x1080 --monitor=primary --quality=default --warmup=2 --duration=5 --tag=raytracing/r2 --out=results\raw\2026-10-09_raytracing\runs.csv
+  exit=0 duration=7.6 s (start delay 0.2 s: mutex wait + startup) status=ok fps=253.97 frame=1.691 ms
+  | fcdx12refl/viewport3d n=480 throughput q=default: status=ok class=TFastCanvas
+  |   frames=1270 fps=254.0 frame median=1.691 p95=2.144 p99=2.373 max=2.898 ms
+  |   begin=0.003 record=1.687 end=0.001 ms (medians)
+  |   interval median=3.917 p99=4.939 max=6.495 ms, in budget 100.0%, missed 1, cpu paint=1.565 frame=3.628 ms, render thread=1.062 ms
+[2026-10-09 10:24:57] [91/135] "bin\Win64\Release\FmxCanvasBench.exe" --canvas=fcdx12 --scene=shadows3d --preset=light --mode=throughput --size=1920x1080 --monitor=primary --quality=default --warmup=2 --duration=5 --tag=raytracing/r3 --out=results\raw\2026-10-09_raytracing\runs.csv
+  exit=0 duration=7.4 s (start delay 0.2 s: mutex wait + startup) status=ok fps=6012.97 frame=0.050 ms
+  | fcdx12/shadows3d n=8 throughput q=default: status=ok class=TFastCanvas
+  |   frames=30065 fps=6013.0 frame median=0.050 p95=0.134 p99=0.291 max=1.283 ms
+  |   begin=0.002 record=0.032 end=0.004 ms (medians)
+  |   interval median=0.142 p99=0.477 max=1.423 ms, in budget 100.0%, missed 0, cpu paint=0.039 frame=0.119 ms, render thread=0.121 ms
+[2026-10-09 10:25:05] [92/135] "bin\Win64\Release\FmxCanvasBench.exe" --canvas=fcdx12rt --scene=shadows3d --preset=light --mode=throughput --size=1920x1080 --monitor=primary --quality=default --warmup=2 --duration=5 --tag=raytracing/r3 --out=results\raw\2026-10-09_raytracing\runs.csv
+  exit=0 duration=7.5 s (start delay 0.2 s: mutex wait + startup) status=ok fps=4053.84 frame=0.140 ms
+  | fcdx12rt/shadows3d n=8 throughput q=default: status=ok class=TFastCanvas
+  |   frames=20270 fps=4053.8 frame median=0.140 p95=0.269 p99=0.431 max=1.477 ms
+  |   begin=0.002 record=0.033 end=0.104 ms (medians)
+  |   interval median=0.219 p99=0.646 max=1.584 ms, in budget 100.0%, missed 0, cpu paint=0.042 frame=0.122 ms, render thread=0.234 ms
+[2026-10-09 10:25:12] [93/135] "bin\Win64\Release\FmxCanvasBench.exe" --canvas=fcdx12ao --scene=shadows3d --preset=light --mode=throughput --size=1920x1080 --monitor=primary --quality=default --warmup=2 --duration=5 --tag=raytracing/r3 --out=results\raw\2026-10-09_raytracing\runs.csv
+  exit=0 duration=7.4 s (start delay 0.2 s: mutex wait + startup) status=ok fps=3111.39 frame=0.216 ms
+  | fcdx12ao/shadows3d n=8 throughput q=default: status=ok class=TFastCanvas
+  |   frames=15555 fps=3111.4 frame median=0.216 p95=0.344 p99=0.531 max=1.637 ms
+  |   begin=0.002 record=0.033 end=0.181 ms (medians)
+  |   interval median=0.295 p99=0.711 max=1.734 ms, in budget 100.0%, missed 0, cpu paint=0.042 frame=0.121 ms, render thread=0.318 ms
+[2026-10-09 10:25:20] [94/135] "bin\Win64\Release\FmxCanvasBench.exe" --canvas=fcdx12soft --scene=shadows3d --preset=light --mode=throughput --size=1920x1080 --monitor=primary --quality=default --warmup=2 --duration=5 --tag=raytracing/r3 --out=results\raw\2026-10-09_raytracing\runs.csv
+  exit=0 duration=7.5 s (start delay 0.2 s: mutex wait + startup) status=ok fps=2619.48 frame=0.273 ms
+  | fcdx12soft/shadows3d n=8 throughput q=default: status=ok class=TFastCanvas
+  |   frames=13098 fps=2619.5 frame median=0.273 p95=0.399 p99=0.607 max=1.536 ms
+  |   begin=0.003 record=0.036 end=0.234 ms (medians)
+  |   interval median=0.362 p99=0.771 max=1.626 ms, in budget 100.0%, missed 0, cpu paint=0.046 frame=0.139 ms, render thread=0.380 ms
+[2026-10-09 10:25:27] [95/135] "bin\Win64\Release\FmxCanvasBench.exe" --canvas=fcdx12refl --scene=shadows3d --preset=light --mode=throughput --size=1920x1080 --monitor=primary --quality=default --warmup=2 --duration=5 --tag=raytracing/r3 --out=results\raw\2026-10-09_raytracing\runs.csv
+  exit=0 duration=7.4 s (start delay 0.2 s: mutex wait + startup) status=ok fps=2523.26 frame=0.289 ms
+  | fcdx12refl/shadows3d n=8 throughput q=default: status=ok class=TFastCanvas
+  |   frames=12617 fps=2523.3 frame median=0.289 p95=0.418 p99=0.576 max=1.240 ms
+  |   begin=0.003 record=0.037 end=0.250 ms (medians)
+  |   interval median=0.378 p99=0.747 max=1.593 ms, in budget 100.0%, missed 0, cpu paint=0.047 frame=0.139 ms, render thread=0.395 ms
+[2026-10-09 10:25:35] [96/135] "bin\Win64\Release\FmxCanvasBench.exe" --canvas=fcdx12 --scene=shadows3d --preset=medium --mode=throughput --size=1920x1080 --monitor=primary --quality=default --warmup=2 --duration=5 --tag=raytracing/r3 --out=results\raw\2026-10-09_raytracing\runs.csv
+  exit=0 duration=7.5 s (start delay 0.2 s: mutex wait + startup) status=ok fps=3142.64 frame=0.106 ms
+  | fcdx12/shadows3d n=32 throughput q=default: status=ok class=TFastCanvas
+  |   frames=15714 fps=3142.6 frame median=0.106 p95=0.149 p99=0.200 max=0.531 ms
+  |   begin=0.002 record=0.099 end=0.003 ms (medians)
+  |   interval median=0.295 p99=0.584 max=1.203 ms, in budget 100.0%, missed 0, cpu paint=0.104 frame=0.282 ms, render thread=0.133 ms
+[2026-10-09 10:25:42] [97/135] "bin\Win64\Release\FmxCanvasBench.exe" --canvas=fcdx12rt --scene=shadows3d --preset=medium --mode=throughput --size=1920x1080 --monitor=primary --quality=default --warmup=2 --duration=5 --tag=raytracing/r3 --out=results\raw\2026-10-09_raytracing\runs.csv
+  exit=0 duration=7.4 s (start delay 0.2 s: mutex wait + startup) status=ok fps=3169.68 frame=0.104 ms
+  | fcdx12rt/shadows3d n=32 throughput q=default: status=ok class=TFastCanvas
+  |   frames=15849 fps=3169.7 frame median=0.104 p95=0.153 p99=0.231 max=0.544 ms
+  |   begin=0.002 record=0.099 end=0.003 ms (medians)
+  |   interval median=0.283 p99=0.601 max=1.606 ms, in budget 100.0%, missed 0, cpu paint=0.104 frame=0.276 ms, render thread=0.153 ms
+[2026-10-09 10:25:50] [98/135] "bin\Win64\Release\FmxCanvasBench.exe" --canvas=fcdx12ao --scene=shadows3d --preset=medium --mode=throughput --size=1920x1080 --monitor=primary --quality=default --warmup=2 --duration=5 --tag=raytracing/r3 --out=results\raw\2026-10-09_raytracing\runs.csv
+  exit=0 duration=7.4 s (start delay 0.2 s: mutex wait + startup) status=ok fps=2739.77 frame=0.151 ms
+  | fcdx12ao/shadows3d n=32 throughput q=default: status=ok class=TFastCanvas
+  |   frames=13699 fps=2739.8 frame median=0.151 p95=0.254 p99=0.373 max=0.980 ms
+  |   begin=0.002 record=0.103 end=0.004 ms (medians)
+  |   interval median=0.342 p99=0.722 max=1.254 ms, in budget 100.0%, missed 0, cpu paint=0.111 frame=0.293 ms, render thread=0.289 ms
+[2026-10-09 10:25:57] [99/135] "bin\Win64\Release\FmxCanvasBench.exe" --canvas=fcdx12soft --scene=shadows3d --preset=medium --mode=throughput --size=1920x1080 --monitor=primary --quality=default --warmup=2 --duration=5 --tag=raytracing/r3 --out=results\raw\2026-10-09_raytracing\runs.csv
+  exit=0 duration=7.4 s (start delay 0.2 s: mutex wait + startup) status=ok fps=2275.48 frame=0.233 ms
+  | fcdx12soft/shadows3d n=32 throughput q=default: status=ok class=TFastCanvas
+  |   frames=11378 fps=2275.5 frame median=0.233 p95=0.350 p99=0.467 max=0.840 ms
+  |   begin=0.003 record=0.104 end=0.123 ms (medians)
+  |   interval median=0.417 p99=0.815 max=1.670 ms, in budget 100.0%, missed 0, cpu paint=0.113 frame=0.294 ms, render thread=0.416 ms
+[2026-10-09 10:26:05] [100/135] "bin\Win64\Release\FmxCanvasBench.exe" --canvas=fcdx12refl --scene=shadows3d --preset=medium --mode=throughput --size=1920x1080 --monitor=primary --quality=default --warmup=2 --duration=5 --tag=raytracing/r3 --out=results\raw\2026-10-09_raytracing\runs.csv
+  exit=0 duration=7.4 s (start delay 0.2 s: mutex wait + startup) status=ok fps=2155.19 frame=0.262 ms
+  | fcdx12refl/shadows3d n=32 throughput q=default: status=ok class=TFastCanvas
+  |   frames=10776 fps=2155.2 frame median=0.262 p95=0.384 p99=0.494 max=1.348 ms
+  |   begin=0.002 record=0.105 end=0.153 ms (medians)
+  |   interval median=0.440 p99=0.858 max=1.597 ms, in budget 100.0%, missed 0, cpu paint=0.114 frame=0.295 ms, render thread=0.444 ms
+[2026-10-09 10:26:12] [101/135] "bin\Win64\Release\FmxCanvasBench.exe" --canvas=fcdx12 --scene=shadows3d --preset=heavy --mode=throughput --size=1920x1080 --monitor=primary --quality=default --warmup=2 --duration=5 --tag=raytracing/r3 --out=results\raw\2026-10-09_raytracing\runs.csv
+  exit=0 duration=7.4 s (start delay 0.2 s: mutex wait + startup) status=ok fps=989.52 frame=0.378 ms
+  | fcdx12/shadows3d n=120 throughput q=default: status=ok class=TFastCanvas
+  |   frames=4948 fps=989.5 frame median=0.378 p95=0.493 p99=0.605 max=0.916 ms
+  |   begin=0.003 record=0.375 end=0.001 ms (medians)
+  |   interval median=0.986 p99=1.525 max=2.092 ms, in budget 100.0%, missed 0, cpu paint=0.363 frame=0.922 ms, render thread=0.300 ms
+[2026-10-09 10:26:20] [102/135] "bin\Win64\Release\FmxCanvasBench.exe" --canvas=fcdx12rt --scene=shadows3d --preset=heavy --mode=throughput --size=1920x1080 --monitor=primary --quality=default --warmup=2 --duration=5 --tag=raytracing/r3 --out=results\raw\2026-10-09_raytracing\runs.csv
+  exit=0 duration=7.5 s (start delay 0.2 s: mutex wait + startup) status=ok fps=984.18 frame=0.379 ms
+  | fcdx12rt/shadows3d n=120 throughput q=default: status=ok class=TFastCanvas
+  |   frames=4921 fps=984.2 frame median=0.379 p95=0.509 p99=0.623 max=0.916 ms
+  |   begin=0.003 record=0.375 end=0.001 ms (medians)
+  |   interval median=0.983 p99=1.533 max=2.497 ms, in budget 100.0%, missed 0, cpu paint=0.370 frame=0.920 ms, render thread=0.319 ms
+[2026-10-09 10:26:27] [103/135] "bin\Win64\Release\FmxCanvasBench.exe" --canvas=fcdx12ao --scene=shadows3d --preset=heavy --mode=throughput --size=1920x1080 --monitor=primary --quality=default --warmup=2 --duration=5 --tag=raytracing/r3 --out=results\raw\2026-10-09_raytracing\runs.csv
+  exit=0 duration=7.5 s (start delay 0.2 s: mutex wait + startup) status=ok fps=990.95 frame=0.376 ms
+  | fcdx12ao/shadows3d n=120 throughput q=default: status=ok class=TFastCanvas
+  |   frames=4955 fps=991.0 frame median=0.376 p95=0.517 p99=0.651 max=0.948 ms
+  |   begin=0.003 record=0.373 end=0.001 ms (medians)
+  |   interval median=0.973 p99=1.519 max=2.197 ms, in budget 100.0%, missed 0, cpu paint=0.372 frame=0.920 ms, render thread=0.328 ms
+[2026-10-09 10:26:35] [104/135] "bin\Win64\Release\FmxCanvasBench.exe" --canvas=fcdx12soft --scene=shadows3d --preset=heavy --mode=throughput --size=1920x1080 --monitor=primary --quality=default --warmup=2 --duration=5 --tag=raytracing/r3 --out=results\raw\2026-10-09_raytracing\runs.csv
+  exit=0 duration=7.5 s (start delay 0.2 s: mutex wait + startup) status=ok fps=997.66 frame=0.372 ms
+  | fcdx12soft/shadows3d n=120 throughput q=default: status=ok class=TFastCanvas
+  |   frames=4989 fps=997.7 frame median=0.372 p95=0.511 p99=0.636 max=1.139 ms
+  |   begin=0.003 record=0.369 end=0.001 ms (medians)
+  |   interval median=0.970 p99=1.476 max=2.084 ms, in budget 100.0%, missed 0, cpu paint=0.368 frame=0.914 ms, render thread=0.326 ms
+[2026-10-09 10:26:42] [105/135] "bin\Win64\Release\FmxCanvasBench.exe" --canvas=fcdx12refl --scene=shadows3d --preset=heavy --mode=throughput --size=1920x1080 --monitor=primary --quality=default --warmup=2 --duration=5 --tag=raytracing/r3 --out=results\raw\2026-10-09_raytracing\runs.csv
+  exit=0 duration=7.5 s (start delay 0.2 s: mutex wait + startup) status=ok fps=998.62 frame=0.375 ms
+  | fcdx12refl/shadows3d n=120 throughput q=default: status=ok class=TFastCanvas
+  |   frames=4994 fps=998.6 frame median=0.375 p95=0.515 p99=0.676 max=0.923 ms
+  |   begin=0.003 record=0.371 end=0.001 ms (medians)
+  |   interval median=0.968 p99=1.502 max=2.034 ms, in budget 100.0%, missed 0, cpu paint=0.374 frame=0.914 ms, render thread=0.332 ms
+[2026-10-09 10:26:49] [106/135] "bin\Win64\Release\FmxCanvasBench.exe" --canvas=fcdx12 --scene=mirror3d --preset=light --mode=throughput --size=1920x1080 --monitor=primary --quality=default --warmup=2 --duration=5 --tag=raytracing/r3 --out=results\raw\2026-10-09_raytracing\runs.csv
+  exit=0 duration=7.5 s (start delay 0.2 s: mutex wait + startup) status=ok fps=6070.97 frame=0.050 ms
+  | fcdx12/mirror3d n=8 throughput q=default: status=ok class=TFastCanvas
+  |   frames=30355 fps=6071.0 frame median=0.050 p95=0.123 p99=0.280 max=1.231 ms
+  |   begin=0.002 record=0.033 end=0.004 ms (medians)
+  |   interval median=0.141 p99=0.457 max=1.538 ms, in budget 100.0%, missed 0, cpu paint=0.039 frame=0.120 ms, render thread=0.119 ms
+[2026-10-09 10:26:57] [107/135] "bin\Win64\Release\FmxCanvasBench.exe" --canvas=fcdx12rt --scene=mirror3d --preset=light --mode=throughput --size=1920x1080 --monitor=primary --quality=default --warmup=2 --duration=5 --tag=raytracing/r3 --out=results\raw\2026-10-09_raytracing\runs.csv
+  exit=0 duration=7.4 s (start delay 0.2 s: mutex wait + startup) status=ok fps=4079.27 frame=0.140 ms
+  | fcdx12rt/mirror3d n=8 throughput q=default: status=ok class=TFastCanvas
+  |   frames=20397 fps=4079.3 frame median=0.140 p95=0.271 p99=0.418 max=1.252 ms
+  |   begin=0.002 record=0.033 end=0.105 ms (medians)
+  |   interval median=0.216 p99=0.636 max=1.343 ms, in budget 100.0%, missed 0, cpu paint=0.042 frame=0.120 ms, render thread=0.233 ms
+[2026-10-09 10:27:04] [108/135] "bin\Win64\Release\FmxCanvasBench.exe" --canvas=fcdx12ao --scene=mirror3d --preset=light --mode=throughput --size=1920x1080 --monitor=primary --quality=default --warmup=2 --duration=5 --tag=raytracing/r3 --out=results\raw\2026-10-09_raytracing\runs.csv
+  exit=0 duration=7.4 s (start delay 0.2 s: mutex wait + startup) status=ok fps=3102.31 frame=0.216 ms
+  | fcdx12ao/mirror3d n=8 throughput q=default: status=ok class=TFastCanvas
+  |   frames=15512 fps=3102.3 frame median=0.216 p95=0.353 p99=0.531 max=1.325 ms
+  |   begin=0.002 record=0.033 end=0.181 ms (medians)
+  |   interval median=0.293 p99=0.701 max=1.412 ms, in budget 100.0%, missed 0, cpu paint=0.042 frame=0.121 ms, render thread=0.319 ms
+[2026-10-09 10:27:12] [109/135] "bin\Win64\Release\FmxCanvasBench.exe" --canvas=fcdx12soft --scene=mirror3d --preset=light --mode=throughput --size=1920x1080 --monitor=primary --quality=default --warmup=2 --duration=5 --tag=raytracing/r3 --out=results\raw\2026-10-09_raytracing\runs.csv
+  exit=0 duration=7.5 s (start delay 0.2 s: mutex wait + startup) status=ok fps=2623.86 frame=0.270 ms
+  | fcdx12soft/mirror3d n=8 throughput q=default: status=ok class=TFastCanvas
+  |   frames=13120 fps=2623.9 frame median=0.270 p95=0.408 p99=0.586 max=1.358 ms
+  |   begin=0.002 record=0.036 end=0.234 ms (medians)
+  |   interval median=0.355 p99=0.800 max=2.060 ms, in budget 100.0%, missed 0, cpu paint=0.045 frame=0.133 ms, render thread=0.378 ms
+[2026-10-09 10:27:19] [110/135] "bin\Win64\Release\FmxCanvasBench.exe" --canvas=fcdx12refl --scene=mirror3d --preset=light --mode=throughput --size=1920x1080 --monitor=primary --quality=default --warmup=2 --duration=5 --tag=raytracing/r3 --out=results\raw\2026-10-09_raytracing\runs.csv
+  exit=0 duration=7.4 s (start delay 0.2 s: mutex wait + startup) status=ok fps=2529.38 frame=0.287 ms
+  | fcdx12refl/mirror3d n=8 throughput q=default: status=ok class=TFastCanvas
+  |   frames=12647 fps=2529.4 frame median=0.287 p95=0.417 p99=0.562 max=1.538 ms
+  |   begin=0.002 record=0.036 end=0.250 ms (medians)
+  |   interval median=0.371 p99=0.732 max=1.632 ms, in budget 100.0%, missed 0, cpu paint=0.045 frame=0.131 ms, render thread=0.394 ms
+[2026-10-09 10:27:27] [111/135] "bin\Win64\Release\FmxCanvasBench.exe" --canvas=fcdx12 --scene=mirror3d --preset=medium --mode=throughput --size=1920x1080 --monitor=primary --quality=default --warmup=2 --duration=5 --tag=raytracing/r3 --out=results\raw\2026-10-09_raytracing\runs.csv
+  exit=0 duration=7.5 s (start delay 0.2 s: mutex wait + startup) status=ok fps=3123.27 frame=0.106 ms
+  | fcdx12/mirror3d n=32 throughput q=default: status=ok class=TFastCanvas
+  |   frames=15617 fps=3123.3 frame median=0.106 p95=0.150 p99=0.199 max=0.607 ms
+  |   begin=0.002 record=0.100 end=0.003 ms (medians)
+  |   interval median=0.295 p99=0.593 max=1.522 ms, in budget 100.0%, missed 0, cpu paint=0.105 frame=0.285 ms, render thread=0.138 ms
+[2026-10-09 10:27:34] [112/135] "bin\Win64\Release\FmxCanvasBench.exe" --canvas=fcdx12rt --scene=mirror3d --preset=medium --mode=throughput --size=1920x1080 --monitor=primary --quality=default --warmup=2 --duration=5 --tag=raytracing/r3 --out=results\raw\2026-10-09_raytracing\runs.csv
+  exit=0 duration=7.5 s (start delay 0.2 s: mutex wait + startup) status=ok fps=3099.27 frame=0.107 ms
+  | fcdx12rt/mirror3d n=32 throughput q=default: status=ok class=TFastCanvas
+  |   frames=15497 fps=3099.3 frame median=0.107 p95=0.159 p99=0.235 max=0.646 ms
+  |   begin=0.002 record=0.101 end=0.003 ms (medians)
+  |   interval median=0.294 p99=0.603 max=1.149 ms, in budget 100.0%, missed 0, cpu paint=0.106 frame=0.284 ms, render thread=0.157 ms
+[2026-10-09 10:27:42] [113/135] "bin\Win64\Release\FmxCanvasBench.exe" --canvas=fcdx12ao --scene=mirror3d --preset=medium --mode=throughput --size=1920x1080 --monitor=primary --quality=default --warmup=2 --duration=5 --tag=raytracing/r3 --out=results\raw\2026-10-09_raytracing\runs.csv
+  exit=0 duration=7.5 s (start delay 0.2 s: mutex wait + startup) status=ok fps=2746.15 frame=0.149 ms
+  | fcdx12ao/mirror3d n=32 throughput q=default: status=ok class=TFastCanvas
+  |   frames=13731 fps=2746.1 frame median=0.149 p95=0.256 p99=0.389 max=1.063 ms
+  |   begin=0.002 record=0.103 end=0.004 ms (medians)
+  |   interval median=0.337 p99=0.757 max=1.291 ms, in budget 100.0%, missed 0, cpu paint=0.110 frame=0.286 ms, render thread=0.286 ms
+[2026-10-09 10:27:49] [114/135] "bin\Win64\Release\FmxCanvasBench.exe" --canvas=fcdx12soft --scene=mirror3d --preset=medium --mode=throughput --size=1920x1080 --monitor=primary --quality=default --warmup=2 --duration=5 --tag=raytracing/r3 --out=results\raw\2026-10-09_raytracing\runs.csv
+  exit=0 duration=7.5 s (start delay 0.2 s: mutex wait + startup) status=ok fps=2275.80 frame=0.234 ms
+  | fcdx12soft/mirror3d n=32 throughput q=default: status=ok class=TFastCanvas
+  |   frames=11379 fps=2275.8 frame median=0.234 p95=0.348 p99=0.464 max=1.177 ms
+  |   begin=0.002 record=0.104 end=0.126 ms (medians)
+  |   interval median=0.417 p99=0.814 max=1.367 ms, in budget 100.0%, missed 0, cpu paint=0.113 frame=0.294 ms, render thread=0.414 ms
+[2026-10-09 10:27:57] [115/135] "bin\Win64\Release\FmxCanvasBench.exe" --canvas=fcdx12refl --scene=mirror3d --preset=medium --mode=throughput --size=1920x1080 --monitor=primary --quality=default --warmup=2 --duration=5 --tag=raytracing/r3 --out=results\raw\2026-10-09_raytracing\runs.csv
+  exit=0 duration=7.5 s (start delay 0.2 s: mutex wait + startup) status=ok fps=2155.18 frame=0.262 ms
+  | fcdx12refl/mirror3d n=32 throughput q=default: status=ok class=TFastCanvas
+  |   frames=10776 fps=2155.2 frame median=0.262 p95=0.376 p99=0.497 max=1.102 ms
+  |   begin=0.003 record=0.108 end=0.149 ms (medians)
+  |   interval median=0.441 p99=0.847 max=1.328 ms, in budget 100.0%, missed 0, cpu paint=0.118 frame=0.297 ms, render thread=0.446 ms
+[2026-10-09 10:28:04] [116/135] "bin\Win64\Release\FmxCanvasBench.exe" --canvas=fcdx12 --scene=mirror3d --preset=heavy --mode=throughput --size=1920x1080 --monitor=primary --quality=default --warmup=2 --duration=5 --tag=raytracing/r3 --out=results\raw\2026-10-09_raytracing\runs.csv
+  exit=0 duration=7.5 s (start delay 0.2 s: mutex wait + startup) status=ok fps=997.22 frame=0.367 ms
+  | fcdx12/mirror3d n=120 throughput q=default: status=ok class=TFastCanvas
+  |   frames=4987 fps=997.2 frame median=0.367 p95=0.490 p99=0.627 max=0.857 ms
+  |   begin=0.003 record=0.364 end=0.001 ms (medians)
+  |   interval median=0.973 p99=1.481 max=2.895 ms, in budget 100.0%, missed 0, cpu paint=0.361 frame=0.907 ms, render thread=0.303 ms
+[2026-10-09 10:28:12] [117/135] "bin\Win64\Release\FmxCanvasBench.exe" --canvas=fcdx12rt --scene=mirror3d --preset=heavy --mode=throughput --size=1920x1080 --monitor=primary --quality=default --warmup=2 --duration=5 --tag=raytracing/r3 --out=results\raw\2026-10-09_raytracing\runs.csv
+  exit=0 duration=7.5 s (start delay 0.2 s: mutex wait + startup) status=ok fps=989.36 frame=0.383 ms
+  | fcdx12rt/mirror3d n=120 throughput q=default: status=ok class=TFastCanvas
+  |   frames=4947 fps=989.4 frame median=0.383 p95=0.503 p99=0.590 max=0.822 ms
+  |   begin=0.003 record=0.379 end=0.001 ms (medians)
+  |   interval median=0.980 p99=1.485 max=2.058 ms, in budget 100.0%, missed 0, cpu paint=0.370 frame=0.917 ms, render thread=0.320 ms
+[2026-10-09 10:28:19] [118/135] "bin\Win64\Release\FmxCanvasBench.exe" --canvas=fcdx12ao --scene=mirror3d --preset=heavy --mode=throughput --size=1920x1080 --monitor=primary --quality=default --warmup=2 --duration=5 --tag=raytracing/r3 --out=results\raw\2026-10-09_raytracing\runs.csv
+  exit=0 duration=7.5 s (start delay 0.2 s: mutex wait + startup) status=ok fps=996.62 frame=0.371 ms
+  | fcdx12ao/mirror3d n=120 throughput q=default: status=ok class=TFastCanvas
+  |   frames=4983 fps=996.6 frame median=0.371 p95=0.497 p99=0.623 max=0.980 ms
+  |   begin=0.003 record=0.368 end=0.001 ms (medians)
+  |   interval median=0.974 p99=1.524 max=2.153 ms, in budget 100.0%, missed 0, cpu paint=0.370 frame=0.920 ms, render thread=0.331 ms
+[2026-10-09 10:28:27] [119/135] "bin\Win64\Release\FmxCanvasBench.exe" --canvas=fcdx12soft --scene=mirror3d --preset=heavy --mode=throughput --size=1920x1080 --monitor=primary --quality=default --warmup=2 --duration=5 --tag=raytracing/r3 --out=results\raw\2026-10-09_raytracing\runs.csv
+  exit=0 duration=7.5 s (start delay 0.2 s: mutex wait + startup) status=ok fps=1002.92 frame=0.372 ms
+  | fcdx12soft/mirror3d n=120 throughput q=default: status=ok class=TFastCanvas
+  |   frames=5015 fps=1002.9 frame median=0.372 p95=0.506 p99=0.639 max=1.103 ms
+  |   begin=0.003 record=0.369 end=0.001 ms (medians)
+  |   interval median=0.963 p99=1.482 max=2.215 ms, in budget 100.0%, missed 0, cpu paint=0.370 frame=0.912 ms, render thread=0.329 ms
+[2026-10-09 10:28:34] [120/135] "bin\Win64\Release\FmxCanvasBench.exe" --canvas=fcdx12refl --scene=mirror3d --preset=heavy --mode=throughput --size=1920x1080 --monitor=primary --quality=default --warmup=2 --duration=5 --tag=raytracing/r3 --out=results\raw\2026-10-09_raytracing\runs.csv
+  exit=0 duration=7.5 s (start delay 0.2 s: mutex wait + startup) status=ok fps=993.71 frame=0.379 ms
+  | fcdx12refl/mirror3d n=120 throughput q=default: status=ok class=TFastCanvas
+  |   frames=4969 fps=993.7 frame median=0.379 p95=0.516 p99=0.656 max=0.893 ms
+  |   begin=0.003 record=0.376 end=0.001 ms (medians)
+  |   interval median=0.972 p99=1.487 max=2.311 ms, in budget 100.0%, missed 0, cpu paint=0.377 frame=0.918 ms, render thread=0.334 ms
+[2026-10-09 10:28:42] [121/135] "bin\Win64\Release\FmxCanvasBench.exe" --canvas=fcdx12 --scene=viewport3d --preset=light --mode=throughput --size=1920x1080 --monitor=primary --quality=default --warmup=2 --duration=5 --tag=raytracing/r3 --out=results\raw\2026-10-09_raytracing\runs.csv
+  exit=0 duration=7.4 s (start delay 0.2 s: mutex wait + startup) status=ok fps=4391.45 frame=0.068 ms
+  | fcdx12/viewport3d n=20 throughput q=default: status=ok class=TFastCanvas
+  |   frames=21958 fps=4391.5 frame median=0.068 p95=0.119 p99=0.233 max=0.666 ms
+  |   begin=0.002 record=0.062 end=0.003 ms (medians)
+  |   interval median=0.201 p99=0.502 max=1.199 ms, in budget 100.0%, missed 0, cpu paint=0.068 frame=0.195 ms, render thread=0.127 ms
+[2026-10-09 10:28:49] [122/135] "bin\Win64\Release\FmxCanvasBench.exe" --canvas=fcdx12rt --scene=viewport3d --preset=light --mode=throughput --size=1920x1080 --monitor=primary --quality=default --warmup=2 --duration=5 --tag=raytracing/r3 --out=results\raw\2026-10-09_raytracing\runs.csv
+  exit=0 duration=7.4 s (start delay 0.2 s: mutex wait + startup) status=ok fps=4289.03 frame=0.071 ms
+  | fcdx12rt/viewport3d n=20 throughput q=default: status=ok class=TFastCanvas
+  |   frames=21446 fps=4289.0 frame median=0.071 p95=0.134 p99=0.261 max=0.760 ms
+  |   begin=0.002 record=0.063 end=0.003 ms (medians)
+  |   interval median=0.199 p99=0.531 max=1.359 ms, in budget 100.0%, missed 0, cpu paint=0.069 frame=0.194 ms, render thread=0.145 ms
+[2026-10-09 10:28:57] [123/135] "bin\Win64\Release\FmxCanvasBench.exe" --canvas=fcdx12ao --scene=viewport3d --preset=light --mode=throughput --size=1920x1080 --monitor=primary --quality=default --warmup=2 --duration=5 --tag=raytracing/r3 --out=results\raw\2026-10-09_raytracing\runs.csv
+  exit=0 duration=7.4 s (start delay 0.2 s: mutex wait + startup) status=ok fps=3420.35 frame=0.138 ms
+  | fcdx12ao/viewport3d n=20 throughput q=default: status=ok class=TFastCanvas
+  |   frames=17102 fps=3420.3 frame median=0.138 p95=0.247 p99=0.402 max=1.188 ms
+  |   begin=0.002 record=0.065 end=0.066 ms (medians)
+  |   interval median=0.267 p99=0.678 max=1.361 ms, in budget 100.0%, missed 0, cpu paint=0.073 frame=0.198 ms, render thread=0.252 ms
+[2026-10-09 10:29:04] [124/135] "bin\Win64\Release\FmxCanvasBench.exe" --canvas=fcdx12soft --scene=viewport3d --preset=light --mode=throughput --size=1920x1080 --monitor=primary --quality=default --warmup=2 --duration=5 --tag=raytracing/r3 --out=results\raw\2026-10-09_raytracing\runs.csv
+  exit=0 duration=7.5 s (start delay 0.2 s: mutex wait + startup) status=ok fps=3125.20 frame=0.164 ms
+  | fcdx12soft/viewport3d n=20 throughput q=default: status=ok class=TFastCanvas
+  |   frames=15626 fps=3125.2 frame median=0.164 p95=0.284 p99=0.447 max=1.190 ms
+  |   begin=0.002 record=0.067 end=0.095 ms (medians)
+  |   interval median=0.295 p99=0.702 max=1.407 ms, in budget 100.0%, missed 0, cpu paint=0.075 frame=0.205 ms, render thread=0.292 ms
+[2026-10-09 10:29:11] [125/135] "bin\Win64\Release\FmxCanvasBench.exe" --canvas=fcdx12refl --scene=viewport3d --preset=light --mode=throughput --size=1920x1080 --monitor=primary --quality=default --warmup=2 --duration=5 --tag=raytracing/r3 --out=results\raw\2026-10-09_raytracing\runs.csv
+  exit=0 duration=7.5 s (start delay 0.2 s: mutex wait + startup) status=ok fps=3157.11 frame=0.162 ms
+  | fcdx12refl/viewport3d n=20 throughput q=default: status=ok class=TFastCanvas
+  |   frames=15786 fps=3157.1 frame median=0.162 p95=0.266 p99=0.443 max=1.435 ms
+  |   begin=0.002 record=0.068 end=0.091 ms (medians)
+  |   interval median=0.293 p99=0.692 max=1.576 ms, in budget 100.0%, missed 0, cpu paint=0.076 frame=0.205 ms, render thread=0.287 ms
+[2026-10-09 10:29:19] [126/135] "bin\Win64\Release\FmxCanvasBench.exe" --canvas=fcdx12 --scene=viewport3d --preset=medium --mode=throughput --size=1920x1080 --monitor=primary --quality=default --warmup=2 --duration=5 --tag=raytracing/r3 --out=results\raw\2026-10-09_raytracing\runs.csv
+  exit=0 duration=7.4 s (start delay 0.2 s: mutex wait + startup) status=ok fps=765.84 frame=0.486 ms
+  | fcdx12/viewport3d n=160 throughput q=default: status=ok class=TFastCanvas
+  |   frames=3830 fps=765.8 frame median=0.486 p95=0.668 p99=0.801 max=1.320 ms
+  |   begin=0.003 record=0.482 end=0.001 ms (medians)
+  |   interval median=1.271 p99=1.918 max=3.195 ms, in budget 100.0%, missed 0, cpu paint=0.485 frame=1.186 ms, render thread=0.406 ms
+[2026-10-09 10:29:26] [127/135] "bin\Win64\Release\FmxCanvasBench.exe" --canvas=fcdx12rt --scene=viewport3d --preset=medium --mode=throughput --size=1920x1080 --monitor=primary --quality=default --warmup=2 --duration=5 --tag=raytracing/r3 --out=results\raw\2026-10-09_raytracing\runs.csv
+  exit=0 duration=7.5 s (start delay 0.2 s: mutex wait + startup) status=ok fps=764.40 frame=0.495 ms
+  | fcdx12rt/viewport3d n=160 throughput q=default: status=ok class=TFastCanvas
+  |   frames=3823 fps=764.4 frame median=0.495 p95=0.687 p99=0.804 max=1.052 ms
+  |   begin=0.003 record=0.492 end=0.001 ms (medians)
+  |   interval median=1.272 p99=1.849 max=2.573 ms, in budget 100.0%, missed 0, cpu paint=0.495 frame=1.197 ms, render thread=0.421 ms
+[2026-10-09 10:29:34] [128/135] "bin\Win64\Release\FmxCanvasBench.exe" --canvas=fcdx12ao --scene=viewport3d --preset=medium --mode=throughput --size=1920x1080 --monitor=primary --quality=default --warmup=2 --duration=5 --tag=raytracing/r3 --out=results\raw\2026-10-09_raytracing\runs.csv
+  exit=0 duration=7.5 s (start delay 0.2 s: mutex wait + startup) status=ok fps=752.17 frame=0.498 ms
+  | fcdx12ao/viewport3d n=160 throughput q=default: status=ok class=TFastCanvas
+  |   frames=3761 fps=752.2 frame median=0.498 p95=0.690 p99=0.838 max=1.134 ms
+  |   begin=0.003 record=0.494 end=0.001 ms (medians)
+  |   interval median=1.295 p99=1.836 max=2.341 ms, in budget 100.0%, missed 0, cpu paint=0.496 frame=1.211 ms, render thread=0.424 ms
+[2026-10-09 10:29:41] [129/135] "bin\Win64\Release\FmxCanvasBench.exe" --canvas=fcdx12soft --scene=viewport3d --preset=medium --mode=throughput --size=1920x1080 --monitor=primary --quality=default --warmup=2 --duration=5 --tag=raytracing/r3 --out=results\raw\2026-10-09_raytracing\runs.csv
+  exit=0 duration=7.5 s (start delay 0.2 s: mutex wait + startup) status=ok fps=759.61 frame=0.500 ms
+  | fcdx12soft/viewport3d n=160 throughput q=default: status=ok class=TFastCanvas
+  |   frames=3798 fps=759.6 frame median=0.500 p95=0.694 p99=0.846 max=1.183 ms
+  |   begin=0.003 record=0.496 end=0.001 ms (medians)
+  |   interval median=1.280 p99=1.883 max=2.384 ms, in budget 100.0%, missed 0, cpu paint=0.499 frame=1.202 ms, render thread=0.425 ms
+[2026-10-09 10:29:49] [130/135] "bin\Win64\Release\FmxCanvasBench.exe" --canvas=fcdx12refl --scene=viewport3d --preset=medium --mode=throughput --size=1920x1080 --monitor=primary --quality=default --warmup=2 --duration=5 --tag=raytracing/r3 --out=results\raw\2026-10-09_raytracing\runs.csv
+  exit=0 duration=7.5 s (start delay 0.2 s: mutex wait + startup) status=ok fps=746.38 frame=0.522 ms
+  | fcdx12refl/viewport3d n=160 throughput q=default: status=ok class=TFastCanvas
+  |   frames=3732 fps=746.4 frame median=0.522 p95=0.706 p99=0.833 max=1.075 ms
+  |   begin=0.003 record=0.518 end=0.001 ms (medians)
+  |   interval median=1.302 p99=1.932 max=2.625 ms, in budget 100.0%, missed 0, cpu paint=0.518 frame=1.225 ms, render thread=0.433 ms
+[2026-10-09 10:29:56] [131/135] "bin\Win64\Release\FmxCanvasBench.exe" --canvas=fcdx12 --scene=viewport3d --preset=heavy --mode=throughput --size=1920x1080 --monitor=primary --quality=default --warmup=2 --duration=5 --tag=raytracing/r3 --out=results\raw\2026-10-09_raytracing\runs.csv
+  exit=0 duration=7.5 s (start delay 0.2 s: mutex wait + startup) status=ok fps=258.52 frame=1.591 ms
+  | fcdx12/viewport3d n=480 throughput q=default: status=ok class=TFastCanvas
+  |   frames=1293 fps=258.5 frame median=1.591 p95=2.057 p99=2.286 max=2.784 ms
+  |   begin=0.003 record=1.587 end=0.001 ms (medians)
+  |   interval median=3.842 p99=4.982 max=5.853 ms, in budget 100.0%, missed 0, cpu paint=1.480 frame=3.529 ms, render thread=1.012 ms
+[2026-10-09 10:30:04] [132/135] "bin\Win64\Release\FmxCanvasBench.exe" --canvas=fcdx12rt --scene=viewport3d --preset=heavy --mode=throughput --size=1920x1080 --monitor=primary --quality=default --warmup=2 --duration=5 --tag=raytracing/r3 --out=results\raw\2026-10-09_raytracing\runs.csv
+  exit=0 duration=7.6 s (start delay 0.2 s: mutex wait + startup) status=ok fps=258.83 frame=1.583 ms
+  | fcdx12rt/viewport3d n=480 throughput q=default: status=ok class=TFastCanvas
+  |   frames=1295 fps=258.8 frame median=1.583 p95=2.069 p99=2.278 max=2.782 ms
+  |   begin=0.003 record=1.579 end=0.001 ms (medians)
+  |   interval median=3.812 p99=4.841 max=5.363 ms, in budget 100.0%, missed 0, cpu paint=1.513 frame=3.557 ms, render thread=1.061 ms
+[2026-10-09 10:30:11] [133/135] "bin\Win64\Release\FmxCanvasBench.exe" --canvas=fcdx12ao --scene=viewport3d --preset=heavy --mode=throughput --size=1920x1080 --monitor=primary --quality=default --warmup=2 --duration=5 --tag=raytracing/r3 --out=results\raw\2026-10-09_raytracing\runs.csv
+  exit=0 duration=7.6 s (start delay 0.2 s: mutex wait + startup) status=ok fps=256.05 frame=1.650 ms
+  | fcdx12ao/viewport3d n=480 throughput q=default: status=ok class=TFastCanvas
+  |   frames=1281 fps=256.0 frame median=1.650 p95=2.108 p99=2.475 max=3.091 ms
+  |   begin=0.003 record=1.646 end=0.001 ms (medians)
+  |   interval median=3.864 p99=5.188 max=6.025 ms, in budget 100.0%, missed 0, cpu paint=1.548 frame=3.599 ms, render thread=1.042 ms
+[2026-10-09 10:30:19] [134/135] "bin\Win64\Release\FmxCanvasBench.exe" --canvas=fcdx12soft --scene=viewport3d --preset=heavy --mode=throughput --size=1920x1080 --monitor=primary --quality=default --warmup=2 --duration=5 --tag=raytracing/r3 --out=results\raw\2026-10-09_raytracing\runs.csv
+  exit=0 duration=7.6 s (start delay 0.3 s: mutex wait + startup) status=ok fps=258.61 frame=1.635 ms
+  | fcdx12soft/viewport3d n=480 throughput q=default: status=ok class=TFastCanvas
+  |   frames=1293 fps=258.6 frame median=1.635 p95=2.066 p99=2.273 max=2.985 ms
+  |   begin=0.003 record=1.632 end=0.001 ms (medians)
+  |   interval median=3.850 p99=4.870 max=5.889 ms, in budget 100.0%, missed 0, cpu paint=1.512 frame=3.554 ms, render thread=1.043 ms
+[2026-10-09 10:30:27] [135/135] "bin\Win64\Release\FmxCanvasBench.exe" --canvas=fcdx12refl --scene=viewport3d --preset=heavy --mode=throughput --size=1920x1080 --monitor=primary --quality=default --warmup=2 --duration=5 --tag=raytracing/r3 --out=results\raw\2026-10-09_raytracing\runs.csv
+  exit=0 duration=7.6 s (start delay 0.2 s: mutex wait + startup) status=ok fps=260.62 frame=1.557 ms
+  | fcdx12refl/viewport3d n=480 throughput q=default: status=ok class=TFastCanvas
+  |   frames=1304 fps=260.6 frame median=1.557 p95=2.062 p99=2.242 max=2.398 ms
+  |   begin=0.003 record=1.552 end=0.001 ms (medians)
+  |   interval median=3.785 p99=4.730 max=5.149 ms, in budget 100.0%, missed 0, cpu paint=1.525 frame=3.553 ms, render thread=1.074 ms
+=== done: 135 of 135 runs in 00:16:51, 0 failed

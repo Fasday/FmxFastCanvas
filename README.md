@@ -39,6 +39,8 @@ Vulkan canvases in that scene.
 | `TViewport3D`, 160 lit objects | 8.53 | 7.64 (`skiavk`) | 0.562 | 0.519 |
 
 All 26 scenes, two sizes, the method and the cost of the ray-traced effects: [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
+The benchmark program, its scripts, the summaries and every run (environment, command line, statistics) are in the
+repository (`src/Bench`, `tools`, `results`): the numbers can be checked and measured again on another machine.
 
 ## Requirements
 
@@ -130,7 +132,10 @@ Global variables, set before `Application.Initialize`; all of them in [docs/USAG
 | `third_party/delphidx12` | Direct3D 12 / DXGI headers (DelphiDX12, Apache 2.0) |
 | `example` | `HelloFastCanvas` and `HelloForm3D`, the smallest checks (RAD Studio projects) |
 | `docs` | [USAGE.md](docs/USAGE.md) (settings, ray tracing, HDR, threads), [ARCHITECTURE.md](docs/ARCHITECTURE.md) (how it works), [BENCHMARKS.md](docs/BENCHMARKS.md) |
-| `tools` | `compile-shaders.ps1`: the HLSL into the Pascal includes (only after changing the shaders) |
+| `src/Bench`, `src/Common` | The benchmark `FmxCanvasBench` (scenes, canvases, measurement) and its helpers |
+| `results` | Benchmark summaries (`.md`, `.csv`) and, in `raw`, every run of them |
+| `tools` | `run-bench.ps1`, `summarize-bench.ps1` and helpers: running and summarizing the benchmark; `compile-shaders.ps1`: the HLSL into the Pascal includes (only after changing the shaders) |
+| `build.ps1`, `res` | Command-line build of the benchmark (dcc64) |
 
 ## Limitations
 

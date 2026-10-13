@@ -1,6 +1,7 @@
-# Delphi build output
+# Delphi build output (the IDE; build.ps1: bin\ and dcu\)
 *.dcu
 *.exe
+*.dll
 *.map
 *.res
 *.rsm
@@ -14,6 +15,13 @@
 __history/
 __recovery/
 bin/
+bin-dev/
 dcu/
 Win32/
 Win64/
+
+# Benchmark runs (results\raw\<date>_<label>: runs.csv, log.txt, screenshots) and profiler traces; the summaries go
+# to results\. The runs.csv and log.txt of the published results are added with -f.
+results/raw/
+*.etl
+*.wpaProfile.tmp

@@ -1,7 +1,6 @@
 # Benchmarks
 
-The benchmark program (`FmxCanvasBench`, kept in the development repository, not published here) draws one scene
-in a 1920 x 1080 window with one canvas and measures it. The tables
+`src/Bench/FmxCanvasBench.dpr` draws one scene in a 1920 x 1080 window with one canvas and measures it. The tables
 below compare FastCanvas with the canvases that ship with FMX, on the same scenes and parameters, measured in one
 session (absolute numbers of a machine drift by several percent between days; comparisons across sessions are not
 meaningful).
@@ -68,8 +67,13 @@ Machine: AMD Ryzen 5 7500F (6 cores), AMD Radeon RX 9070 XT (driver 32.0.31041.1
 
 ## Results
 
-Measured on 2026-10-09, 1920 x 1080 window, with FastCanvas as it was then (windows presented through swap chains of
-their own; the DirectComposition output that is the default now measured the same speed on 2026-10-13).
+Measured on 2026-10-09, 1920 x 1080 window, with FastCanvas as it was then (commit `efdbde4` of the development
+repository; windows presented through swap chains of their own: the DirectComposition output that is the default now
+measured the same speed on 2026-10-13). Full summaries with p95/p99, FPS, CPU time, memory and the screenshot
+comparison: [results/2026-10-09_canvases.md](../results/2026-10-09_canvases.md) and
+[results/2026-10-09_raytracing.md](../results/2026-10-09_raytracing.md), their tables as CSV next to them. Every run,
+with its environment and command line, is in `results/raw/<name>/runs.csv` (paths in the command lines made relative
+to the repository; the screenshots are not published).
 
 - Against FMX's default Direct2D canvas (`d2d`), FastCanvas draws the same frames 5 to 60 times faster on shapes,
   text and bitmaps (`rects` 5.5x, `text` 23-26x, `ellipses` 57x, `clip` 84-97x, `gradients` 137-295x), 2 to 4 times
@@ -162,3 +166,39 @@ mostly disappears behind it. Off, they cost nothing (the `fcdx12` columns of bot
 | `viewport3d` | light | 20 | 0.070 | 0.072 (+0.002) | 0.138 (+0.068) | 0.164 (+0.094) | 0.161 (+0.091) |
 | `viewport3d` | medium | 160 | 0.489 | 0.495 (+0.006) | 0.492 (+0.003) | 0.500 (+0.011) | 0.508 (+0.019) |
 | `viewport3d` | heavy | 480 | 1.58 | 1.58 (+0.002) | 1.65 (+0.069) | 1.56 (+0.000) | 1.64 (+0.058) |
+
+## Running the benchmark
+
+Everything that produced the tables is in the repository:
+
+| Path | Contents |
+|---|---|
+| `src/Bench` | `FmxCanvasBench`: the scenes, the canvases, the measurement, the results row, the screenshots; `AaReference`, the reference renderer of the `aa` scene |
+| `src/Common` | Timing, statistics, the environment record (OS, CPU, GPU and driver, monitor, compiler, FMX flags), CSV, a sampling profiler |
+| `tools/run-bench.ps1` | Runs every canvas, scene, preset, mode and repeat in a process of its own, in the order described above, into `results/raw/<date>_<label>` (`runs.csv`, `log.txt`, screenshots) |
+| `tools/summarize-bench.ps1` | The summary in `results` (`.md` and `.csv`): medians over the repeats, excluded runs, the screenshot comparison |
+| `tools/compare-shots.ps1` | Compares every canvas's screenshot of a scene with `d2d`'s |
+| `tools/run-aa.ps1`, `tools/compare-aa.ps1` | Antialiasing of the canvases against `AaReference` |
+| `tools/profile-report.ps1` | Resolves the stacks sampled with `--profile` |
+| `build.ps1`, `res` | Command-line build with dcc64 (Win64, release, per-monitor DPI manifest; copies `sk4d.dll` for the Skia canvases) |
+
+Build and run (PowerShell, RAD Studio 37.0 at its default path, `build.ps1` has it in `$Bds`):
+
+```powershell
+.\build.ps1 -Project src\Bench\FmxCanvasBench.dpr -SearchPath src\Common,src\Canvas
+.\tools\run-bench.ps1 -Label mine -Canvases d2d,fc,fcdx12 -Modes throughput -Presets medium -Repeats 3
+.\tools\summarize-bench.ps1 -Raw (Get-ChildItem results\raw -Directory -Filter '*_mine' | Select-Object -Last 1).FullName
+```
+
+The published results were made by:
+
+```powershell
+.\tools\run-bench.ps1 -Label canvases -Canvases d2d,gpu,gdip,skia,skiavk,fc,fcdx12 -Modes throughput -Presets medium,heavy -Repeats 3
+.\tools\run-bench.ps1 -Label raytracing -Canvases fcdx12,fcdx12rt,fcdx12ao,fcdx12soft,fcdx12refl -Scenes shadows3d,mirror3d,viewport3d -Modes throughput -Presets light,medium,heavy -Repeats 3
+```
+
+(all 26 scenes; 1092 runs in 2 h 30 min and 135 runs in 17 min; the summaries list the runs they excluded and why,
+`log.txt` next to each `runs.csv` has the output of every run). `FmxCanvasBench.exe --help` lists the options
+(scene, canvas, preset, mode, size, monitor, duration, screenshots, per-frame samples, simulated device loss). The
+Skia canvases need `sk4d.dll` next to the executable (`build.ps1` copies it from the RAD Studio installation). Close
+other programs, use the High performance power plan, and compare only runs of one session.
