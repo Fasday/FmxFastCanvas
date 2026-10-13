@@ -13,6 +13,12 @@ unit FastCanvas.Device;
   open command list (Direct3D 12) are used by the render thread, and by other threads only between Lock and Unlock
   (the Direct2D multithread lock, which Direct2D itself takes around its use of the context). }
 
+// The Direct3D 12 and DXGI declarations (third_party/delphidx12) and the records the canvas hands to the GPU are laid
+// out for 64-bit code: a Win32 build compiles, then fails inside DXGI (an access violation in dxgi.dll).
+{$IFNDEF WIN64}
+  {$MESSAGE FATAL 'FastCanvas runs on Win64 only: set the target platform of the project to Windows 64-bit.'}
+{$ENDIF}
+
 interface
 
 uses
