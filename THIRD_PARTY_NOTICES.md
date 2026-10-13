@@ -11,6 +11,15 @@ patches (`third_party/delphidx12/PROVENANCE.md`).
 - Copyright (C) 2013-2025 Norbert Sonnleitner; Microsoft notices retained in the translated units.
 - License: Apache License, Version 2.0 (`third_party/delphidx12/LICENSE.txt`).
 
+## PasVulkan Vulkan header (zlib License)
+
+`third_party/pasvulkan`: the Vulkan API header `Vulkan.pas` of PasVulkan, vendored with local patches for Delphi on
+Android and Linux (`third_party/pasvulkan/PROVENANCE.md`). The Khronos notice of the API registry is kept in the unit.
+
+- Upstream: https://github.com/BeRo1985/pasvulkan
+- Copyright (C) 2016-2024 Benjamin Rosseaux.
+- License: zlib (`third_party/pasvulkan/LICENSE`). Altered: the patches are marked `FastCanvas patch` in the source.
+
 ## Microsoft Terminal (MIT License)
 
 The grayscale and ClearType text blending of the canvas (`src/Canvas/Shaders/FastCanvas.hlsl`, functions `TextAlpha`

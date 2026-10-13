@@ -584,8 +584,14 @@ float4 PSMain(Varyings i) : SV_Target
 
 struct DualOutput
 {
+#ifdef __spirv__
+    // Vulkan: dual-source blending takes both outputs from location 0 (index 0 and 1).
+    [[vk::location(0), vk::index(0)]] float4 Color : SV_Target0;
+    [[vk::location(0), vk::index(1)]] float4 Weights : SV_Target1;
+#else
     float4 Color : SV_Target0;
     float4 Weights : SV_Target1;
+#endif
 };
 
 // Frames of windows with ClearType text: dual-source blending, target = Color + target * (1 - Weights) per channel
