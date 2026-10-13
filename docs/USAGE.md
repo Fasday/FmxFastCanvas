@@ -8,16 +8,19 @@
 - Windows 10 or 11.
 - Direct3D 11 back end: a GPU with feature level 10_0 or higher (WARP when there is none).
 - Direct3D 12 back end: a GPU with feature level 11_0 or higher.
+- Vulkan back end (in progress: the 2D canvas works, no HDR output, partial frames or 3D context of its own yet):
+  Vulkan 1.3 with dynamic rendering, synchronization2 and timeline semaphores.
 - Ray-traced effects: a GPU with DirectX Raytracing tier 1.1 (NVIDIA RTX 20 and later, AMD RX 6000 and later,
   Intel Arc). Without it they are simply not drawn.
 
 ## Adding it to a project
 
-Add two folders to the project's search path:
+Add three folders to the project's search path:
 
 ```
 <FastCanvas>\src\Canvas
 <FastCanvas>\third_party\delphidx12\src
+<FastCanvas>\third_party\pasvulkan\src
 ```
 
 and install the canvas (and, if the program uses 3D: `TViewport3D`, `TForm3D`, or the effects of `FMX.Effects`,
@@ -64,7 +67,7 @@ All settings are global variables, set before `Application.Initialize` unless no
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `FastCanvasBackend` | `D3D11` | The graphics API: `TFastCanvasBackend.D3D11` or `D3D12`. Read when the device is created (the first canvas, bitmap or text layout). |
+| `FastCanvasBackend` | `D3D11` | The graphics API: `TFastCanvasBackend.D3D11`, `D3D12` or `Vulkan`. Read when the device is created (the first canvas, bitmap or text layout). Vulkan windows present to the window itself (as `Flip`, never `Composition`), with vertical sync unless `AllowTearing`; there is no 3D context on Vulkan yet (FMX's stock one is used). |
 
 ### `FastCanvas.Canvas`
 
@@ -383,6 +386,9 @@ A program without FMX forms (a console test) shuts FastCanvas down as FMX's `Fin
 - `FASTCANVAS_D3D12_DEBUG=<file>` (environment variable): the Direct3D 12 back end enables the debug layer and writes
   its messages to the file (the layer's exceptions are caught and logged, so a program without a debugger keeps
   running).
+- `FASTCANVAS_VK_DEBUG=<file>` (environment variable): the Vulkan back end enables `VK_LAYER_KHRONOS_validation` (of
+  the Vulkan SDK) and appends its warnings and errors to the file. `VK_KHRONOS_VALIDATION_VALIDATE_SYNC=1` adds the
+  layer's synchronization validation.
 - `FastCanvasSimulateDeviceLoss`: the next scene treats the device as lost and recreates everything, as after a driver
   update or a GPU reset.
 - `FastCanvasCaptureWindow`: the frame a window presented last, as floats (checks of HDR output).

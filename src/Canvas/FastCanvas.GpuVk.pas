@@ -360,6 +360,7 @@ const
   FramesInFlight = 3;
   SwapImages = 3;
   SetsPerPool = 256;
+  MaxFreePools = 4;
   /// <summary>Waits on the timeline are cut into slices of this many nanoseconds (to notice a lost device).</summary>
   WaitSlice = 2000000000;
 
@@ -780,8 +781,13 @@ begin
   while I < FBusyPools.Count do
     if FBusyPools[I].Value <= Done then
     begin
-      FVk.ResetDescriptorPool(FDevice, FBusyPools[I].Pool, 0);
-      FFreePools.Add(FBusyPools[I].Pool);
+      if FFreePools.Count < MaxFreePools then
+      begin
+        FVk.ResetDescriptorPool(FDevice, FBusyPools[I].Pool, 0);
+        FFreePools.Add(FBusyPools[I].Pool);
+      end
+      else
+        FVk.DestroyDescriptorPool(FDevice, FBusyPools[I].Pool, nil);
       FBusyPools.Delete(I);
     end
     else

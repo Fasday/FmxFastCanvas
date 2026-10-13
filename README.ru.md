@@ -60,11 +60,12 @@ Skia и Skia Vulkan.
 
 ## Подключение
 
-Добавьте в пути поиска проекта две папки:
+Добавьте в пути поиска проекта три папки:
 
 ```
 src\Canvas
 third_party\delphidx12\src
+third_party\pasvulkan\src
 ```
 
 и установите FastCanvas до `Application.Initialize`:
@@ -112,7 +113,7 @@ FastCanvas устанавливается в `.dpr`. В заголовке ок�
   копируется к программе при сборке).
 
 Откройте в RAD Studio `Examples.groupproj` (или один из проектов) и запустите: проекты собираются под Win64 (и Win32), пути
-поиска (`..\src\Canvas;..\third_party\delphidx12\src`) уже прописаны. Из командной строки:
+поиска (`..\src\Canvas;..\third_party\delphidx12\src;..\third_party\pasvulkan\src`) уже прописаны. Из командной строки:
 
 ```
 cd example
@@ -145,8 +146,9 @@ msbuild Examples.groupproj /p:Config=Release /p:Platform=Win64
 
 | Путь | Содержимое |
 |---|---|
-| `src/Canvas` | FastCanvas: канвас, рендерер, бэкенды Direct3D 11/12, 3D-контексты, шейдеры (HLSL и скомпилированные) |
+| `src/Canvas` | FastCanvas: канвас, рендерер, бэкенды Direct3D 11/12 и Vulkan (в работе), 3D-контексты, шейдеры (HLSL и скомпилированные) |
 | `third_party/delphidx12` | Заголовки Direct3D 12 / DXGI (DelphiDX12, Apache 2.0) |
+| `third_party/pasvulkan` | Заголовок Vulkan (PasVulkan, zlib) |
 | `example` | `HelloFastCanvas` и `HelloForm3D` — самые короткие проверки (проекты RAD Studio) |
 | `docs` | [USAGE.md](docs/USAGE.md) (настройки, трассировка лучей, HDR, DLSS, потоки), [ARCHITECTURE.md](docs/ARCHITECTURE.md) (как устроено), [BENCHMARKS.md](docs/BENCHMARKS.md) — на английском |
 | `src/Bench`, `src/Common` | Бенчмарк `FmxCanvasBench` (сцены, канвасы, замер) и вспомогательные модули |

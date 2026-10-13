@@ -56,11 +56,12 @@ repository (`src/Bench`, `tools`, `results`): the numbers can be checked and mea
 
 ## Use
 
-Add two folders to the project's search path:
+Add three folders to the project's search path:
 
 ```
 src\Canvas
 third_party\delphidx12\src
+third_party\pasvulkan\src
 ```
 
 and install FastCanvas before `Application.Initialize`:
@@ -108,7 +109,7 @@ the designer; FastCanvas is installed in the `.dpr`. The window title tells what
   `third_party\nvidia_dlss\bin\win64` is copied next to the program when it is built).
 
 Open `Examples.groupproj` (or one of the projects) in RAD Studio and run: the projects target Win64 (Win32 too) and already have
-the search path (`..\src\Canvas;..\third_party\delphidx12\src`). From the command line:
+the search path (`..\src\Canvas;..\third_party\delphidx12\src;..\third_party\pasvulkan\src`). From the command line:
 
 ```
 cd example
@@ -141,8 +142,9 @@ Global variables, set before `Application.Initialize`; all of them in [docs/USAG
 
 | Path | Contents |
 |---|---|
-| `src/Canvas` | FastCanvas: canvas, renderer, Direct3D 11/12 back ends, 3D contexts, shaders (HLSL and compiled) |
+| `src/Canvas` | FastCanvas: canvas, renderer, Direct3D 11/12 and Vulkan (in progress) back ends, 3D contexts, shaders (HLSL and compiled) |
 | `third_party/delphidx12` | Direct3D 12 / DXGI headers (DelphiDX12, Apache 2.0) |
+| `third_party/pasvulkan` | Vulkan header (PasVulkan, zlib) |
 | `example` | `HelloFastCanvas` and `HelloForm3D`, the smallest checks (RAD Studio projects) |
 | `docs` | [USAGE.md](docs/USAGE.md) (settings, ray tracing, HDR, DLSS, threads), [ARCHITECTURE.md](docs/ARCHITECTURE.md) (how it works), [BENCHMARKS.md](docs/BENCHMARKS.md) |
 | `src/Bench`, `src/Common` | The benchmark `FmxCanvasBench` (scenes, canvases, measurement) and its helpers |
