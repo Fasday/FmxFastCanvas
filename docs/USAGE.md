@@ -304,7 +304,10 @@ Limitations:
   panel a sorting material that puts it last.
 - Motion vectors come from FMX's `MVPMatrix` of each opaque object (depth test and write); vertices animated by the
   CPU move without them, transparent objects have none.
-- `FastDlssJitterTest` is a diagnostic: it turns the subpixel jitter off or negates what DLSS is told.
+- Starting NGX for a device takes a moment: on an RTX 3090 the first DLSS frame came about 1.5 s after the window, the
+  first after a device loss about 2 s after it (the session of the new device is made again).
+- Diagnostics: `FastDlssJitterTest` turns the subpixel jitter off or negates what DLSS is told; `FastDlssView`
+  shows the scene DLSS gets (`Input`) or its motion vectors (`Motion`: grey where none) instead of the result.
 
 ## Threads
 

@@ -56,6 +56,7 @@ type
     Jitter: TPointF;
     Reset: Boolean;
     FrameTime: Single;
+    View: TFastDlssView;
   end;
   TDlssMotionConstants = packed record
     Current, Previous: TMatrix3D;
@@ -165,7 +166,8 @@ end;
 function TDlssState.Pso(const AKind, AStride, AOffset, ACull: Integer;
   const AFormat: TDXGI_FORMAT): ID3D12PipelineState;
 var Desc: TD3D12_GRAPHICS_PIPELINE_STATE_DESC; Element: TD3D12_INPUT_ELEMENT_DESC; Key: UInt64;
-const Culls: array[0..2] of TD3D12_CULL_MODE = (D3D12_CULL_MODE_NONE, D3D12_CULL_MODE_FRONT, D3D12_CULL_MODE_BACK);
+// As the scene's draws (TFastContext3D.FState.Cull): 1 culls the back faces.
+const Culls: array[0..2] of TD3D12_CULL_MODE = (D3D12_CULL_MODE_NONE, D3D12_CULL_MODE_BACK, D3D12_CULL_MODE_FRONT);
 begin
   Key := UInt64(Cardinal(AStride)) shl 32 or UInt64(Cardinal(AOffset)) shl 16 or
     UInt64(Ord(AFormat)) shl 8 or UInt64(ACull shl 4 or AKind);
@@ -199,7 +201,6 @@ begin
     // Pulled slightly towards the camera: FMX's shaders and this one compute the depth with other instructions, the
     // test must not depend on the last bits.
     Desc.RasterizerState.DepthBias := -64;
-    Desc.RasterizerState.SlopeScaledDepthBias := -2;
     Desc.DepthStencilState.DepthEnable := True;
     Desc.DepthStencilState.DepthWriteMask := D3D12_DEPTH_WRITE_MASK_ZERO;
     Desc.DepthStencilState.DepthFunc := D3D12_COMPARISON_FUNC_LESS_EQUAL;
@@ -307,7 +308,8 @@ begin
   DlssInvalidateReplay;
 end;
 
-procedure DlssBlit(const S: TDlssState; const Src, Dst: TTexture12; const ADepth, ADecode, AEncode: Boolean);
+procedure DlssBlit(const S: TDlssState; const Src, Dst: TTexture12; const ADepth, ADecode, AEncode: Boolean;
+  const AMotionScale: Single = 0);
 var Ctx: TGpu12Context; Cpu, Rtv: TD3D12_CPU_DESCRIPTOR_HANDLE; GpuTable: TD3D12_GPU_DESCRIPTOR_HANDLE;
   K: array[0..3] of Single; Res: ID3D12Resource; Off, Gpu: UInt64; P: PByte; L: ID3D12GraphicsCommandList;
 begin
@@ -327,7 +329,7 @@ begin
   end;
   Dst.Use(D3D12_RESOURCE_STATE_RENDER_TARGET);
   Ctx.FlushBarriers;
-  K[0] := Ord(ADecode); K[1] := Ord(AEncode); K[2] := 0; K[3] := 0;
+  K[0] := Ord(ADecode); K[1] := Ord(AEncode); K[2] := AMotionScale; K[3] := 0;
   P := Ctx.Upload(256, 256, Res, Off, Gpu); FillChar(P^, 256, 0); Move(K, P^, SizeOf(K));
   S.EnsureRoot;
   DlssInvalidateReplay;
@@ -361,7 +363,12 @@ begin
   begin
     Barrier := TD3D12_RESOURCE_BARRIER.CreateUAV(Output.Resource);
     Ctx.List.ResourceBarrier(1, @Barrier);
-    DlssBlit(S, Output, TTexture12(C.Target), False, False, S.Hdr);
+    case C.View of
+      TFastDlssView.Input: DlssBlit(S, DlssTexture(S.Color), TTexture12(C.Target), False, False, False);
+      TFastDlssView.Motion: DlssBlit(S, DlssTexture(S.Motion), TTexture12(C.Target), False, False, False, 0.1);
+    else
+      DlssBlit(S, Output, TTexture12(C.Target), False, False, S.Hdr);
+    end;
   end
   else
     // A runtime failure keeps the demo visible; the UI shows the NGX error and does not report DLSS as active.
@@ -441,7 +448,7 @@ begin
   FDlssPhase := False;
   Target := TTexture12(DrawTarget);
   C := Rec(HandleDlssFinish, SizeOf(TCmdDlssFinish), FDlssState);
-  C.State := S; C.Target := Target; C.Jitter := S.Jitter; C.Reset := S.Frame = 1;
+  C.State := S; C.Target := Target; C.Jitter := S.Jitter; C.Reset := S.Frame = 1; C.View := FastDlssView;
   if FastDlssJitterTest in [TFastDlssJitterTest.NegateX, TFastDlssJitterTest.NegateXY] then
     C.Jitter.X := -C.Jitter.X;
   if FastDlssJitterTest in [TFastDlssJitterTest.NegateY, TFastDlssJitterTest.NegateXY] then
@@ -480,8 +487,7 @@ begin
   Key := FastHashMix(AGeometry, Occurrence);
   D.DlssState := S; D.DlssPosition := APosition; D.DlssCull := ACull;
   // The matrix FMX gives its shaders (ApplyMaterial: CurrentMatrix * (camera * projection)), not the same product in
-  // another order: its rounding put the motion pass behind the scene's own depth, which then kept the vectors of
-  // moving objects out in about half of their pixels (edges shook in motion, still scenes were steady).
+  // another order: the depth of the motion pass stays that of the scene's draw.
   D.DlssCurrent := CurrentModelViewProjectionMatrix;
   if S.Models.TryGetValue(Key, History) and (History.Frame + 1 = S.Frame) then D.DlssPrevious := History.Matrix
   else D.DlssPrevious := D.DlssCurrent;

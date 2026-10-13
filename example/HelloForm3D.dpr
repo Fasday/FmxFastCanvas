@@ -5,7 +5,8 @@ program HelloForm3D;
 
   Environment variables: FC_BACKEND=11 (Direct3D 11 instead of 12: no ray tracing, no HDR), FC_STOCK=1 (FMX's own 3D
   context, to compare), FC_HDR=force (the HDR switch gives HDR output on any display, also an SDR one), FC_DRED=0|1
-  (DRED breadcrumbs off, or on every card; default: NVIDIA cards), FC_DLSS_JITTER=off|-x|-y|-xy (DLSS diagnostics).
+  (DRED breadcrumbs off, or on every card; default: NVIDIA cards), FC_DLSS_JITTER=off|-x|-y|-xy and
+  FC_DLSS_VIEW=input|motion (DLSS diagnostics).
   DLSS (NVIDIA RTX): nvngx_dlss.dll of the DLSS SDK next to the program. }
 
 uses
@@ -40,7 +41,7 @@ begin
       FastCanvasD3D12Breadcrumbs := TFastCanvasBreadcrumbs.On
     else
       FastCanvasD3D12Breadcrumbs := TFastCanvasBreadcrumbs.Nvidia;
-    // Diagnostics of DLSS on NVIDIA cards: FC_DLSS_JITTER=off|-x|-y|-xy.
+    // Diagnostics of DLSS on NVIDIA cards: FC_DLSS_JITTER=off|-x|-y|-xy, FC_DLSS_VIEW=input|motion.
     if SameText(GetEnvironmentVariable('FC_DLSS_JITTER'), 'off') then
       FastDlssJitterTest := TFastDlssJitterTest.Off
     else if SameText(GetEnvironmentVariable('FC_DLSS_JITTER'), '-x') then
@@ -49,6 +50,10 @@ begin
       FastDlssJitterTest := TFastDlssJitterTest.NegateY
     else if SameText(GetEnvironmentVariable('FC_DLSS_JITTER'), '-xy') then
       FastDlssJitterTest := TFastDlssJitterTest.NegateXY;
+    if SameText(GetEnvironmentVariable('FC_DLSS_VIEW'), 'input') then
+      FastDlssView := TFastDlssView.Input
+    else if SameText(GetEnvironmentVariable('FC_DLSS_VIEW'), 'motion') then
+      FastDlssView := TFastDlssView.Motion;
     InstallFastCanvas;
     if FastCanvasBackend = TFastCanvasBackend.D3D12 then
       InstallFastContext3D12

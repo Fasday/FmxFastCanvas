@@ -20,6 +20,8 @@ type
   TFastDlssMode = (Off, Quality, Balanced, Performance, UltraPerformance, DLAA);
   /// <summary>Diagnostics of the jitter (FastDlssJitterTest).</summary>
   TFastDlssJitterTest = (Normal, Off, NegateX, NegateY, NegateXY);
+  /// <summary>Diagnostics: what a window with DLSS shows (FastDlssView).</summary>
+  TFastDlssView = (Output, Input, Motion);
   {$SCOPEDENUMS OFF}
 
   /// <summary>The NGX session of a device, reference counted: held by the DLSS states of the 3D contexts and by the
@@ -99,6 +101,9 @@ var
   /// with these components negated (the projection keeps it as it is). The variant whose edges stand still on a still
   /// scene tells the convention DLSS expects. Read at every frame.</summary>
   FastDlssJitterTest: TFastDlssJitterTest = TFastDlssJitterTest.Normal;
+  /// <summary>Diagnostics: Input shows the scene DLSS gets (render size, jittered), Motion its motion vectors (grey:
+  /// none; red and green: towards the previous position, 0.1 per pixel). Read at every frame.</summary>
+  FastDlssView: TFastDlssView = TFastDlssView.Output;
 
 function DlssModeName(const AMode: TFastDlssMode): string;
 
@@ -115,7 +120,9 @@ type
   TCreateFeature = function(List: Pointer; Feature: Integer; Parameters: Pointer; out Handle: Pointer): Cardinal; cdecl;
   TEvaluateFeature = function(List, Handle, Parameters, Callback: Pointer): Cardinal; cdecl;
   TReleaseFeature = function(Handle: Pointer): Cardinal; cdecl;
-  TShutdown = function(Device: Pointer): Cardinal; cdecl;
+  // The export of the driver's NGX Core, not the function of nvsdk_ngx.h of that name (one parameter, in NVIDIA's
+  // static library): it writes the number of devices left to the second parameter.
+  TShutdown = function(Device: Pointer; out DevicesLeft: Cardinal): Cardinal; cdecl;
   TSetUInt = procedure(Parameters: Pointer; Name: PAnsiChar; Value: Cardinal); cdecl;
   TSetInt = procedure(Parameters: Pointer; Name: PAnsiChar; Value: Integer); cdecl;
   TSetFloat = procedure(Parameters: Pointer; Name: PAnsiChar; Value: Single); cdecl;
@@ -238,6 +245,8 @@ begin
 end;
 
 destructor TFastDlss.Destroy;
+var
+  DevicesLeft: Cardinal;
 begin
   EnterCriticalSection(GLock);
   try
@@ -249,7 +258,7 @@ begin
   if (FParameters <> nil) and (FDestroy <> nil) then
     TDestroyParameters(FDestroy)(FParameters);
   if FInitialized then
-    TShutdown(FShutdown)(Pointer(FDevice));
+    TShutdown(FShutdown)(Pointer(FDevice), DevicesLeft);
   FDevice := nil;
   inherited;
 end;

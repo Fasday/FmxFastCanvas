@@ -57,10 +57,11 @@ float3 Encode(float3 c)
                   c.b <= 0.0031308 ? c.b * 12.92 : 1.055 * pow(c.b, 1.0 / 2.4) - 0.055);
 }
 
-// Fullscreen passes reuse the first four constant floats. x: decode; y: encode.
+// Fullscreen passes reuse the first four constant floats. x: decode; y: encode; z: motion vectors shown, scale.
 float4 PSCopy(ScreenVertex v) : SV_Target
 {
     float4 c = Source.SampleLevel(LinearClamp, v.UV, 0);
+    if (CurrentMVP[0][2] != 0) c.rgb = float3(saturate(0.5 + c.rg * CurrentMVP[0][2]), 0.5);
     if (CurrentMVP[0][0] != 0) c.rgb = Decode(c.rgb);
     if (CurrentMVP[0][1] != 0) c.rgb = Encode(c.rgb);
     return float4(c.rgb, 1);
