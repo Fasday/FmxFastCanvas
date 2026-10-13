@@ -1,7 +1,7 @@
 unit Bench.Canvases.Fast;
 
-{ The FastCanvas variants of the benchmark (fc on Direct3D 11, fcdx12 on Direct3D 12, ray-traced effects, measurement
-  aids). }
+{ The FastCanvas variants of the benchmark (fc on Direct3D 11, fcdx12 on Direct3D 12, fcvk on Vulkan, ray-traced
+  effects, measurement aids). }
 
 interface
 
@@ -50,7 +50,7 @@ begin
         // Bench options, not canvas options: the stock 3D context on its own device; the memory manager left
         // sleeping on lock contention; no render thread (FastCanvasRenderThread).
         if (Name = '') or SameText(Name, 'SeparateContext3D') or SameText(Name, 'HeapSleep') or
-          SameText(Name, 'MainThread') or SameText(Name, 'D3D12') or
+          SameText(Name, 'MainThread') or SameText(Name, 'D3D12') or SameText(Name, 'Vulkan') or
           SameText(Name, 'RayShadows') or SameText(Name, 'RaySoft') or SameText(Name, 'RayAO') or
           SameText(Name, 'NoPartial') or SameText(Name, 'RayReflect') or SameText(Name, 'HdrForce') or
           SameText(Name, 'HdrAuto') or SameText(Name, 'Composition') or SameText(Name, 'ClearType') or
@@ -74,7 +74,9 @@ begin
       FastCanvasNoHeapSleep := not (ABaseOptions + ',' + AConfig.CanvasOpts).Contains('HeapSleep');
       FastCanvasRenderThread := not (ABaseOptions + ',' + AConfig.CanvasOpts).Contains('MainThread');
       FastCanvasPartialFrames := not (ABaseOptions + ',' + AConfig.CanvasOpts).Contains('NoPartial');
-      if (ABaseOptions + ',' + AConfig.CanvasOpts).Contains('D3D12') then
+      if (ABaseOptions + ',' + AConfig.CanvasOpts).Contains('Vulkan') then
+        FastCanvasBackend := TFastCanvasBackend.Vulkan
+      else if (ABaseOptions + ',' + AConfig.CanvasOpts).Contains('D3D12') then
         FastCanvasBackend := TFastCanvasBackend.D3D12
       else
         FastCanvasBackend := TFastCanvasBackend.D3D11;
@@ -115,12 +117,12 @@ begin
         FastCanvasTextAntialias := TFastTextAntialias.Grayscale;
       InstallFastCanvas;
       // The 3D context (TEffect filters, TViewport3D) on the canvas device: our own; SeparateContext3D keeps the stock
-      // context on its own device.
+      // context on its own device. Vulkan has no 3D context of its own yet.
       if not (ABaseOptions + ',' + AConfig.CanvasOpts).Contains('SeparateContext3D') then
-        if FastCanvasBackend = TFastCanvasBackend.D3D12 then
-          InstallFastContext3D12
-        else
-          InstallFastContext3D11;
+        case FastCanvasBackend of
+          TFastCanvasBackend.D3D11: InstallFastContext3D11;
+          TFastCanvasBackend.D3D12: InstallFastContext3D12;
+        end;
     end,
     procedure(const AConfig: TBenchConfig; out AGeometry, AText: string)
     begin
@@ -147,7 +149,9 @@ begin
         Result := Result + '+D3D12';
         if not FastCanvasPartialFrames then
           Result := Result + '+NoPartial';
-      end;
+      end
+      else if FastCanvasBackend = TFastCanvasBackend.Vulkan then
+        Result := Result + '+Vulkan';
       if FastContext3DRayTracing.Shadows then
         Result := Result + '+RayShadows';
       if FastContext3DRayTracing.ShadowSoftness > 0 then
@@ -234,6 +238,7 @@ begin
   RegisterFastCanvas('fcdx12dc',
     'FastCanvas on Direct3D 12 with windows shown by DirectComposition (composition swap chains)',
     'D3D12,Composition');
+  RegisterFastCanvas('fcvk', 'FastCanvas on Vulkan', 'Vulkan,SeparateContext3D');
   RegisterFastCanvas('fcst', 'FastCanvas without the render thread (commands executed on the main thread)',
     'MainThread');
   RegisterFastCanvas('fcheapsleep', 'FastCanvas with the memory manager sleeping on lock contention (RTL default)',

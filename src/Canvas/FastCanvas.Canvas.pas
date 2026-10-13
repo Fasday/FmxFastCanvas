@@ -6,10 +6,10 @@ unit FastCanvas.Canvas;
   Drawing on the main thread records commands into the stream of FastCanvas.RenderQueue and returns; a render
   thread executes them. Rectangles, rounded rectangles, ellipses, lines, bitmaps and glyphs become TGpuInstance
   records that the recording side writes straight into the stream, and the render thread draws them in instanced
-  runs (FastCanvas.Gpu, on Direct3D 11 or 12: FastCanvasBackend). Paths and stroke outlines are polygons with exact
-  area coverage on the GPU (their geometry comes from the Direct2D factory on the CPU); rotated and very large text
-  is drawn from glyph outlines, color fonts from an image rasterized once. Clips are a table of pixel boxes plus up
-  to two oriented rectangles per entry, tested per pixel, so clip changes do not split draw calls.
+  runs (FastCanvas.Gpu, on Direct3D 11, 12 or Vulkan: FastCanvasBackend). Paths and stroke outlines are polygons with
+  exact area coverage on the GPU (their geometry comes from the Direct2D factory on the CPU); rotated and very large
+  text is drawn from glyph outlines, color fonts from an image rasterized once. Clips are a table of pixel boxes plus
+  up to two oriented rectangles per entry, tested per pixel, so clip changes do not split draw calls.
 
   Contract: TCanvas (FMX.Graphics.pas:980-1229), TTextLayout (FMX.TextLayout.pas:48-177). On Direct3D 12 the canvas
   reports TCanvasStyle.SupportClipRects (FastCanvasPartialFrames): FMX then repaints only the rectangles that changed
@@ -47,7 +47,8 @@ type
     /// <summary>A composition swap chain shown in the window by DirectComposition, with premultiplied alpha: where
     /// the frame is transparent, what is behind it shows (the backdrop, as with the stock Direct2D canvas). Windows
     /// presenting with tearing (TFastCanvasOption.AllowTearing) take Flip: tearing needs a swap chain of the window.
-    /// Falls back to Flip when DirectComposition is not available. HDR output stays opaque.</summary>
+    /// Falls back to Flip when DirectComposition is not available, and on Vulkan (its swap chains present to the
+    /// window). HDR output stays opaque.</summary>
     Composition);
 
   /// <summary>How text is antialiased (FastCanvasTextAntialias).</summary>
@@ -145,7 +146,7 @@ uses
   FMX.Platform.Win, FMX.TextLayout,
   FMX.Types3D, FMX.Controls,
   FastCanvas.D2D1Ext, FastCanvas.DWriteExt, FastCanvas.Device, FastCanvas.Gpu11, FastCanvas.Gpu12,
-  FastCanvas.Text, FastCanvas.RenderQueue, FastCanvas.Service, FastCanvas.Bridge;
+  FastCanvas.GpuVk, FastCanvas.Text, FastCanvas.RenderQueue, FastCanvas.Service, FastCanvas.Bridge;
 
 type
   // Winapi.Windows declares a TBitmap too.
@@ -1166,10 +1167,12 @@ end;
 /// <summary>The classes of the graphics API of the device.</summary>
 function Backend: TGpuBackendClass; inline;
 begin
-  if TFastDevice.Backend = TFastCanvasBackend.D3D12 then
-    Result := TGpu12Backend
+  case TFastDevice.Backend of
+    TFastCanvasBackend.D3D12: Result := TGpu12Backend;
+    TFastCanvasBackend.Vulkan: Result := TGpuVkBackend;
   else
     Result := TGpu11Backend;
+  end;
 end;
 
 /// <summary>Removes AItem from a registry of live bitmaps or targets (GBitmaps, GTargets). After the shutdown a
@@ -1840,9 +1843,10 @@ begin
   C.D2DText := TFastCanvasOption.D2DText in FastCanvasOptions;
   // A partial window frame starts from the last one; a bitmap keeps its pixels anyway.
   C.Partial := (FRegion <> nil) and (FTarget.Kind <> TTargetKind.Bitmap);
-  // Tearing needs a swap chain of the window.
+  // Tearing needs a swap chain of the window. Vulkan presents to the window itself (as Flip): no DirectComposition.
   C.Composition := (FTarget.Kind = TTargetKind.Window) and
-    (FastCanvasPresentation = TFastCanvasPresentation.Composition) and not C.Tearing;
+    (FastCanvasPresentation = TFastCanvasPresentation.Composition) and not C.Tearing and
+    (TFastDevice.Backend <> TFastCanvasBackend.Vulkan);
   if FTarget.Kind = TTargetKind.Window then
     if not C.Composition then
       FFlipShown := True

@@ -87,8 +87,10 @@ Set-Content -Path (Join-Path $ResDir 'BuildInfo.inc') -Value $buildInfo -Encodin
 
 # 3. Compiler switches
 $paths = @($ResDir) + ($SearchPath | ForEach-Object { (Resolve-Path $_).Path })
-# Direct3D 12 headers (FastCanvas.Device, FastCanvas.Gpu12).
+# Direct3D 12 headers (FastCanvas.Device, FastCanvas.Gpu12) and the Vulkan header (FastCanvas.DeviceVk,
+# FastCanvas.GpuVk).
 $paths += Join-Path $Root 'third_party\delphidx12\src'
+$paths += Join-Path $Root 'third_party\pasvulkan\src'
 $defines = @($Define)
 $pathArg = ($paths -join ';')
 $flags = @(

@@ -60,8 +60,8 @@
     </PropertyGroup>
     <PropertyGroup Condition="'$(Base)'!=''">
         <SanitizedProjectName>HelloForm3D</SanitizedProjectName>
-        <!-- FastCanvas sources and the Direct3D 12 headers of this repository. -->
-        <DCC_UnitSearchPath>..\src\Canvas;..\third_party\delphidx12\src;$(DCC_UnitSearchPath)</DCC_UnitSearchPath>
+        <!-- FastCanvas sources, the Direct3D 12 and Vulkan headers of this repository. -->
+        <DCC_UnitSearchPath>..\src\Canvas;..\third_party\delphidx12\src;..\third_party\pasvulkan\src;$(DCC_UnitSearchPath)</DCC_UnitSearchPath>
         <DCC_Namespace>System;Xml;Data;Datasnap;Web;Soap;$(DCC_Namespace)</DCC_Namespace>
         <DCC_ExeOutput>.\$(Platform)\$(Config)</DCC_ExeOutput>
         <DCC_DcuOutput>.\$(Platform)\$(Config)</DCC_DcuOutput>

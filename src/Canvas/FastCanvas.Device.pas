@@ -8,23 +8,26 @@ unit FastCanvas.Device;
   - Direct3D 12: the device and its direct queue; the canvas records and submits its own command lists
     (FastCanvas.Gpu12). No Direct2D device: the Direct2D factory serves the CPU geometry (Simplify, Widen,
     FillContainsPoint) and the software rasterization of color fonts.
+  - Vulkan: the instance, device and graphics queue of FastCanvas.DeviceVk; the canvas records and submits its own
+    command buffers (FastCanvas.GpuVk). The Direct2D factory as with Direct3D 12; no DXGI factory.
 
   Thread use: the device, the queue and the factories are free-threaded. The immediate context (Direct3D 11) and the
-  open command list (Direct3D 12) are used by the render thread, and by other threads only between Lock and Unlock
-  (the Direct2D multithread lock, which Direct2D itself takes around its use of the context). }
+  open command list (Direct3D 12) or command buffer (Vulkan) are used by the render thread, and by other threads
+  only between Lock and Unlock (the Direct2D multithread lock, which Direct2D itself takes around its use of the
+  context). }
 
 interface
 
 uses
   DX12.D3D12, DX12.D3DCommon,
   Winapi.Windows, Winapi.DXGI, Winapi.DXGI1_2, Winapi.D3DCommon, Winapi.D3D11, Winapi.D2D1, System.SysUtils,
-  FastCanvas.D2D1Ext, FastCanvas.DWriteExt;
+  FastCanvas.D2D1Ext, FastCanvas.DWriteExt, FastCanvas.DeviceVk;
 
 type
   EFastDevice = class(Exception);
 
   {$SCOPEDENUMS ON}
-  TFastCanvasBackend = (D3D11, D3D12);
+  TFastCanvasBackend = (D3D11, D3D12, Vulkan);
   /// <summary>Direct3D 12 DRED auto-breadcrumbs (FastCanvasD3D12Breadcrumbs).</summary>
   TFastCanvasBreadcrumbs = (Off, On, Nvidia);
   {$SCOPEDENUMS OFF}
@@ -55,6 +58,8 @@ type
       DWrite2: IDWriteFactory2;
       D3D12: ID3D12Device;
       Queue: ID3D12CommandQueue;
+      /// <summary>Owned: freed by Release and ResetDevice.</summary>
+      Vulkan: TFastVulkan;
     end;
     PRefs = ^TRefs;
   private class var
@@ -70,6 +75,7 @@ type
     FVendorId: Cardinal;
     class procedure CreateDevice; static;
     class procedure CreateDevice12; static;
+    class procedure CreateDeviceVk; static;
     class procedure CreateFactories; static;
     class procedure CheckTearing; static;
     class function GetD3D: ID3D11Device; static;
@@ -81,6 +87,7 @@ type
     class function GetDWrite2: IDWriteFactory2; static;
     class function GetD3D12: ID3D12Device; static;
     class function GetQueue: ID3D12CommandQueue; static;
+    class function GetVulkan: TFastVulkan; static;
   public
     class constructor Create;
     /// <summary>Creates the device and factories on first use. Raises EFastDevice when the graphics API is missing.
@@ -119,20 +126,22 @@ type
     /// <summary>Direct3D 12: the device and its direct queue; else nil.</summary>
     class property D3D12: ID3D12Device read GetD3D12;
     class property Queue: ID3D12CommandQueue read GetQueue;
+    /// <summary>Vulkan: the instance, device and queue; else nil.</summary>
+    class property Vulkan: TFastVulkan read GetVulkan;
     /// <summary>Direct3D 12 with the debug layer (environment variable FASTCANVAS_D3D12_DEBUG: the file its messages
     /// go to).</summary>
     class property Debug12: Boolean read FDebug12;
     /// <summary>PCI vendor of the graphics card of the device ($10DE NVIDIA, $1002 AMD, $8086 Intel, $1414 WARP).
     /// </summary>
     class property AdapterVendorId: Cardinal read FVendorId;
-    /// <summary>Largest texture side for the feature level.</summary>
+    /// <summary>Largest texture side for the feature level (Vulkan: of the device's limits).</summary>
     class function MaxTextureSize: Integer; static;
   end;
 
 implementation
 
 uses
-  DX12.D3D12SDKLayers, DX12.DXGI1_4, System.Math, Winapi.DXGI1_3;
+  DX12.D3D12SDKLayers, DX12.DXGI1_4, System.Math, Winapi.DXGI1_3, Winapi.DxgiType, Vulkan;
 
 /// <summary>CreateDXGIFactory2 with the interface ID by reference, as dxgi.dll takes it (REFIID). Winapi.DXGI1_3
 /// declares it by value, which only Win64 passes as a pointer: a Win32 build wrote the factory to an address made of
@@ -218,6 +227,14 @@ class function TFastDevice.GetQueue: ID3D12CommandQueue;
 begin
   if FRefs <> nil then
     Result := FRefs.Queue
+  else
+    Result := nil;
+end;
+
+class function TFastDevice.GetVulkan: TFastVulkan;
+begin
+  if FRefs <> nil then
+    Result := FRefs.Vulkan
   else
     Result := nil;
 end;
@@ -317,6 +334,21 @@ begin
   CheckTearing;
 end;
 
+class procedure TFastDevice.CreateDeviceVk;
+begin
+  try
+    FRefs.Vulkan := TFastVulkan.Create(FUseWarp);
+  except
+    on E: EFastVulkan do
+      raise EFastDevice.Create(E.Message);
+  end;
+  FVendorId := FRefs.Vulkan.Properties.vendorID;
+  FHardware := FRefs.Vulkan.Properties.deviceType <> VK_PHYSICAL_DEVICE_TYPE_CPU;
+  FLevel := D3D_FEATURE_LEVEL_11_0;
+  // Windows present with VK_PRESENT_MODE_IMMEDIATE_KHR when they allow tearing (FastCanvas.GpuVk), no DXGI flag.
+  FTearing := False;
+end;
+
 class procedure TFastDevice.CreateFactories;
 var
   Factory: ID2D1Factory;
@@ -355,10 +387,12 @@ begin
     try
       try
         FBackend := FastCanvasBackend;
-        if FBackend = TFastCanvasBackend.D3D12 then
-          CreateDevice12
+        case FBackend of
+          TFastCanvasBackend.D3D12: CreateDevice12;
+          TFastCanvasBackend.Vulkan: CreateDeviceVk;
         else
           CreateDevice;
+        end;
         CreateFactories;
       except
         Release;
@@ -393,6 +427,7 @@ begin
   end;
   FRefs.Queue := nil;
   FRefs.D3D12 := nil;
+  FreeAndNil(FRefs.Vulkan);
   FRefs.D2DDevice := nil;
   FRefs.D2DLock := nil;
   FRefs.D2DFactory := nil;
@@ -424,13 +459,16 @@ begin
     FRefs.D3D := nil;
     FRefs.Queue := nil;
     FRefs.D3D12 := nil;
+    FreeAndNil(FRefs.Vulkan);
     Mask := GetExceptionMask;
     SetExceptionMask(exAllArithmeticExceptions);
     try
-      if FBackend = TFastCanvasBackend.D3D12 then
-        CreateDevice12
+      case FBackend of
+        TFastCanvasBackend.D3D12: CreateDevice12;
+        TFastCanvasBackend.Vulkan: CreateDeviceVk;
       else
         CreateDevice;
+      end;
       if FRefs.D2DFactory = nil then
         CreateFactories
       else if (FRefs.D3D <> nil) and (not Supports(FRefs.D3D, IDXGIDevice, Device) or
@@ -446,7 +484,8 @@ end;
 
 class function TFastDevice.Ready: Boolean;
 begin
-  Result := (FRefs <> nil) and (FRefs.DWrite <> nil) and ((FRefs.D3D <> nil) or (FRefs.D3D12 <> nil));
+  Result := (FRefs <> nil) and (FRefs.DWrite <> nil) and
+    ((FRefs.D3D <> nil) or (FRefs.D3D12 <> nil) or (FRefs.Vulkan <> nil));
 end;
 
 class procedure TFastDevice.Lock;
@@ -469,13 +508,17 @@ begin
     Result := FRefs.D3D12.GetDeviceRemovedReason
   else if FRefs.D3D <> nil then
     Result := FRefs.D3D.GetDeviceRemovedReason
+  else if (FRefs.Vulkan <> nil) and FRefs.Vulkan.Lost then
+    Result := DXGI_ERROR_DEVICE_REMOVED
   else
     Result := S_OK;
 end;
 
 class function TFastDevice.MaxTextureSize: Integer;
 begin
-  if ((FRefs <> nil) and (FRefs.D3D12 <> nil)) or (FLevel >= D3D_FEATURE_LEVEL_11_0) then
+  if (FRefs <> nil) and (FRefs.Vulkan <> nil) then
+    Result := FRefs.Vulkan.Properties.limits.maxImageDimension2D
+  else if ((FRefs <> nil) and (FRefs.D3D12 <> nil)) or (FLevel >= D3D_FEATURE_LEVEL_11_0) then
     Result := 16384
   else
     Result := 8192;
