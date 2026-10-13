@@ -91,22 +91,27 @@ end.
 
 ## Пример
 
-[example/HelloFastCanvas.dproj](example/HelloFastCanvas.dproj) — форма с анимированной 2D-графикой, кнопкой с эффектом
-тени, освещённым 3D-кубом над полом и переключателем теней трассировкой лучей. В заголовке окна написано, чем оно
-рисуется. Все компоненты лежат на форме в дизайнере (`HelloMain.fmx`); FastCanvas устанавливается в
-`HelloFastCanvas.dpr`.
+В `example` два проекта RAD Studio, оба в группе `Examples.groupproj`. Все компоненты лежат на формах в дизайнере;
+FastCanvas устанавливается в `.dpr`. В заголовке окна написано, чем оно рисуется.
 
-Откройте `HelloFastCanvas.dproj` в RAD Studio и запустите: проект собирается под Win64, пути поиска
-(`..\src\Canvas;..\third_party\delphidx12\src`) уже прописаны. Из командной строки:
+- [HelloFastCanvas.dproj](example/HelloFastCanvas.dproj) — форма с анимированной 2D-графикой, кнопкой с эффектом тени,
+  освещённым 3D-кубом над полом в `TViewport3D` и переключателем теней трассировкой лучей.
+- [HelloForm3D.dproj](example/HelloForm3D.dproj) — `TForm3D`, всё окно — одна 3D-сцена: анимированные объекты на
+  отражающем полу, качающаяся камера и панель (`TLayer3D` со штатными контролами), которая включает тени, мягкие тени,
+  ambient occlusion и отражения трассировкой лучей, а также пол.
+
+Откройте в RAD Studio `Examples.groupproj` (или один из проектов) и запустите: проекты собираются под Win64, пути
+поиска (`..\src\Canvas;..\third_party\delphidx12\src`) уже прописаны. Из командной строки:
 
 ```
 cd example
 "C:\Program Files (x86)\Embarcadero\Studio\37.0\bin\rsvars.bat"
-msbuild HelloFastCanvas.dproj /p:Config=Release /p:Platform=Win64
+msbuild Examples.groupproj /p:Config=Release /p:Platform=Win64
 ```
 
-(программа — `example\Win64\Release\HelloFastCanvas.exe`). Переменные окружения примера: `FC_BACKEND=11`
-(Direct3D 11), `FC_PRESENT=flip` (вывод окон без DirectComposition), `FC_STOCK=1` (штатный канвас FMX для сравнения).
+(программы — в `example\Win64\Release`). Переменные окружения примеров: `FC_BACKEND=11` (Direct3D 11, без трассировки
+лучей), `FC_PRESENT=flip` (вывод окон без DirectComposition), `FC_STOCK=1` (штатные канвас и 3D-контекст FMX для
+сравнения).
 
 ## Главные настройки
 
@@ -127,7 +132,7 @@ msbuild HelloFastCanvas.dproj /p:Config=Release /p:Platform=Win64
 |---|---|
 | `src/Canvas` | FastCanvas: канвас, рендерер, бэкенды Direct3D 11/12, 3D-контексты, шейдеры (HLSL и скомпилированные) |
 | `third_party/delphidx12` | Заголовки Direct3D 12 / DXGI (DelphiDX12, Apache 2.0) |
-| `example` | `HelloFastCanvas` — самая короткая проверка (проект RAD Studio) |
+| `example` | `HelloFastCanvas` и `HelloForm3D` — самые короткие проверки (проекты RAD Studio) |
 | `docs` | [USAGE.md](docs/USAGE.md) (настройки, трассировка лучей, HDR, потоки), [ARCHITECTURE.md](docs/ARCHITECTURE.md) (как устроено), [BENCHMARKS.md](docs/BENCHMARKS.md) — на английском |
 | `tools` | `compile-shaders.ps1`: HLSL в Pascal-включения (нужен только после изменения шейдеров) |
 

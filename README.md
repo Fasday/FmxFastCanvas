@@ -87,21 +87,27 @@ For Direct3D 11 leave `FastCanvasBackend` at its default and use `FastCanvas.Con
 
 ## Example
 
-[example/HelloFastCanvas.dproj](example/HelloFastCanvas.dproj): a form with animated 2D drawing, a button with a shadow
-effect, a lit 3D cube over a floor and a switch for ray-traced shadows. The window title tells what draws it. All the
-components are on the form in the designer (`HelloMain.fmx`); FastCanvas is installed in `HelloFastCanvas.dpr`.
+Two RAD Studio projects in `example`, both in the group `Examples.groupproj`. All their components are on the forms in
+the designer; FastCanvas is installed in the `.dpr`. The window title tells what draws it.
 
-Open `HelloFastCanvas.dproj` in RAD Studio and run it: the project targets Win64 and already has the search path
-(`..\src\Canvas;..\third_party\delphidx12\src`). From the command line:
+- [HelloFastCanvas.dproj](example/HelloFastCanvas.dproj): a form with animated 2D drawing, a button with a shadow
+  effect, a lit 3D cube over a floor in a `TViewport3D` and a switch for ray-traced shadows.
+- [HelloForm3D.dproj](example/HelloForm3D.dproj): a `TForm3D`, the whole window one 3D scene: animated objects on a
+  reflective floor, a swinging camera, and a panel (a `TLayer3D` with standard controls) that switches the ray-traced
+  shadows, soft shadows, ambient occlusion and reflections and the floor.
+
+Open `Examples.groupproj` (or one of the projects) in RAD Studio and run: the projects target Win64 and already have
+the search path (`..\src\Canvas;..\third_party\delphidx12\src`). From the command line:
 
 ```
 cd example
 "C:\Program Files (x86)\Embarcadero\Studio\37.0\bin\rsvars.bat"
-msbuild HelloFastCanvas.dproj /p:Config=Release /p:Platform=Win64
+msbuild Examples.groupproj /p:Config=Release /p:Platform=Win64
 ```
 
-(the program is `example\Win64\Release\HelloFastCanvas.exe`). Environment variables of the example: `FC_BACKEND=11`
-(Direct3D 11), `FC_PRESENT=flip` (windows without DirectComposition), `FC_STOCK=1` (FMX's own canvas, to compare).
+(the programs are in `example\Win64\Release`). Environment variables of the examples: `FC_BACKEND=11` (Direct3D 11:
+no ray tracing), `FC_PRESENT=flip` (windows without DirectComposition), `FC_STOCK=1` (FMX's own canvas and 3D context,
+to compare).
 
 ## Main settings
 
@@ -122,7 +128,7 @@ Global variables, set before `Application.Initialize`; all of them in [docs/USAG
 |---|---|
 | `src/Canvas` | FastCanvas: canvas, renderer, Direct3D 11/12 back ends, 3D contexts, shaders (HLSL and compiled) |
 | `third_party/delphidx12` | Direct3D 12 / DXGI headers (DelphiDX12, Apache 2.0) |
-| `example` | `HelloFastCanvas`, the smallest check (a RAD Studio project) |
+| `example` | `HelloFastCanvas` and `HelloForm3D`, the smallest checks (RAD Studio projects) |
 | `docs` | [USAGE.md](docs/USAGE.md) (settings, ray tracing, HDR, threads), [ARCHITECTURE.md](docs/ARCHITECTURE.md) (how it works), [BENCHMARKS.md](docs/BENCHMARKS.md) |
 | `tools` | `compile-shaders.ps1`: the HLSL into the Pascal includes (only after changing the shaders) |
 

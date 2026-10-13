@@ -1,0 +1,48 @@
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+    <PropertyGroup>
+        <ProjectGuid>{B47C2E19-5D3A-4C8E-9F61-2A7D0E3B5C18}</ProjectGuid>
+    </PropertyGroup>
+    <ItemGroup>
+        <Projects Include="HelloFastCanvas.dproj">
+            <Dependencies/>
+        </Projects>
+        <Projects Include="HelloForm3D.dproj">
+            <Dependencies/>
+        </Projects>
+    </ItemGroup>
+    <ProjectExtensions>
+        <Borland.Personality>Default.Personality.12</Borland.Personality>
+        <Borland.ProjectType/>
+        <BorlandProject>
+            <Default.Personality/>
+        </BorlandProject>
+    </ProjectExtensions>
+    <Target Name="HelloFastCanvas">
+        <MSBuild Projects="HelloFastCanvas.dproj"/>
+    </Target>
+    <Target Name="HelloFastCanvas:Clean">
+        <MSBuild Projects="HelloFastCanvas.dproj" Targets="Clean"/>
+    </Target>
+    <Target Name="HelloFastCanvas:Make">
+        <MSBuild Projects="HelloFastCanvas.dproj" Targets="Make"/>
+    </Target>
+    <Target Name="HelloForm3D">
+        <MSBuild Projects="HelloForm3D.dproj"/>
+    </Target>
+    <Target Name="HelloForm3D:Clean">
+        <MSBuild Projects="HelloForm3D.dproj" Targets="Clean"/>
+    </Target>
+    <Target Name="HelloForm3D:Make">
+        <MSBuild Projects="HelloForm3D.dproj" Targets="Make"/>
+    </Target>
+    <Target Name="Build">
+        <CallTarget Targets="HelloFastCanvas;HelloForm3D"/>
+    </Target>
+    <Target Name="Clean">
+        <CallTarget Targets="HelloFastCanvas:Clean;HelloForm3D:Clean"/>
+    </Target>
+    <Target Name="Make">
+        <CallTarget Targets="HelloFastCanvas:Make;HelloForm3D:Make"/>
+    </Target>
+    <Import Project="$(BDS)\Bin\CodeGear.Group.Targets" Condition="Exists('$(BDS)\Bin\CodeGear.Group.Targets')"/>
+</Project>
