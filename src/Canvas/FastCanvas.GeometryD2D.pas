@@ -26,8 +26,8 @@ type
   public
     constructor Create; override;
     destructor Destroy; override;
-    function Path(const APoints: PFastPathPoints; const ACount: Integer; const AWinding: Boolean = False): IFastGeometry;
-      override;
+    function Path(const APoints: PFastPathPoints; const ACount: Integer;
+      const AWinding: Boolean = False): IFastGeometry; override;
     function Rectangle(const R: TRectF): IFastGeometry; override;
     function RoundedRectangle(const R: TRectF; const ARx, ARy: Single): IFastGeometry; override;
     function Ellipse(const R: TRectF): IFastGeometry; override;

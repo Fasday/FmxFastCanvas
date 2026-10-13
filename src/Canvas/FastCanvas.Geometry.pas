@@ -89,8 +89,8 @@ type
     /// <summary>FMX path points: MoveTo starts a filled figure, CurveTo takes three points (two control points and
     /// the end), Close ends the figure closed; an unfinished figure ends open. AWinding: the non-zero fill rule (glyph
     /// outlines), else even-odd (FMX paths).</summary>
-    function Path(const APoints: PFastPathPoints; const ACount: Integer; const AWinding: Boolean = False): IFastGeometry;
-      virtual; abstract;
+    function Path(const APoints: PFastPathPoints; const ACount: Integer;
+      const AWinding: Boolean = False): IFastGeometry; virtual; abstract;
     function Rectangle(const R: TRectF): IFastGeometry; virtual; abstract;
     function RoundedRectangle(const R: TRectF; const ARx, ARy: Single): IFastGeometry; virtual; abstract;
     function Ellipse(const R: TRectF): IFastGeometry; virtual; abstract;
@@ -133,8 +133,9 @@ function FastGeometryEngineClass: TFastGeometryEngineClass;
 var
   Kind: TFastCanvasEngine;
 begin
+{$IFDEF MSWINDOWS}
   Kind := FastCanvasGeometryEngine;
-{$IFNDEF MSWINDOWS}
+{$ELSE}
   Kind := TFastCanvasEngine.Skia;
 {$ENDIF}
   Result := GEngines[Kind];

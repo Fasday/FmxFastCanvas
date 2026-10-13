@@ -28,7 +28,7 @@ unit FastCanvas.RenderQueue;
 interface
 
 uses
-  {$IFDEF MSWINDOWS}Winapi.Windows, {$ENDIF}System.SysUtils, System.Classes, System.SyncObjs,
+  {$IFDEF MSWINDOWS}Winapi.Windows, {$ELSE}Posix.Pthread, {$ENDIF}System.SysUtils, System.Classes, System.SyncObjs,
   System.Generics.Collections;
 
 type
@@ -126,6 +126,12 @@ type
     property BusyTicks: Int64 read FBusyTicks;
   end;
 
+{$IFNDEF MSWINDOWS}
+/// <summary>The calling thread, as Winapi.Windows.GetCurrentThreadId (TThread.ThreadID is its pthread_t here).
+/// </summary>
+function GetCurrentThreadId: TThreadID;
+{$ENDIF}
+
 implementation
 
 uses
@@ -133,6 +139,13 @@ uses
   Winapi.ActiveX, System.Math;
 {$ELSE}
   System.Math, System.Diagnostics;
+{$ENDIF}
+
+{$IFNDEF MSWINDOWS}
+function GetCurrentThreadId: TThreadID;
+begin
+  Result := TThreadID(pthread_self);
+end;
 {$ENDIF}
 
 const

@@ -308,9 +308,11 @@ type
     FOuterRegion: TFastCanvas;
     /// <summary>The bitmap of the paint PaintOf made last (bitmap brushes), taken by the next AddInstance.</summary>
     FPaintTexture: TFastBitmap;
+{$IFDEF MSWINDOWS}
     /// <summary>Window: a frame was recorded for its own swap chain (FastCanvasPresentation = Flip); a new window
     /// for the form was asked for.</summary>
     FFlipShown, FRecreateQueued: Boolean;
+{$ENDIF}
     /// <summary>How the scene in progress antialiases its text: FastCanvasTextAntialias with System resolved, and
     /// ClearType only in window frames (else Grayscale).</summary>
     FTextAntialias: TFastTextAntialias;
@@ -2780,7 +2782,9 @@ begin
   if Length(Dashes) > 0 then
   begin
     Move(Dashes[0], Tail^, Length(Dashes) * SizeOf(Single));
+{$IFDEF MSWINDOWS}
     Inc(Tail, Length(Dashes) * SizeOf(Single));
+{$ENDIF}
   end;
 {$IFDEF MSWINDOWS}
   if Length(Stops) > 0 then
@@ -2872,7 +2876,7 @@ begin
   PixelFormat := TPixelFormat.BGRA;
   B := TFastBitmap.Create(Width, Height);
   // The handle owns one reference; command chunks that use the bitmap hold their own.
-  IInterface(B)._AddRef;
+  B._AddRef;
   Result := THandle(B);
 end;
 
@@ -2883,7 +2887,7 @@ begin
   B := TFastBitmap(Bitmap);
   Bitmap := 0;
   if B <> nil then
-    IInterface(B)._Release;
+    B._Release;
 end;
 
 class function TFastCanvas.DoMapBitmap(const Bitmap: THandle; const Access: TMapAccess; var Data: TBitmapData): Boolean;

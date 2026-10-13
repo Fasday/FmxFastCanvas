@@ -244,8 +244,9 @@ function FastTextEngineClass: TFastTextEngineClass;
 var
   Kind: TFastCanvasEngine;
 begin
+{$IFDEF MSWINDOWS}
   Kind := FastCanvasTextEngine;
-{$IFNDEF MSWINDOWS}
+{$ELSE}
   Kind := TFastCanvasEngine.Skia;
 {$ENDIF}
   Result := GEngines[Kind];
@@ -436,7 +437,8 @@ procedure TFastTextLayout.DoDrawLayout(const ACanvas: TCanvas);
 begin
   if (FData <> nil) and Assigned(FastDrawLayout) then
     FastDrawLayout(ACanvas, FData, LayoutOrigin,
-      TPointF.Create(MaxSize.X - Padding.Left - Padding.Right, MaxSize.Y - Padding.Top - Padding.Bottom), Color, Opacity);
+      TPointF.Create(MaxSize.X - Padding.Left - Padding.Right, MaxSize.Y - Padding.Top - Padding.Bottom), Color,
+      Opacity);
 end;
 
 { TFastFaceGlyphs }

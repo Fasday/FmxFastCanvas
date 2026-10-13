@@ -1853,8 +1853,12 @@ begin
     FStale := True;
     Exit;
   end;
+  // Suboptimal: made again at the next frame. Not on Android, where it stays suboptimal while the display is turned
+  // from its natural orientation (the images are unrotated, preTransform).
+{$IFNDEF ANDROID}
   if Res = VK_SUBOPTIMAL_KHR then
     FStale := True;
+{$ENDIF}
   Image := FImages[Index];
   FSurface.Use(TGpuVkUse.TransferSrc);
   // After the acquire semaphore (waited for at the transfer stage); the image's old content goes.
@@ -1905,7 +1909,7 @@ begin
   Res := F.Track(C.Vk.QueuePresentKHR(C.Queue, @Info));
   if Res = VK_ERROR_DEVICE_LOST then
     Exit(DXGI_ERROR_DEVICE_REMOVED);
-  if Res <> VK_SUCCESS then
+  if (Res <> VK_SUCCESS) {$IFDEF ANDROID}and (Res <> VK_SUBOPTIMAL_KHR){$ENDIF} then
     FStale := True;
 end;
 
