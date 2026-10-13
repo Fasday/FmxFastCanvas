@@ -196,6 +196,10 @@ begin
     Desc.VS := TD3D12_SHADER_BYTECODE.Create(@DlssVSMotion[0], Length(DlssVSMotion));
     Desc.PS := TD3D12_SHADER_BYTECODE.Create(@DlssPSMotion[0], Length(DlssPSMotion));
     Desc.RasterizerState.CullMode := Culls[EnsureRange(ACull, 0, 2)];
+    // Pulled slightly towards the camera: FMX's shaders and this one compute the depth with other instructions, the
+    // test must not depend on the last bits.
+    Desc.RasterizerState.DepthBias := -64;
+    Desc.RasterizerState.SlopeScaledDepthBias := -2;
     Desc.DepthStencilState.DepthEnable := True;
     Desc.DepthStencilState.DepthWriteMask := D3D12_DEPTH_WRITE_MASK_ZERO;
     Desc.DepthStencilState.DepthFunc := D3D12_COMPARISON_FUNC_LESS_EQUAL;
@@ -475,7 +479,10 @@ begin
   S.Occurrences.AddOrSetValue(AGeometry, Occurrence + 1);
   Key := FastHashMix(AGeometry, Occurrence);
   D.DlssState := S; D.DlssPosition := APosition; D.DlssCull := ACull;
-  D.DlssCurrent := CurrentMatrix * CurrentCameraMatrix * CurrentProjectionMatrix;
+  // The matrix FMX gives its shaders (ApplyMaterial: CurrentMatrix * (camera * projection)), not the same product in
+  // another order: its rounding put the motion pass behind the scene's own depth, which then kept the vectors of
+  // moving objects out in about half of their pixels (edges shook in motion, still scenes were steady).
+  D.DlssCurrent := CurrentModelViewProjectionMatrix;
   if S.Models.TryGetValue(Key, History) and (History.Frame + 1 = S.Frame) then D.DlssPrevious := History.Matrix
   else D.DlssPrevious := D.DlssCurrent;
   History.Matrix := D.DlssCurrent; History.Frame := S.Frame;

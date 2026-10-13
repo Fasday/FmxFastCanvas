@@ -5,8 +5,9 @@ unit FastCanvas.Dlss;
   nvngx_dlss.dll of the DLSS SDK goes next to the EXE. Win64 only.
 
   One NGX session per device for the process (TFastDlss.Acquire, main thread): initialized when a 3D context first
-  uses DLSS, shut down when its last user goes (a new device gets a session of its own, so the shutdown of the old one
-  never touches it). A TFastDlssFeature per 3D context: created and evaluated by the render thread, released when the
+  uses DLSS, shut down when its last user (the DLSS state of a 3D context) goes, with its window; a new device gets a
+  session of its own, so the shutdown of the old one never touches it. Nothing is left for the unit finalization: FMX
+  frees the forms before it (DoneApplication), and NGX must not be shut down there. A TFastDlssFeature per 3D context: created and evaluated by the render thread, released when the
   GPU is done with it. The NGX parameter block is shared: every use holds the lock of the unit. }
 
 interface
@@ -21,8 +22,8 @@ type
   TFastDlssJitterTest = (Normal, Off, NegateX, NegateY, NegateXY);
   {$SCOPEDENUMS OFF}
 
-  /// <summary>The NGX session of a device (reference counted: held by the unit for the current device and by the
-  /// features made on it).</summary>
+  /// <summary>The NGX session of a device, reference counted: held by the DLSS states of the 3D contexts and by the
+  /// features made on it (the unit keeps a weak reference for Acquire).</summary>
   TFastDlss = class(TInterfacedObject)
   private
     FDevice: ID3D12Device;
@@ -135,10 +136,11 @@ const
 var
   /// <summary>The driver's NGX Core, loaded once for the process (as NVIDIA's loader does).</summary>
   NgxCoreModule: HMODULE;
-  /// <summary>The session of the current device (Acquire).</summary>
-  GShared: IInterface;
-  /// <summary>Guards the NGX parameter block and the errors of the features.</summary>
-  GLock: TObject;
+  /// <summary>The session of the current device (Acquire), weak: cleared by its destructor. Guarded by GLock.</summary>
+  GShared: TFastDlss;
+  /// <summary>Guards the NGX parameter block, the errors of the features and GShared. A critical section of the system,
+  /// never deleted: 3D contexts may still use it after the unit finalization.</summary>
+  GLock: TRTLCriticalSection;
 
 function DlssModeName(const AMode: TFastDlssMode): string;
 const
@@ -199,20 +201,33 @@ end;
 
 class function TFastDlss.Acquire(const ADevice: ID3D12Device): TFastDlss;
 begin
-  if (GShared = nil) or (TFastDlss(GShared as TObject).FDevice <> ADevice) then
-    // A new device: the old session goes when its features do.
-    GShared := TFastDlss.Create(ADevice);
-  Result := TFastDlss(GShared as TObject);
+  // The caller takes a reference at once (a new session has none).
+  EnterCriticalSection(GLock);
+  try
+    Result := GShared;
+  finally
+    LeaveCriticalSection(GLock);
+  end;
+  if (Result <> nil) and (Result.FDevice = ADevice) then
+    Exit;
+  // First use, or a new device: the old session goes when its users do.
+  Result := TFastDlss.Create(ADevice);
+  EnterCriticalSection(GLock);
+  try
+    GShared := Result;
+  finally
+    LeaveCriticalSection(GLock);
+  end;
 end;
 
 class procedure TFastDlss.Lock;
 begin
-  TMonitor.Enter(GLock);
+  EnterCriticalSection(GLock);
 end;
 
 class procedure TFastDlss.Unlock;
 begin
-  TMonitor.Exit(GLock);
+  LeaveCriticalSection(GLock);
 end;
 
 constructor TFastDlss.Create(const ADevice: ID3D12Device);
@@ -224,6 +239,13 @@ end;
 
 destructor TFastDlss.Destroy;
 begin
+  EnterCriticalSection(GLock);
+  try
+    if GShared = Self then
+      GShared := nil;
+  finally
+    LeaveCriticalSection(GLock);
+  end;
   if (FParameters <> nil) and (FDestroy <> nil) then
     TDestroyParameters(FDestroy)(FParameters);
   if FInitialized then
@@ -362,7 +384,7 @@ begin
   Result := TSize.Create(Max(1, Round(AOutput.Width * Ratios[AMode])), Max(1, Round(AOutput.Height * Ratios[AMode])));
   if not FAvailable or (AMode = TFastDlssMode.Off) then
     Exit(AOutput);
-  TMonitor.Enter(GLock);
+  EnterCriticalSection(GLock);
   try
     Callback := nil;
     if (GetPointer('DLSSOptimalSettingsCallback', Callback) = NgxSuccess) and (Callback <> nil) then
@@ -375,7 +397,7 @@ begin
         Result := TSize.Create(W, H);
     end;
   finally
-    TMonitor.Exit(GLock);
+    LeaveCriticalSection(GLock);
   end;
 end;
 
@@ -423,7 +445,7 @@ begin
     Exit;
   if (FHandle <> nil) and (FInput = AInput) and (FOutput = AOutput) and (FMode = AMode) and (FHdr = AHdr) then
     Exit(True);
-  TMonitor.Enter(GLock);
+  EnterCriticalSection(GLock);
   try
     Release;
     S.SetUInt('Width', AInput.Width);
@@ -449,7 +471,7 @@ begin
       FError := '';
     end;
   finally
-    TMonitor.Exit(GLock);
+    LeaveCriticalSection(GLock);
   end;
 end;
 
@@ -463,7 +485,7 @@ begin
   if FHandle = nil then
     Exit;
   S := FSession;
-  TMonitor.Enter(GLock);
+  EnterCriticalSection(GLock);
   try
     S.SetResource('Color', AColor);
     S.SetResource('Depth', ADepth);
@@ -481,7 +503,7 @@ begin
     S.SetUInt('DLSS.Render.Subrect.Dimensions.Height', FInput.Height);
     Result := Check(TEvaluateFeature(S.FEvaluate)(Pointer(AList), FHandle, S.FParameters, nil), 'Evaluate DLSS SR');
   finally
-    TMonitor.Exit(GLock);
+    LeaveCriticalSection(GLock);
   end;
   if Result then
     AtomicIncrement(FFrames);
@@ -489,11 +511,11 @@ end;
 
 function TFastDlssFeature.Error: string;
 begin
-  TMonitor.Enter(GLock);
+  EnterCriticalSection(GLock);
   try
     Result := FError;
   finally
-    TMonitor.Exit(GLock);
+    LeaveCriticalSection(GLock);
   end;
 end;
 
@@ -503,9 +525,5 @@ begin
 end;
 
 initialization
-  GLock := TObject.Create;
-finalization
-  // A session still held by a feature goes with it (FMX frees the last forms after the unit finalizations).
-  GShared := nil;
-  FreeAndNil(GLock);
+  InitializeCriticalSection(GLock);
 end.
