@@ -113,6 +113,43 @@ object Hello3DForm: THello3DForm
     SubdivisionsAxes = 24
     MaterialSource = MaterialYellow
   end
+  object DummyLamp: TDummy
+    Position.X = -1.200000047683716000
+    Position.Y = -2.599999904632568000
+    Position.Z = 1.000000000000000000
+    Width = 1.000000000000000000
+    Height = 1.000000000000000000
+    Depth = 1.000000000000000000
+    OnRender = DummyLampRender
+    object LightLamp: TLight
+      Color = xFF806040
+      LightType = Point
+      SpotCutOff = 180.000000000000000000
+      Width = 1.000000000000000000
+      Height = 1.000000000000000000
+      Depth = 1.000000000000000000
+    end
+    object SphereLamp: TSphere
+      Width = 0.800000011920929000
+      Height = 0.800000011920929000
+      Depth = 0.800000011920929000
+      SubdivisionsAxes = 24
+      SubdivisionsHeight = 16
+      MaterialSource = MaterialLamp
+      OnRender = SphereLampRender
+    end
+    object FloatAnimationLamp: TFloatAnimation
+      Enabled = True
+      AnimationType = InOut
+      AutoReverse = True
+      Duration = 1.600000023841858000
+      Interpolation = Sinusoidal
+      Loop = True
+      PropertyName = 'Position.Y'
+      StartValue = -2.599999904632568000
+      StopValue = -3.099999904632568000
+    end
+  end
   object MaterialFloor: TLightMaterialSource
     Diffuse = xFF6E6E6E
     Ambient = xFF262626
@@ -158,12 +195,23 @@ object Hello3DForm: THello3DForm
     Left = 880
     Top = 248
   end
+  object MaterialLamp: TColorMaterialSource
+    Color = xFFFFF2D8
+    Left = 880
+    Top = 304
+  end
+  object TimerHdr: TTimer
+    Interval = 500
+    OnTimer = TimerHdrTimer
+    Left = 880
+    Top = 360
+  end
   object LayerPanel: TLayer3D
     Transparency = True
     Projection = Screen
-    Position.X = 136.000000000000000000
+    Position.X = 146.000000000000000000
     Position.Y = 147.000000000000000000
-    Width = 240.000000000000000000
+    Width = 260.000000000000000000
     Height = 262.000000000000000000
     object RectanglePanel: TRectangle
       Align = Client
@@ -172,7 +220,7 @@ object Hello3DForm: THello3DForm
       Padding.Top = 12.000000000000000000
       Padding.Right = 14.000000000000000000
       Padding.Bottom = 12.000000000000000000
-      Size.Width = 240.000000000000000000
+      Size.Width = 260.000000000000000000
       Size.Height = 262.000000000000000000
       Size.PlatformDefault = False
       Stroke.Color = x30FFFFFF
@@ -183,7 +231,7 @@ object Hello3DForm: THello3DForm
         StyledSettings = [Family, Style]
         Position.X = 14.000000000000000000
         Position.Y = 12.000000000000000000
-        Size.Width = 212.000000000000000000
+        Size.Width = 232.000000000000000000
         Size.Height = 26.000000000000000000
         Size.PlatformDefault = False
         TextSettings.Font.Size = 16.000000000000000000
@@ -196,7 +244,7 @@ object Hello3DForm: THello3DForm
         StyledSettings = [Family, Style]
         Position.X = 14.000000000000000000
         Position.Y = 38.000000000000000000
-        Size.Width = 212.000000000000000000
+        Size.Width = 232.000000000000000000
         Size.Height = 20.000000000000000000
         Size.PlatformDefault = False
         TextSettings.Font.Size = 12.000000000000000000
@@ -211,7 +259,7 @@ object Hello3DForm: THello3DForm
         Margins.Top = 6.000000000000000000
         Position.X = 14.000000000000000000
         Position.Y = 64.000000000000000000
-        Size.Width = 212.000000000000000000
+        Size.Width = 232.000000000000000000
         Size.Height = 28.000000000000000000
         Size.PlatformDefault = False
         TabOrder = 2
@@ -225,7 +273,7 @@ object Hello3DForm: THello3DForm
         IsChecked = True
         Position.X = 14.000000000000000000
         Position.Y = 92.000000000000000000
-        Size.Width = 212.000000000000000000
+        Size.Width = 232.000000000000000000
         Size.Height = 28.000000000000000000
         Size.PlatformDefault = False
         TabOrder = 3
@@ -239,7 +287,7 @@ object Hello3DForm: THello3DForm
         IsChecked = True
         Position.X = 14.000000000000000000
         Position.Y = 120.000000000000000000
-        Size.Width = 212.000000000000000000
+        Size.Width = 232.000000000000000000
         Size.Height = 28.000000000000000000
         Size.PlatformDefault = False
         TabOrder = 4
@@ -253,7 +301,7 @@ object Hello3DForm: THello3DForm
         IsChecked = True
         Position.X = 14.000000000000000000
         Position.Y = 148.000000000000000000
-        Size.Width = 212.000000000000000000
+        Size.Width = 232.000000000000000000
         Size.Height = 28.000000000000000000
         Size.PlatformDefault = False
         TabOrder = 5
@@ -267,7 +315,7 @@ object Hello3DForm: THello3DForm
         IsChecked = True
         Position.X = 14.000000000000000000
         Position.Y = 176.000000000000000000
-        Size.Width = 212.000000000000000000
+        Size.Width = 232.000000000000000000
         Size.Height = 28.000000000000000000
         Size.PlatformDefault = False
         TabOrder = 6
@@ -278,15 +326,16 @@ object Hello3DForm: THello3DForm
       object CheckBoxHdr: TCheckBox
         Align = Top
         StyledSettings = [Family, Size, Style]
-        Enabled = False
+        IsChecked = True
         Position.X = 14.000000000000000000
         Position.Y = 204.000000000000000000
-        Size.Width = 212.000000000000000000
+        Size.Width = 232.000000000000000000
         Size.Height = 28.000000000000000000
         Size.PlatformDefault = False
         TabOrder = 7
         Text = 'HDR'
         TextSettings.FontColor = claWhite
+        OnChange = HdrChange
       end
       object LabelHdr: TLabel
         Align = Top
@@ -294,12 +343,12 @@ object Hello3DForm: THello3DForm
         Margins.Left = 24.000000000000000000
         Position.X = 38.000000000000000000
         Position.Y = 232.000000000000000000
-        Size.Width = 188.000000000000000000
+        Size.Width = 208.000000000000000000
         Size.Height = 18.000000000000000000
         Size.PlatformDefault = False
         TextSettings.Font.Size = 11.000000000000000000
         TextSettings.FontColor = xFF9A9A9A
-        Text = 'TForm3D windows are SDR so far'
+        Text = 'HDR output'
         TabOrder = 8
       end
     end

@@ -16,7 +16,8 @@ Direct3D 11 or Direct3D 12. Programs stay standard FMX programs: forms, controls
 - **Looks like FMX.** Text is antialiased in grayscale with DirectWrite's contrast and gamma, as FMX's Direct2D canvas
   draws it; windows are shown through DirectComposition, so forms drawn transparent over Mica or Acrylic look as with
   the stock canvas.
-- **HDR output** (Direct3D 12) on HDR displays: SDR content unchanged, 3D content above SDR white.
+- **HDR output** (Direct3D 12) on HDR displays, for forms and `TForm3D`: SDR content unchanged, 3D content above SDR
+  white (`DrawIntensity`: lamps, screens, the sky brighter than white without shaders; application passes).
 - **Robust.** Device loss (driver update, GPU reset) is recovered and bitmaps keep their pixels; partial repaints on
   Direct3D 12; stress runs and the Direct3D 12 debug layer stay clean; nothing leaks at shutdown.
 
@@ -95,8 +96,9 @@ the designer; FastCanvas is installed in the `.dpr`. The window title tells what
 - [HelloFastCanvas.dproj](example/HelloFastCanvas.dproj): a form with animated 2D drawing, a button with a shadow
   effect, a lit 3D cube over a floor in a `TViewport3D` and a switch for ray-traced shadows.
 - [HelloForm3D.dproj](example/HelloForm3D.dproj): a `TForm3D`, the whole window one 3D scene: animated objects on a
-  reflective floor, a swinging camera, and a panel (a `TLayer3D` with standard controls) that switches the ray-traced
-  shadows, soft shadows, ambient occlusion and reflections and the floor.
+  reflective floor, a lamp, a swinging camera, and a panel (a `TLayer3D` with standard controls) that switches the
+  ray-traced shadows, soft shadows, ambient occlusion and reflections, the floor, and HDR output: on a display in HDR
+  mode the lamp shines brighter than SDR white (`DrawIntensity`), the rest looks as in SDR.
 
 Open `Examples.groupproj` (or one of the projects) in RAD Studio and run: the projects target Win64 and already have
 the search path (`..\src\Canvas;..\third_party\delphidx12\src`). From the command line:
@@ -108,8 +110,8 @@ msbuild Examples.groupproj /p:Config=Release /p:Platform=Win64
 ```
 
 (the programs are in `example\Win64\Release`). Environment variables of the examples: `FC_BACKEND=11` (Direct3D 11:
-no ray tracing), `FC_PRESENT=flip` (windows without DirectComposition), `FC_STOCK=1` (FMX's own canvas and 3D context,
-to compare).
+no ray tracing, no HDR), `FC_PRESENT=flip` (windows without DirectComposition), `FC_STOCK=1` (FMX's own canvas and 3D
+context, to compare), `FC_HDR=force` (`HelloForm3D`: HDR output also on an SDR display).
 
 ## Main settings
 
