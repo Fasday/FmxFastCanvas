@@ -25,12 +25,18 @@ type
 
   {$SCOPEDENUMS ON}
   TFastCanvasBackend = (D3D11, D3D12);
+  /// <summary>Direct3D 12 DRED auto-breadcrumbs (FastCanvasD3D12Breadcrumbs).</summary>
+  TFastCanvasBreadcrumbs = (Off, On, Nvidia);
   {$SCOPEDENUMS OFF}
 
 var
   /// <summary>The graphics API of the canvas. Read when the device is created (the first canvas, bitmap or text
   /// layout): set it before Application.Initialize.</summary>
   FastCanvasBackend: TFastCanvasBackend = TFastCanvasBackend.D3D11;
+  /// <summary>Direct3D 12: DRED auto-breadcrumbs, the GPU records which commands it finished (for diagnosing a
+  /// removed device); costs GPU time. Nvidia: on NVIDIA graphics cards only (a hang of ray tracing structure builds on
+  /// an RTX 5080 with driver 610.88 went away with them). Read when the device is created.</summary>
+  FastCanvasD3D12Breadcrumbs: TFastCanvasBreadcrumbs = TFastCanvasBreadcrumbs.Off;
 
 type
   TFastDevice = class sealed
@@ -61,6 +67,7 @@ type
     FCreateLock: TObject;
     FUseWarp: Boolean;
     FDebug12: Boolean;
+    FVendorId: Cardinal;
     class procedure CreateDevice; static;
     class procedure CreateDevice12; static;
     class procedure CreateFactories; static;
@@ -115,6 +122,9 @@ type
     /// <summary>Direct3D 12 with the debug layer (environment variable FASTCANVAS_D3D12_DEBUG: the file its messages
     /// go to).</summary>
     class property Debug12: Boolean read FDebug12;
+    /// <summary>PCI vendor of the graphics card of the device ($10DE NVIDIA, $1002 AMD, $8086 Intel, $1414 WARP).
+    /// </summary>
+    class property AdapterVendorId: Cardinal read FVendorId;
     /// <summary>Largest texture side for the feature level.</summary>
     class function MaxTextureSize: Integer; static;
   end;
@@ -243,12 +253,18 @@ const
 var
   Device: IDXGIDevice;
   Adapter: IDXGIAdapter;
+  Desc: TDXGIAdapterDesc;
 begin
   FHardware := not FUseWarp and TryCreate(D3D_DRIVER_TYPE_HARDWARE);
   if not FHardware and not TryCreate(D3D_DRIVER_TYPE_WARP) then
     raise EFastDevice.Create('FastCanvas: cannot create a Direct3D 11 device');
+  FVendorId := 0;
   if Supports(FRefs.D3D, IDXGIDevice, Device) and Succeeded(Device.GetParent(IDXGIAdapter, Adapter)) and (Adapter <> nil) then
+  begin
     Adapter.GetParent(IDXGIFactory2, FRefs.DXGIFactory);
+    if Succeeded(Adapter.GetDesc(Desc)) then
+      FVendorId := Desc.VendorId;
+  end;
   if FRefs.DXGIFactory = nil then
     raise EFastDevice.Create('FastCanvas: DXGI 1.2 is required');
   CheckTearing;
@@ -260,6 +276,10 @@ var
   Debug: ID3D12Debug;
   Factory4: IDXGIFactory4;
   Adapter: IDXGIAdapter;
+  First: IDXGIAdapter1;
+  AdapterDesc: TDXGIAdapterDesc;
+  Desc1: TDXGIAdapterDesc1;
+  Dred: ID3D12DeviceRemovedExtendedDataSettings;
   Res: HResult;
 begin
   if not FDebug12 then
@@ -271,6 +291,19 @@ begin
   Adapter := nil;
   if FUseWarp and Supports(FRefs.DXGIFactory, IDXGIFactory4, Factory4) then
     Factory4.EnumWarpAdapter(IDXGIAdapter, Adapter);
+  // The vendor of the adapter: WARP, or the first one (D3D12CreateDevice's default).
+  FVendorId := 0;
+  if Adapter <> nil then
+  begin
+    if Succeeded(Adapter.GetDesc(AdapterDesc)) then
+      FVendorId := AdapterDesc.VendorId;
+  end
+  else if Succeeded(FRefs.DXGIFactory.EnumAdapters1(0, First)) and Succeeded(First.GetDesc1(Desc1)) then
+    FVendorId := Desc1.VendorId;
+  if ((FastCanvasD3D12Breadcrumbs = TFastCanvasBreadcrumbs.On) or
+    ((FastCanvasD3D12Breadcrumbs = TFastCanvasBreadcrumbs.Nvidia) and (FVendorId = $10DE))) and
+    Succeeded(D3D12GetDebugInterface(IID_ID3D12DeviceRemovedExtendedDataSettings, Dred)) then
+    Dred.SetAutoBreadcrumbsEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
   Res := D3D12CreateDevice(Adapter, DX12.D3DCommon.D3D_FEATURE_LEVEL_11_0, IID_ID3D12Device, @FRefs.D3D12);
   if Failed(Res) or (FRefs.D3D12 = nil) then
     raise EFastDevice.CreateFmt('FastCanvas: cannot create a Direct3D 12 device (0x%.8x)', [Cardinal(Res)]);

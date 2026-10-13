@@ -275,6 +275,37 @@ weight and antialiasing: up to 43 % of the pixels of a scene differ by more than
 0.05 µs). HDR output: the frame in an RGBA16F surface (twice the bytes of 8-bit) and one full-window pass per frame;
 measured at 1920x1080, 4–13 µs per frame (3–7 % on scenes running at 6000–7000 FPS, nothing measurable at a few hundred).
 
+## DLSS Super Resolution (Direct3D 12, NVIDIA RTX)
+
+Experimental. The 3D scene of a `TForm3D` window is drawn at a lower resolution with a subpixel jitter and NVIDIA DLSS
+reconstructs it at the window's resolution; the screen-projected 2D controls (a `TLayer3D` panel) are drawn after it,
+at full resolution.
+
+- Needs an NVIDIA RTX graphics card, a driver with NGX, a Win64 program and `nvngx_dlss.dll` of the
+  [DLSS SDK](https://github.com/NVIDIA/DLSS) (`lib/Windows_x86_64/rel`) next to the EXE. The DLL is not part of
+  FastCanvas: NVIDIA's RTX SDK license allows distributing it with an application, for systems with NVIDIA cards.
+- `TFastContext3D12.DlssMode` (`Off`, `Quality`, `Balanced`, `Performance`, `UltraPerformance`, `DLAA`), or
+  `FastContext3DDlssMode` for new contexts: a change takes effect at the next scene (new buffers).
+- `DlssAvailable`: DLSS can be used; `DlssStatus`: the mode and sizes, or why it cannot be used; `DlssFrames`:
+  evaluations so far. Asking `DlssAvailable` or switching DLSS on starts NGX for the device (once per process and
+  device; nothing happens with DLSS off).
+- `FastDlssProjectId` (`FastCanvas.Dlss`): the NGX project ID of the application, a GUID of its own. `FastDlssDataPath`:
+  where NGX writes its logs (default `%LOCALAPPDATA%\FastCanvas\NGX`).
+- `FastCanvasD3D12Breadcrumbs` (`FastCanvas.Device`): DRED breadcrumbs, `Off` by default; `Nvidia` turns them on for
+  NVIDIA cards only (a ray tracing structure build hung on an RTX 5080 with driver 610.88 without them). They cost GPU
+  time.
+
+Limitations:
+
+- `TForm3D` windows only, not `TViewport3D` or other texture contexts; no multisampling with DLSS.
+- DLSS reconstructs what is drawn before the first screen-projected (2D) object of the scene; 3D drawn after it is
+  drawn at the window's resolution without a depth buffer. FMX draws the children of a form sorted by material
+  (`TControl3D.GetMaterialForSorting`), so a screen-projected layer may come before 3D objects: `HelloForm3D` gives its
+  panel a sorting material that puts it last.
+- Motion vectors come from FMX's `MVPMatrix` of each opaque object (depth test and write); vertices animated by the
+  CPU move without them, transparent objects have none.
+- `FastDlssJitterTest` is a diagnostic: it turns the subpixel jitter off or negates what DLSS is told.
+
 ## Threads
 
 - Draw with a canvas only between `BeginScene` and `EndScene`, as FMX requires. `TBitmap.Canvas` can be used on any

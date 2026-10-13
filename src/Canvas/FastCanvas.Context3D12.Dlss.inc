@@ -1,5 +1,8 @@
 { Native DLSS SR. A low-resolution 3D scene is reconstructed before the first screen-projected draw.
-  The settings panel is composited afterward at the window's resolution. }
+  The settings panel is composited afterward at the window's resolution.
+  The state of a context lives as long as the context: made when DLSS is first wanted (DlssMode, DlssAvailable,
+  DlssStatus), with the NGX session of the device (TFastDlss.Acquire) and the context's feature; FreeBuffer drops its
+  textures only, a device loss its feature and the objects of the old device. }
 
 {$I FastCanvas.DlssShaders.inc}
 
@@ -11,7 +14,12 @@ type
 
   TDlssState = class(TInterfacedObject)
   public
+    /// <summary>The NGX session of the device (EnsureSession, main thread), nil before.</summary>
     Session: TFastDlss;
+    SessionRef: IInterface;
+    /// <summary>The context's DLSS feature, nil when DLSS is not available. Replaced only while the render thread
+    /// and the GPU do not use it (TFastDlss.Lock for readers on other threads).</summary>
+    Feature: TFastDlssFeature;
     Mode: TFastDlssMode;
     Hdr, Active: Boolean;
     InputSize, OutputSize: TSize;
@@ -25,6 +33,12 @@ type
     LastTick: UInt64;
     constructor Create;
     destructor Destroy; override;
+    /// <summary>The session of the current device and a feature on it. Main thread.</summary>
+    procedure EnsureSession;
+    /// <summary>FreeBuffer: the textures go (made again for the new size); the history starts over.</summary>
+    procedure DropTextures;
+    /// <summary>The device is gone and the GPU idle: its feature and objects go.</summary>
+    procedure DeviceLost;
     procedure MakeTextures;
     procedure EnsureRoot;
     function Pso(const AKind, AStride, AOffset, ACull: Integer; const AFormat: TDXGI_FORMAT): ID3D12PipelineState;
@@ -56,7 +70,6 @@ end;
 constructor TDlssState.Create;
 begin
   inherited;
-  Session := TFastDlss.Create(TFastDevice.D3D12);
   Psos := TDictionary<UInt64, ID3D12PipelineState>.Create;
   Models := TDictionary<UInt64, TDlssHistory>.Create;
   Occurrences := TDictionary<UInt64, Integer>.Create;
@@ -64,12 +77,57 @@ end;
 
 destructor TDlssState.Destroy;
 begin
-  // The context drains the render queue and waits for the GPU before dropping its DLSS state.
-  Session.Free;
+  // The context has drained the render queue and waited for the GPU (FreeBuffer).
+  Feature.Free;
   Psos.Free;
   Models.Free;
   Occurrences.Free;
   inherited;
+end;
+
+procedure TDlssState.EnsureSession;
+begin
+  if (Session <> nil) and (Session.Device = TFastDevice.D3D12) then
+    Exit;
+  // First use, or a new device (DeviceLost released the feature of the old one).
+  DeviceLost;
+  Session := TFastDlss.Acquire(TFastDevice.D3D12);
+  SessionRef := Session;
+  if Session.Available then
+    Feature := TFastDlssFeature.Create(Session);
+end;
+
+procedure TDlssState.DropTextures;
+begin
+  Active := False;
+  Color := nil;
+  Prepared := nil;
+  Depth := nil;
+  LinearDepth := nil;
+  Motion := nil;
+  Output := nil;
+  Frame := 0;
+  LastTick := 0;
+  Models.Clear;
+end;
+
+procedure TDlssState.DeviceLost;
+var
+  F: TFastDlssFeature;
+begin
+  DropTextures;
+  TFastDlss.Lock;
+  try
+    F := Feature;
+    Feature := nil;
+  finally
+    TFastDlss.Unlock;
+  end;
+  F.Free;
+  Root := nil;
+  Psos.Clear;
+  Session := nil;
+  SessionRef := nil;
 end;
 
 procedure TDlssState.MakeTextures;
@@ -174,6 +232,8 @@ begin
   Phases := Max(8, Ceil(8 * Sqr(OutputSize.Width / InputSize.Width)));
   I := (Frame - 1) mod Phases + 1; J := I;
   Jitter := PointF(Halton(I, 2) - 0.5, Halton(J, 3) - 0.5);
+  if FastDlssJitterTest = TFastDlssJitterTest.Off then
+    Jitter := PointF(0, 0);
   Occurrences.Clear;
 end;
 
@@ -202,7 +262,7 @@ var S: TDlssState; T: TTexture12; Ctx: TGpu12Context;
 begin
   S := TDlssState(PCmdDlssBegin(AData).State);
   Ctx := Gpu12;
-  S.Session.Configure(Ctx.List, S.InputSize, S.OutputSize, S.Mode, S.Hdr);
+  S.Feature.Configure(Ctx.List, S.InputSize, S.OutputSize, S.Mode, S.Hdr);
   T := DlssTexture(S.Motion);
   T.Use(D3D12_RESOURCE_STATE_RENDER_TARGET);
   Ctx.FlushBarriers;
@@ -220,7 +280,9 @@ begin
   Ctx := Gpu12;
   Motion := DlssTexture(S.Motion); Depth := DlssTexture(S.Depth);
   Motion.Use(D3D12_RESOURCE_STATE_RENDER_TARGET);
-  Depth.Use(D3D12_RESOURCE_STATE_DEPTH_READ);
+  // Tested, not written (the pipeline's write mask is zero): the depth buffer stays in the state of the scene's draws,
+  // no transition per object.
+  Depth.Use(D3D12_RESOURCE_STATE_DEPTH_WRITE);
   Ctx.FlushBarriers;
   Constants.Current := C.DlssCurrent; Constants.Previous := C.DlssPrevious;
   Constants.JitterNdc := PointF(2 * S.Jitter.X / S.InputSize.Width, -2 * S.Jitter.Y / S.InputSize.Height);
@@ -290,7 +352,7 @@ begin
   Output := DlssTexture(S.Output);
   Output.Use(D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
   Ctx.FlushBarriers;
-  if S.Session.Evaluate(Ctx.List, DlssTexture(S.Prepared).Resource, DlssTexture(S.LinearDepth).Resource,
+  if S.Feature.Evaluate(Ctx.List, DlssTexture(S.Prepared).Resource, DlssTexture(S.LinearDepth).Resource,
     DlssTexture(S.Motion).Resource, Output.Resource, C.Jitter, C.Reset, C.FrameTime) then
   begin
     Barrier := TD3D12_RESOURCE_BARRIER.CreateUAV(Output.Resource);
@@ -303,42 +365,66 @@ begin
   DlssInvalidateReplay;
 end;
 
+procedure TFastContext3D12.EnsureDlss;
+begin
+  if FDlssState = nil then
+    FDlssState := TDlssState.Create;
+  TDlssState(FDlssState as TObject).EnsureSession;
+end;
+
 function TFastContext3D12.GetDlssAvailable: Boolean;
 begin
-  if (Texture <> nil) or not DepthStencil then Exit(False);
-  if FDlssState = nil then FDlssState := TDlssState.Create;
-  Result := TDlssState(FDlssState as TObject).Session.Available;
+  if (Texture <> nil) or not DepthStencil then
+    Exit(False);
+  EnsureDlss;
+  Result := TDlssState(FDlssState as TObject).Feature <> nil;
 end;
 
 function TFastContext3D12.GetDlssStatus: string;
-var S: TDlssState;
+var
+  S: TDlssState;
 begin
-  if not DepthStencil then Exit('DLSS requires a depth buffer');
+  if Texture <> nil then
+    Exit('DLSS needs the window of a TForm3D');
+  if not DepthStencil then
+    Exit('DLSS needs a depth buffer');
   if not GetDlssAvailable then
-  begin
-    if FDlssState = nil then Exit('DLSS requires a window context');
     Exit(TDlssState(FDlssState as TObject).Session.Error);
-  end;
-  TFastDevice.Lock;
+  // Not the device lock: the render thread holds it for whole frames.
+  S := TDlssState(FDlssState as TObject);
+  TFastDlss.Lock;
   try
-    S := TDlssState(FDlssState as TObject);
-    if S.Session.Error <> '' then Exit(S.Session.Error);
-    if (FDlssMode = TFastDlssMode.Off) or not S.Active then Exit('Off');
-    if S.Session.Frames = 0 then Exit('Starting DLSS SR...');
+    if S.Feature = nil then
+      Exit('Off');
+    Result := S.Feature.Error;
+    if Result <> '' then
+      Exit;
+    if (FDlssMode = TFastDlssMode.Off) or not S.Active then
+      Exit('Off');
+    if S.Feature.Frames = 0 then
+      Exit('Starting DLSS SR...');
     Result := Format('%s: %dx%d -> %dx%d', [DlssModeName(FDlssMode), S.InputSize.Width, S.InputSize.Height,
       S.OutputSize.Width, S.OutputSize.Height]);
   finally
-    TFastDevice.Unlock;
+    TFastDlss.Unlock;
   end;
 end;
 
 function TFastContext3D12.GetDlssFrames: Int64;
+var
+  S: TDlssState;
 begin
   Result := 0;
-  TFastDevice.Lock;
+  if FDlssState = nil then
+    Exit;
+  S := TDlssState(FDlssState as TObject);
+  TFastDlss.Lock;
   try
-    if FDlssState <> nil then Result := TDlssState(FDlssState as TObject).Session.Frames;
-  finally TFastDevice.Unlock; end;
+    if S.Feature <> nil then
+      Result := S.Feature.Frames;
+  finally
+    TFastDlss.Unlock;
+  end;
 end;
 
 procedure TFastContext3D12.FinishDlssScene;
@@ -352,8 +438,15 @@ begin
   Target := TTexture12(DrawTarget);
   C := Rec(HandleDlssFinish, SizeOf(TCmdDlssFinish), FDlssState);
   C.State := S; C.Target := Target; C.Jitter := S.Jitter; C.Reset := S.Frame = 1;
-  Now := GetTickCount64;
-  if S.LastTick = 0 then C.FrameTime := 16.667 else C.FrameTime := EnsureRange(Now - S.LastTick, UInt64(1), UInt64(1000));
+  if FastDlssJitterTest in [TFastDlssJitterTest.NegateX, TFastDlssJitterTest.NegateXY] then
+    C.Jitter.X := -C.Jitter.X;
+  if FastDlssJitterTest in [TFastDlssJitterTest.NegateY, TFastDlssJitterTest.NegateXY] then
+    C.Jitter.Y := -C.Jitter.Y;
+  Now := TStopwatch.GetTimeStamp;
+  if S.LastTick = 0 then
+    C.FrameTime := 16.667
+  else
+    C.FrameTime := EnsureRange((Now - S.LastTick) * 1000 / TStopwatch.Frequency, 0.1, 1000);
   S.LastTick := Now;
   Keep(Target);
   RecordTarget;

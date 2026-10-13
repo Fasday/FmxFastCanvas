@@ -4,25 +4,23 @@ program HelloForm3D;
   which 3D context draws it; the panel switches the ray-traced effects (Direct3D 12, DXR 1.1) and HDR output.
 
   Environment variables: FC_BACKEND=11 (Direct3D 11 instead of 12: no ray tracing, no HDR), FC_STOCK=1 (FMX's own 3D
-  context, to compare), FC_HDR=force (the HDR switch gives HDR output on any display, also an SDR one). }
+  context, to compare), FC_HDR=force (the HDR switch gives HDR output on any display, also an SDR one), FC_DRED=0|1
+  (DRED breadcrumbs off, or on every card; default: NVIDIA cards), FC_DLSS_JITTER=off|-x|-y|-xy (DLSS diagnostics).
+  DLSS (NVIDIA RTX): nvngx_dlss.dll of the DLSS SDK next to the program. }
 
 uses
   System.StartUpCopy,
   System.SysUtils,
-  Winapi.Windows,
-  DX12.D3D12,
   FMX.Forms,
   FastCanvas.Device,
   FastCanvas.Canvas,
   FastCanvas.Hdr,
   FastCanvas.Context3D11,
   FastCanvas.Context3D12,
+  FastCanvas.Dlss,
   Hello3DMain in 'Hello3DMain.pas' {Hello3DForm};
 
 {$R *.res}
-
-var
-  DredSettings: ID3D12DeviceRemovedExtendedDataSettings;
 
 begin
   ReportMemoryLeaksOnShutdown := True;
@@ -34,14 +32,23 @@ begin
       FastCanvasBackend := TFastCanvasBackend.D3D11
     else
       FastCanvasBackend := TFastCanvasBackend.D3D12;
-    // GPU breadcrumbs avoid a DXR build hang on affected NVIDIA drivers (RTX 5080, 610.88).
-    // Keep the workaround local to this demo; FC_DRED=0 allows a comparison without it.
-    if (FastCanvasBackend = TFastCanvasBackend.D3D12) and (GetEnvironmentVariable('FC_DRED') <> '0') and
-      Succeeded(D3D12GetDebugInterface(IID_ID3D12DeviceRemovedExtendedDataSettings, DredSettings)) then
-    begin
-      DredSettings.SetAutoBreadcrumbsEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
-      DredSettings := nil;
-    end;
+    // DRED breadcrumbs on NVIDIA cards (a ray tracing structure build hung on an RTX 5080 with driver 610.88 without
+    // them); FC_DRED=0: off, FC_DRED=1: on every card.
+    if GetEnvironmentVariable('FC_DRED') = '0' then
+      FastCanvasD3D12Breadcrumbs := TFastCanvasBreadcrumbs.Off
+    else if GetEnvironmentVariable('FC_DRED') = '1' then
+      FastCanvasD3D12Breadcrumbs := TFastCanvasBreadcrumbs.On
+    else
+      FastCanvasD3D12Breadcrumbs := TFastCanvasBreadcrumbs.Nvidia;
+    // Diagnostics of DLSS on NVIDIA cards: FC_DLSS_JITTER=off|-x|-y|-xy.
+    if SameText(GetEnvironmentVariable('FC_DLSS_JITTER'), 'off') then
+      FastDlssJitterTest := TFastDlssJitterTest.Off
+    else if SameText(GetEnvironmentVariable('FC_DLSS_JITTER'), '-x') then
+      FastDlssJitterTest := TFastDlssJitterTest.NegateX
+    else if SameText(GetEnvironmentVariable('FC_DLSS_JITTER'), '-y') then
+      FastDlssJitterTest := TFastDlssJitterTest.NegateY
+    else if SameText(GetEnvironmentVariable('FC_DLSS_JITTER'), '-xy') then
+      FastDlssJitterTest := TFastDlssJitterTest.NegateXY;
     InstallFastCanvas;
     if FastCanvasBackend = TFastCanvasBackend.D3D12 then
       InstallFastContext3D12

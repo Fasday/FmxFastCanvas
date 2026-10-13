@@ -9,6 +9,7 @@ object Hello3DForm: THello3DForm
   FormFactor.Height = 480
   FormFactor.Devices = [Desktop]
   OnCreate = FormCreate
+  OnRender = FormRender
   Camera = Camera1
   UsingDesignCamera = False
   DesignerMasterStyle = 0
@@ -211,14 +212,21 @@ object Hello3DForm: THello3DForm
     Left = 880
     Top = 360
   end
+  object TimerPause: TTimer
+    Enabled = False
+    Interval = 15
+    OnTimer = TimerPauseTimer
+    Left = 880
+    Top = 420
+  end
   object LayerPanel: TLayer3D
     Transparency = True
     Projection = Screen
     ZWrite = False
     Position.X = 146.000000000000000000
-    Position.Y = 207.000000000000000000
+    Position.Y = 236.000000000000000000
     Width = 260.000000000000000000
-    Height = 382.000000000000000000
+    Height = 440.000000000000000000
     object RectanglePanel: TRectangle
       Align = Client
       Fill.Color = xD0202020
@@ -227,7 +235,7 @@ object Hello3DForm: THello3DForm
       Padding.Right = 14.000000000000000000
       Padding.Bottom = 12.000000000000000000
       Size.Width = 260.000000000000000000
-      Size.Height = 382.000000000000000000
+      Size.Height = 440.000000000000000000
       Size.PlatformDefault = False
       Stroke.Color = x30FFFFFF
       XRadius = 8.000000000000000000
@@ -235,7 +243,7 @@ object Hello3DForm: THello3DForm
       object LayoutSettings: TLayout
         Align = Client
         Size.Width = 232.000000000000000000
-        Size.Height = 358.000000000000000000
+        Size.Height = 416.000000000000000000
         Size.PlatformDefault = False
         object LabelTitle: TLabel
           Align = Top
@@ -412,6 +420,32 @@ object Hello3DForm: THello3DForm
             Text = 'Off'
             TabOrder = 2
           end
+        end
+        object CheckBoxPause: TCheckBox
+          Align = Top
+          StyledSettings = [Family, Size, Style]
+          Position.Y = 362.000000000000000000
+          Size.Width = 232.000000000000000000
+          Size.Height = 28.000000000000000000
+          Size.PlatformDefault = False
+          TabOrder = 10
+          Text = 'Pause animation'
+          TextSettings.FontColor = claWhite
+          OnChange = PauseChange
+        end
+        object LabelFps: TLabel
+          Align = Top
+          StyledSettings = [Family, Style]
+          Margins.Left = 24.000000000000000000
+          Position.X = 24.000000000000000000
+          Position.Y = 390.000000000000000000
+          Size.Width = 208.000000000000000000
+          Size.Height = 20.000000000000000000
+          Size.PlatformDefault = False
+          TextSettings.Font.Size = 11.000000000000000000
+          TextSettings.FontColor = xFF9A9A9A
+          Text = 'FPS'
+          TabOrder = 11
         end
       end
     end

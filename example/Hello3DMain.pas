@@ -54,6 +54,7 @@ type
     MaterialYellow: TLightMaterialSource;
     MaterialLamp: TColorMaterialSource;
     TimerHdr: TTimer;
+    TimerPause: TTimer;
     LayerPanel: TLayer3D;
     RectanglePanel: TRectangle;
     LabelTitle: TLabel;
@@ -70,7 +71,12 @@ type
     CheckBoxDlss: TCheckBox;
     ComboBoxDlss: TComboBox;
     LabelDlss: TLabel;
+    CheckBoxPause: TCheckBox;
+    LabelFps: TLabel;
     procedure FormCreate(Sender: TObject);
+    procedure FormRender(Sender: TObject; Context: TContext3D);
+    procedure PauseChange(Sender: TObject);
+    procedure TimerPauseTimer(Sender: TObject);
     procedure RayTracingChange(Sender: TObject);
     procedure HdrChange(Sender: TObject);
     procedure DlssChange(Sender: TObject);
@@ -80,6 +86,9 @@ type
   private
     /// <summary>How bright the lamp is drawn, in SDR white: the display's headroom with HDR output, else 1.</summary>
     FLampIntensity: Single;
+    /// <summary>Frames drawn since FFpsStart (TimerHdr shows the rate).</summary>
+    FFrames: Integer;
+    FFpsStart: TDateTime;
     function Describe: string;
     procedure UpdateHdr;
     procedure UpdateDlss;
@@ -231,10 +240,39 @@ begin
 end;
 
 procedure THello3DForm.TimerHdrTimer(Sender: TObject);
+var
+  Seconds: Double;
 begin
   // The window may have moved to another display, Windows HDR or the SDR brightness may have changed.
   UpdateHdr;
   UpdateDlss;
+  Seconds := (Now - FFpsStart) * SecsPerDay;
+  if (FFpsStart <> 0) and (Seconds > 0) then
+    LabelFps.Text := Format('%.0f frames per second', [FFrames / Seconds]);
+  FFrames := 0;
+  FFpsStart := Now;
+end;
+
+procedure THello3DForm.FormRender(Sender: TObject; Context: TContext3D);
+begin
+  Inc(FFrames);
+end;
+
+procedure THello3DForm.PauseChange(Sender: TObject);
+var
+  I: Integer;
+begin
+  // A still scene: DLSS edges that move then come from the jitter, not from motion. Frames go on (DLSS works over
+  // a series of frames).
+  for I := 0 to ComponentCount - 1 do
+    if Components[I] is TFloatAnimation then
+      TFloatAnimation(Components[I]).Pause := CheckBoxPause.IsChecked;
+  TimerPause.Enabled := CheckBoxPause.IsChecked;
+end;
+
+procedure THello3DForm.TimerPauseTimer(Sender: TObject);
+begin
+  Invalidate;
 end;
 
 procedure THello3DForm.UpdateHdr;

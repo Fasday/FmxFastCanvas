@@ -56,3 +56,13 @@ FastCanvas is written from scratch. The FireMonkey sources were read for the con
 `TTextLayout`, `TContext3D`, the way forms paint); the source references in comments (`FMX.Graphics.pas:980-1229`
 and similar) point to the RAD Studio 13 sources and contain no code from them. Building FastCanvas requires a RAD
 Studio / Delphi license.
+
+## NVIDIA DLSS SDK (NVIDIA RTX SDK License)
+
+`src/Canvas/FastCanvas.Dlss.pas` declares the NGX functions, parameter names and the `NVSDK_NGX_Parameter` interface
+after `nvsdk_ngx.h`, `nvsdk_ngx_defs.h` and `nvsdk_ngx_params.h` of the NVIDIA DLSS SDK. This software contains source
+code provided by NVIDIA Corporation. `nvngx_dlss.dll` is not part of this repository: it comes with the DLSS SDK under
+the NVIDIA RTX SDK license (distribution with an application; DLSS is licensed for systems with NVIDIA graphics cards).
+
+- Upstream: https://github.com/NVIDIA/DLSS
+- License: https://github.com/NVIDIA/DLSS/blob/main/LICENSE.txt

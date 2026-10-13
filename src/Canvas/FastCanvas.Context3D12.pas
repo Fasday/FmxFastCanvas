@@ -168,6 +168,9 @@ type
     FDlssMode, FDlssBuiltMode: TFastDlssMode;
     FDlssState: IInterface;
     FDlssPhase: Boolean;
+    /// <summary>The DLSS state of the context and the session of the device (made on first use). Main thread.
+    /// </summary>
+    procedure EnsureDlss;
     function GetDlssAvailable: Boolean;
     function GetDlssStatus: string;
     function GetDlssFrames: Int64;
@@ -366,7 +369,7 @@ implementation
 uses
   DX12.D3D12, DX12.D3DCommon, DX12.DXGI, DX12.DXGI1_2, DX12.DXGI1_4,
   Winapi.Windows, FMX.Platform.Win, FastCanvas.Device, FastCanvas.Gpu, FastCanvas.Gpu12, FastCanvas.Bridge,
-  System.Classes, FMX.Forms3D, FastCanvas.Service, FastCanvas.Context3D11, FastCanvas.Hdr;
+  System.Classes, System.Diagnostics, FMX.Forms3D, FastCanvas.Service, FastCanvas.Context3D11, FastCanvas.Hdr;
 
 type
   // Winapi.Windows declares a TBitmap too.
@@ -1867,12 +1870,13 @@ begin
   end;
   FDlssBuiltMode := FDlssMode;
   DepthSize := Px;
-  if Texture = nil then
+  // DLSS (a window with a depth buffer): the session of the device is made when DLSS is first wanted, and stays.
+  if (Texture = nil) and DepthStencil and (FDlssMode <> TFastDlssMode.Off) then
   begin
-    if FDlssState = nil then FDlssState := TDlssState.Create;
+    EnsureDlss;
     Dlss := TDlssState(FDlssState as TObject);
     Dlss.Mode := FDlssMode;
-    Dlss.Active := (FDlssMode <> TFastDlssMode.Off) and DepthStencil and Dlss.Session.Available;
+    Dlss.Active := Dlss.Feature <> nil;
     if Dlss.Active then
     begin
       Dlss.OutputSize := Px;
@@ -1909,7 +1913,8 @@ begin
   if DepthStencil then
     FDepth := NewTexture(DepthSize.Width, DepthSize.Height, 1, FSamples, DXGI_FORMAT_D24_UNORM_S8_UINT,
       D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL, D3D12_RESOURCE_STATE_DEPTH_WRITE);
-  if FDlssState <> nil then TDlssState(FDlssState as TObject).Depth := FDepth;
+  if (FDlssState <> nil) and TDlssState(FDlssState as TObject).Active then
+    TDlssState(FDlssState as TObject).Depth := FDepth;
 end;
 
 procedure TFastContext3D12.DoCreateBuffer;
@@ -1943,7 +1948,9 @@ begin
     FSwapChain := nil;
   end;
   FDlssPhase := False;
-  FDlssState := nil;
+  // The GPU is done with the DLSS textures; the feature is made again for new sizes (its session stays).
+  if FDlssState <> nil then
+    TDlssState(FDlssState as TObject).DropTextures;
 end;
 
 function TFastContext3D12.DrawTarget: TObject;
@@ -3323,6 +3330,10 @@ begin
     C.FreeBuffer;
   TFastContext3D.ResetShaderObjects;
   TGpu12Backend.WaitIdle;
+  // DLSS features and pipelines of the old device (the session of the new one is made at the next use).
+  for C in GContexts do
+    if C.FDlssState <> nil then
+      TDlssState(C.FDlssState as TObject).DeviceLost;
   FreeAndNil(G);
 end;
 
