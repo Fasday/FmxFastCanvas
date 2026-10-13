@@ -9,7 +9,8 @@ implementation
 
 uses
   System.SysUtils, System.TypInfo, FMX.Graphics, Bench.Config, Bench.Canvases,
-  FastCanvas.Context3D11, FastCanvas.Context3D12, FastCanvas.Device, FastCanvas.Hdr, FastCanvas.Canvas;
+  FastCanvas.Context3D11, FastCanvas.Context3D12, FastCanvas.Device, FastCanvas.Hdr, FastCanvas.Geometry,
+  FastCanvas.Text, FastCanvas.Canvas;
 
 
 function FastCanvasOptionsText(const AOptions: TFastCanvasOptions): string;
@@ -54,7 +55,8 @@ begin
           SameText(Name, 'RayShadows') or SameText(Name, 'RaySoft') or SameText(Name, 'RayAO') or
           SameText(Name, 'NoPartial') or SameText(Name, 'RayReflect') or SameText(Name, 'HdrForce') or
           SameText(Name, 'HdrAuto') or SameText(Name, 'Composition') or SameText(Name, 'ClearType') or
-          SameText(Name, 'TextAliased') or SameText(Name, 'TextSystem') then
+          SameText(Name, 'TextAliased') or SameText(Name, 'TextSystem') or SameText(Name, 'SkiaGeometry') or
+          SameText(Name, 'SkiaText') then
           Continue;
         if SameText(Name, 'none') then
         begin
@@ -115,6 +117,15 @@ begin
         FastCanvasTextAntialias := TFastTextAntialias.System
       else
         FastCanvasTextAntialias := TFastTextAntialias.Grayscale;
+      // The CPU engines: Skia's (the engines of Android and Linux) or Direct2D's and DirectWrite's.
+      if (ABaseOptions + ',' + AConfig.CanvasOpts).Contains('SkiaGeometry') then
+        FastCanvasGeometryEngine := TFastCanvasEngine.Skia
+      else
+        FastCanvasGeometryEngine := TFastCanvasEngine.Native;
+      if (ABaseOptions + ',' + AConfig.CanvasOpts).Contains('SkiaText') then
+        FastCanvasTextEngine := TFastCanvasEngine.Skia
+      else
+        FastCanvasTextEngine := TFastCanvasEngine.Native;
       InstallFastCanvas;
       // The 3D context (TEffect filters, TViewport3D) on the canvas device: our own; SeparateContext3D keeps the stock
       // context on its own device. Vulkan has no 3D context of its own yet.
@@ -137,6 +148,8 @@ begin
       else
         AText := 'gray-atlas';
       end;
+      if FastCanvasTextEngine = TFastCanvasEngine.Skia then
+        AText := 'skia-' + AText;
     end);
   FindBenchCanvas(AName).Options :=
     function: string
@@ -171,6 +184,10 @@ begin
         TFastTextAntialias.Aliased: Result := Result + '+TextAliased';
         TFastTextAntialias.System: Result := Result + '+TextSystem';
       end;
+      if FastCanvasGeometryEngine = TFastCanvasEngine.Skia then
+        Result := Result + '+SkiaGeometry';
+      if FastCanvasTextEngine = TFastCanvasEngine.Skia then
+        Result := Result + '+SkiaText';
     end;
   FindBenchCanvas(AName).RenderBusyMs :=
     function: Double
@@ -239,6 +256,9 @@ begin
     'FastCanvas on Direct3D 12 with windows shown by DirectComposition (composition swap chains)',
     'D3D12,Composition');
   RegisterFastCanvas('fcvk', 'FastCanvas on Vulkan', 'Vulkan,SeparateContext3D');
+  RegisterFastCanvas('fcvkskia',
+    'FastCanvas on Vulkan with the Skia geometry and text engines (those of Android and Linux)',
+    'Vulkan,SeparateContext3D,SkiaGeometry,SkiaText');
   RegisterFastCanvas('fcst', 'FastCanvas without the render thread (commands executed on the main thread)',
     'MainThread');
   RegisterFastCanvas('fcheapsleep', 'FastCanvas with the memory manager sleeping on lock contention (RTL default)',

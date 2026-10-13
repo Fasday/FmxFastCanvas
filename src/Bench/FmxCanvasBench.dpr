@@ -28,6 +28,8 @@ uses
   FastCanvas.Gpu12 in '..\Canvas\FastCanvas.Gpu12.pas',
   FastCanvas.GpuVk in '..\Canvas\FastCanvas.GpuVk.pas',
   FastCanvas.Text in '..\Canvas\FastCanvas.Text.pas',
+  FastCanvas.GeometrySkia in '..\Canvas\FastCanvas.GeometrySkia.pas',
+  FastCanvas.TextSkia in '..\Canvas\FastCanvas.TextSkia.pas',
   FastCanvas.Canvas in '..\Canvas\FastCanvas.Canvas.pas',
   FastCanvas.Context3D in '..\Canvas\FastCanvas.Context3D.pas',
   FastCanvas.Context3D11 in '..\Canvas\FastCanvas.Context3D11.pas',
