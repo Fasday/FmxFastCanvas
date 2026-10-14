@@ -198,6 +198,9 @@ begin
   // finalizations, and the canvas service shuts the device down then (FastCanvas.Service).
   FCreateLock := TObject.Create;
   New(FRefs);
+  // New sets only the managed fields (the interfaces of Windows) to nil; Vulkan and the lock would be what the heap
+  // had there (on Android often not nil: the device was taken as made).
+  FillChar(FRefs^, SizeOf(TRefs), 0);
 {$IFNDEF MSWINDOWS}
   FRefs.DeviceLock := TObject.Create;
 {$ENDIF}

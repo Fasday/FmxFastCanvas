@@ -585,6 +585,13 @@ type
     FPersistCount: Integer;
     FTransKeys: array[0..1] of TArray<UInt64>;
     FTransCount: array[0..1] of Integer;
+    /// <summary>Layouts with a color image, the one drawn longest ago first (a reference each), and the bytes of their
+    /// images: past ColorImageBudget the images drawn longest ago go (made again when drawn again); a layout whose text
+    /// changes every frame made one image per frame for every layout of the cache.</summary>
+    FColorLayouts: TList<TFastLayoutData>;
+    FColorBytes: Int64;
+    /// <summary>Color images replaced in the frame in progress, which drew them: kept to its end.</summary>
+    FColorRetired: TList<IInterface>;
 {$IFDEF MSWINDOWS}
     /// <summary>Gradient brushes by stop collection: points, opacity and transform are set before every use.</summary>
     FLinear: TDictionary<UInt64, ID2D1LinearGradientBrush>;
@@ -616,6 +623,9 @@ type
     procedure DrawText(const C: PCmdText);
     procedure DrawRunOutlines(const C: PCmdText; const ARun: TFastGlyphRun; const AColor: Cardinal);
     procedure DrawColorLayout(const C: PCmdText; const AData: TFastLayoutData);
+    procedure KeepColorImage(const AData: TFastLayoutData; const AImage: TFastBitmap; const AKey: UInt64);
+    procedure TouchColorImage(const AData: TFastLayoutData);
+    procedure ReleaseColorImages;
 {$IFDEF MSWINDOWS}
     procedure DrawTextD2D(const C: PCmdText; const AData: TFastLayoutData);
     function Brush(const C: PCmdD2D): ID2D1Brush;
@@ -2987,6 +2997,8 @@ begin
   FSink := TFastEdgeSink.Create;
   FEdgeResetFrame := -100;
   FTransFrame := -1;
+  FColorLayouts := TList<TFastLayoutData>.Create;
+  FColorRetired := TList<IInterface>.Create;
 {$IFDEF MSWINDOWS}
   FRadial := TDictionary<UInt64, ID2D1RadialGradientBrush>.Create;
   FD2DClip := -1;
@@ -2996,6 +3008,9 @@ end;
 destructor TPlayer.Destroy;
 begin
   LeaveD2D;
+  ReleaseColorImages;
+  FColorLayouts.Free;
+  FColorRetired.Free;
   FGlyphs.Free;
   FPaths.Free;
 {$IFDEF MSWINDOWS}
@@ -3092,6 +3107,8 @@ begin
     FGpu.SetRegion(0, 0);
     FGpu.SetDualBlend(False);
     Inc(FFrame);
+    // The frame's draws are with the GPU now.
+    FColorRetired.Clear;
     if FCanvas = nil then
       Exit;
     T := FCanvas.FTarget;
@@ -3939,9 +3956,90 @@ begin
   end;
 end;
 
+function ColorImageBytes(const AData: TFastLayoutData): Int64;
+var
+  B: TFastBitmap;
+begin
+  B := TFastBitmap(AData.ColorImage as TObject);
+  Result := Int64(B.FWidth) * B.FHeight * 4;
+end;
+
+/// <summary>AImage becomes the color image of AData, at the end of the list of color images; the images drawn
+/// longest ago go first while the images take more than the budget (not those drawn in this frame, which the
+/// renderer may still have to bind).</summary>
+procedure TPlayer.KeepColorImage(const AData: TFastLayoutData; const AImage: TFastBitmap; const AKey: UInt64);
+const
+  ColorImageBudget = 32 * 1024 * 1024;
+  ColorImageCount = 256;
+var
+  I: Integer;
+  D: TFastLayoutData;
+  Bytes: Int64;
+begin
+  I := FColorLayouts.IndexOf(AData);
+  if I >= 0 then
+  begin
+    // Another scale or color: the image is replaced (kept to the end of the frame when this frame drew it).
+    Dec(FColorBytes, ColorImageBytes(AData));
+    if AData.ColorFrame = FFrame then
+      FColorRetired.Add(AData.ColorImage);
+    AData.ColorImage := nil;
+    FColorLayouts.Delete(I);
+    AData.Release;
+  end;
+  Bytes := Int64(AImage.FWidth) * AImage.FHeight * 4;
+  while (FColorLayouts.Count > 0) and ((FColorBytes + Bytes > ColorImageBudget) or
+    (FColorLayouts.Count >= ColorImageCount)) do
+  begin
+    D := FColorLayouts[0];
+    if D.ColorFrame = FFrame then
+      Break;
+    Dec(FColorBytes, ColorImageBytes(D));
+    D.ColorImage := nil;
+    FColorLayouts.Delete(0);
+    D.Release;
+  end;
+  AData.ColorImage := AImage;
+  AData.ColorKey := AKey;
+  AData.ColorFrame := FFrame;
+  AData.AddRef;
+  FColorLayouts.Add(AData);
+  Inc(FColorBytes, Bytes);
+end;
+
+/// <summary>AData's color image is drawn in this frame: to the end of the list (once per frame).</summary>
+procedure TPlayer.TouchColorImage(const AData: TFastLayoutData);
+var
+  I: Integer;
+begin
+  if AData.ColorFrame = FFrame then
+    Exit;
+  AData.ColorFrame := FFrame;
+  I := FColorLayouts.IndexOf(AData);
+  if (I >= 0) and (I < FColorLayouts.Count - 1) then
+  begin
+    FColorLayouts.Delete(I);
+    FColorLayouts.Add(AData);
+  end;
+end;
+
+procedure TPlayer.ReleaseColorImages;
+var
+  D: TFastLayoutData;
+begin
+  FColorRetired.Clear;
+  for D in FColorLayouts do
+  begin
+    D.ColorImage := nil;
+    D.Release;
+  end;
+  FColorLayouts.Clear;
+  FColorBytes := 0;
+end;
+
 /// <summary>A layout with color glyphs (emoji): rasterized once on the CPU by the text engine (DirectWrite: a software
 /// Direct2D target over a WIC bitmap, which renders color fonts as Direct2D does), kept with the layout data for this
-/// scale and color, and drawn as an image.</summary>
+/// scale and color (KeepColorImage), and drawn as an image.</summary>
 procedure TPlayer.DrawColorLayout(const C: PCmdText; const AData: TFastLayoutData);
 var
   M: TGpuAffine;
@@ -3972,7 +4070,10 @@ begin
   Key := Fnv(@Scale, SizeOf(Single), Fnv(@C.Color, SizeOf(Cardinal)));
   Key := Fnv(@Gen, SizeOf(Integer), Key);
   if (AData.ColorImage <> nil) and (AData.ColorKey = Key) then
-    B := TFastBitmap(AData.ColorImage as TObject)
+  begin
+    B := TFastBitmap(AData.ColorImage as TObject);
+    TouchColorImage(AData);
+  end
   else
   begin
     // The layout at this scale, one pixel of margin around the ink.
@@ -3984,8 +4085,7 @@ begin
       B.Free;
       Exit;
     end;
-    AData.ColorImage := B;
-    AData.ColorKey := Key;
+    KeepColorImage(AData, B, Key);
   end;
   LeaveD2D;
   // The image covers Ink widened by one pixel on every side, in local space at the text origin.
@@ -4450,6 +4550,12 @@ begin
     NeverSleepOnMMThreadContention := True;
   RegisterTextLayout;
   InstallCanvasService(TFastCanvas, ShutdownFastCanvas);
+{$IFNDEF MSWINDOWS}
+  // Android registers TCanvasGpu as a default class too, and FMX takes a default class that needs a GPU surface
+  // (TCanvasStyle.NeedGPUSurface) unless software canvases are enabled; then it takes the first default class that
+  // needs none: ours, registered first (FMX.Graphics.pas, TCanvasManager.GetDefaultCanvas; FMX.Skia does the same).
+  TCanvasManager.EnableSoftwareCanvas(True);
+{$ENDIF}
   GInstalled := True;
 {$IFDEF MSWINDOWS}
   FastBridge.Device := BridgeDevice;

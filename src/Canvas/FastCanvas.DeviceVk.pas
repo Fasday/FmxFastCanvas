@@ -257,6 +257,7 @@ var
   Cmds: TVulkanCommands;
   Res: TVkResult;
   I: Integer;
+  Names: string;
 begin
   // Our own reference: the loader stays until Destroy, whatever the unit Vulkan does in its finalization.
   FLibrary := LoadLibrary(LoaderName);
@@ -277,7 +278,12 @@ begin
   if Count > 0 then
     vkEnumerateInstanceExtensionProperties(nil, @Count, @Available[0]);
   if not HasExtension(Available, SurfaceExtension) then
-    raise EFastVulkan.Create('FastCanvas: the Vulkan loader has no ' + SurfaceExtension);
+  begin
+    Names := '';
+    for I := 0 to High(Available) do
+      Names := Names + ' ' + string(AnsiString(PAnsiChar(@Available[I].extensionName[0])));
+    raise EFastVulkan.CreateFmt('FastCanvas: the Vulkan loader has no %s (it has%s)', [SurfaceExtension, Names]);
+  end;
   ExtNames := [PAnsiChar(VK_KHR_SURFACE_EXTENSION_NAME), PAnsiChar(SurfaceExtension)];
   Validation := False;
   if FDebug then

@@ -6,7 +6,8 @@ unit FastCanvas.TextSkia;
   TFastSkiaTextLayout lays text out with a Skia paragraph (SkParagraph: shaping with HarfBuzz, line breaking, bidi,
   font fallback of the platform's font manager). The paragraph's glyph runs (its visitor) become the layout's runs
   right away, with the ink bounds of their glyphs (the overhang) and the underlines and strikethroughs, which the
-  canvas draws itself as rectangles. The paragraph stays for hit testing and regions. Glyph coverage is the unhinted
+  canvas draws itself as rectangles. The paragraph is made again for hit testing and regions (a cached layout does
+  not keep it: tens of kilobytes each, thousands of layouts). Glyph coverage is the unhinted
   outline (SkFont.getPath) filled by Skia, antialiased or aliased, at the subpixel position: plain coverage, which the
   canvas corrects for gamma and contrast as it does DirectWrite's. Layouts with color glyphs (emoji fonts) are painted
   by Skia into a raster surface.
@@ -46,16 +47,19 @@ type
     FMaxLines: NativeUInt;
     /// <summary>The width the paragraph is laid out at.</summary>
     FLayoutAt: Single;
+    FParagraph: ISkParagraph;
     function MakeParagraph(const AColor: TAlphaColor; const APaintDecorations: Boolean): ISkParagraph;
     procedure Analyse;
   protected
     procedure CollectRuns; override;
   public
-    Paragraph: ISkParagraph;
     /// <summary>The paragraph's origin in the layout box.</summary>
     Dx, Dy: Single;
     /// <summary>The text (its lines) in the layout box.</summary>
     TextRect: TRectF;
+    /// <summary>The paragraph (hit testing, regions): made again when asked for, cached layouts do not keep theirs
+    /// (tens of kilobytes each). Locked.</summary>
+    function Paragraph: ISkParagraph;
     function RenderColor(const AScale, ADx, ADy: Single; const AColor: TAlphaColor; const AWidth, AHeight: Integer;
       out APixels: TBytes): Boolean; override;
   end;
@@ -96,16 +100,20 @@ type
     function Typeface: ISkTypeface;
     /// <summary>A color font (emoji): its layouts are painted by Skia.</summary>
     function Color: Boolean;
+    /// <summary>Tells color fonts that the name does not by a glyph with ink (AFont of this face): one without an
+    /// outline is a color or bitmap glyph. Once per face.</summary>
+    procedure CheckGlyph(const AFont: ISkFont; const AGlyph: Word);
   end;
 
   TSkiaFace = class(TInterfacedObject, ISkiaFace)
   private
     FTypeface: ISkTypeface;
-    FColor: Boolean;
+    FColor, FChecked: Boolean;
   public
     constructor Create(const ATypeface: ISkTypeface);
     function Typeface: ISkTypeface;
     function Color: Boolean;
+    procedure CheckGlyph(const AFont: ISkFont; const AGlyph: Word);
   end;
 
 var
@@ -121,8 +129,21 @@ constructor TSkiaFace.Create(const ATypeface: ISkTypeface);
 begin
   inherited Create;
   FTypeface := ATypeface;
-  // Color fonts by name: Segoe UI Emoji, Noto Color Emoji, Apple Color Emoji (Skia does not tell).
+  // Color fonts by name: Segoe UI Emoji, Noto Color Emoji, Apple Color Emoji (Skia does not tell). Android's fallback
+  // fonts have names such as "91##fallback": CheckGlyph.
   FColor := ATypeface.FamilyName.ToLower.Contains('emoji');
+  FChecked := FColor;
+end;
+
+procedure TSkiaFace.CheckGlyph(const AFont: ISkFont; const AGlyph: Word);
+var
+  Path: ISkPath;
+begin
+  if FChecked then
+    Exit;
+  Path := AFont.GetPath(AGlyph);
+  FColor := (Path = nil) or Path.Bounds.IsEmpty;
+  FChecked := True;
 end;
 
 function TSkiaFace.Typeface: ISkTypeface;
@@ -231,6 +252,13 @@ begin
   Result.Layout(FLayoutAt);
 end;
 
+function TFastSkiaLayoutData.Paragraph: ISkParagraph;
+begin
+  if FParagraph = nil then
+    FParagraph := MakeParagraph(TAlphaColors.Black, False);
+  Result := FParagraph;
+end;
+
 procedure TFastSkiaLayoutData.CollectRuns;
 begin
   // Collected when the layout is made (Analyse).
@@ -335,8 +363,6 @@ begin
           Style := FStyles[0];
         Run.HasColor := Style.HasColor;
         Run.Color := Style.Color;
-        if Face.Color then
-          ColorGlyphs := True;
         RunList.Add(Run);
         // Ink and extent of the run.
         AInfo.Font.GetWidthsAndBounds(Glyphs, Widths, Bounds);
@@ -349,6 +375,7 @@ begin
           G := Bounds[K];
           if G.IsEmpty then
             Continue;
+          Face.CheckGlyph(AInfo.Font, Glyphs[K]);
           G.Offset(Run.OriginX + Run.X[K], Run.OriginY + Run.Y[K]);
           if HasInk then
             Ink := TRectF.Union(Ink, G)
@@ -356,6 +383,8 @@ begin
             Ink := G;
           HasInk := True;
         end;
+        if Face.Color then
+          ColorGlyphs := True;
         if (Style.Underline or Style.StrikeOut) and (X1 > X0) then
         begin
           AInfo.Font.GetMetrics(Metrics);
@@ -557,7 +586,7 @@ begin
       D.FLayoutAt := W
     else
       D.FLayoutAt := 1E7;
-    D.Paragraph := D.MakeParagraph(TAlphaColors.Black, False);
+    D.FParagraph := D.MakeParagraph(TAlphaColors.Black, False);
     if not WordWrap then
     begin
       // Lines as long as they are: laid out again at the longest one, moved by the alignment within the box.
@@ -575,7 +604,7 @@ begin
         if Lines[I].Baseline + Lines[I].Descent <= H + 0.5 then
           Fit := I + 1;
       D.FMaxLines := Max(Fit, 1);
-      D.Paragraph := D.MakeParagraph(TAlphaColors.Black, False);
+      D.FParagraph := D.MakeParagraph(TAlphaColors.Black, False);
     end;
     Shift := (W - D.FLayoutAt) * HAlign;
     D.Dx := Shift;
@@ -586,6 +615,7 @@ begin
       D.Dy := 0;
     end;
     D.Analyse;
+    D.FParagraph := nil;
   except
     D.Free;
     raise;
@@ -642,7 +672,7 @@ var
   A: TSkPositionAffinity;
 begin
   D := TFastSkiaLayoutData(Data);
-  if (D = nil) or (D.Paragraph = nil) then
+  if D = nil then
     Exit(-1);
   P := APoint - LayoutOrigin;
   D.Lock;
@@ -664,7 +694,7 @@ var
 begin
   Result := nil;
   D := TFastSkiaLayoutData(Data);
-  if (D = nil) or (D.Paragraph = nil) or Text.IsEmpty then
+  if (D = nil) or Text.IsEmpty then
     Exit;
   O := LayoutOrigin + TPointF.Create(D.Dx, D.Dy);
   D.Lock;

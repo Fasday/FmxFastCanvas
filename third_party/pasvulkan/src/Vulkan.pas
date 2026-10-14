@@ -130,11 +130,13 @@ type PPVkInt8=^PVkInt8;
 
      PPVkInt32=^PVkInt32;
      PVkInt32=^TVkInt32;
-     TVkInt32={$ifdef FPC}Int32{$else}LongInt{$endif};
+     // FastCanvas patch: Delphi's LongInt and LongWord are 64-bit on 64-bit POSIX (Android64, Linux64); Int32 and
+     // UInt32 are 32-bit everywhere (the same types as LongInt and LongWord on Windows).
+     TVkInt32=Int32;
 
      PPVkUInt32=^PVkUInt32;
      PVkUInt32=^TVkUInt32;
-     TVkUInt32={$ifdef FPC}UInt32{$else}LongWord{$endif};
+     TVkUInt32=UInt32; // FastCanvas patch: see TVkInt32
 
      PPVkInt64=^PVkInt64;
      PVkInt64=^TVkInt64;

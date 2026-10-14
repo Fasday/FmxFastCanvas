@@ -73,6 +73,8 @@ type
     /// (render thread only).</summary>
     ColorImage: IInterface;
     ColorKey: UInt64;
+    /// <summary>The canvas's frame the color image was drawn in last (render thread only).</summary>
+    ColorFrame: Integer;
     /// <summary>Ink outside the layout box: the canvas clips to the box, as Direct2D does with
     /// D2D1_DRAW_TEXT_OPTIONS_CLIP.</summary>
     InkOutside: Boolean;
