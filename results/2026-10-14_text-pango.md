@@ -12,9 +12,11 @@ distinct glyph of those layouts at 4 subpixel positions (144 glyphs).
 
 | | Pango (Linux) | Skia (Linux) | DirectWrite (Windows) | Skia (Windows) |
 |---|---|---|---|---|
-| first layout at a new font size | 2.5 ms | 84 ms | 0.6 ms | 0.8 ms |
-| layout, per paragraph (300 paragraphs; Skia on Linux: 30) | 0.10 ms | 84 ms | 0.031 ms | 0.096 ms |
-| glyph coverage, per glyph | 1.5 us | 7.6 us | 1.0 us | 4.9 us |
+| first layout at a new font size | 2.5-2.8 ms | 84-87 ms | 0.6 ms | 0.8 ms |
+| layout, per paragraph (300 paragraphs; Skia on Linux: 30) | 0.08-0.10 ms | 76-84 ms | 0.031 ms | 0.096 ms |
+| glyph coverage, per glyph | 1.5-1.7 us | 5.0-7.6 us | 1.0 us | 4.9 us |
+
+(Ranges: two runs.)
 
 ## Paragraph-heavy frames
 
@@ -24,9 +26,9 @@ paragraphs (glyphs cached, best of 3). Linux draws on lavapipe (the CPU), so com
 
 | | Pango, 30 | Skia, 30 | Pango, 300 | DirectWrite, 30 | Skia (Win), 30 | DirectWrite, 300 | Skia (Win), 300 |
 |---|---|---|---|---|---|---|---|
-| first frame | 27 ms | 2737 ms | 169 ms | 4.1 ms | 5.0 ms | 17.9 ms | 34.7 ms |
-| same frame again | 9.1 ms | 11.1 ms | 82 ms | 5.2 ms | 4.6 ms | 8.6 ms | 9.0 ms |
-| new paragraphs | 11.7 ms | 2638 ms | 105 ms | 2.5 ms | 3.0 ms | 13.0 ms | 25.4 ms |
+| first frame | 27 ms | 2316-2737 ms | 154-169 ms | 4.1 ms | 5.0 ms | 17.9 ms | 34.7 ms |
+| same frame again | 9.1 ms | 10.7-11.1 ms | 68-82 ms | 5.2 ms | 4.6 ms | 8.6 ms | 9.0 ms |
+| new paragraphs | 11.7 ms | 2334-2638 ms | 95-105 ms | 2.5 ms | 3.0 ms | 13.0 ms | 25.4 ms |
 
 Skia's layouts on Linux take about 80 ms each, on Windows 0.1 ms; Skia's own scene of TextProbe (about 60 layouts)
 took 8.5 s on Linux, Pango's 0.34 s.
