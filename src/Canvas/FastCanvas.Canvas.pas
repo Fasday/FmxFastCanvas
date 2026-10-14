@@ -248,6 +248,9 @@ type
     /// <summary>Render thread: the rectangles of the partial frame in progress (TCmdRegion), applied whenever this
     /// target is selected; RegionCount = 0: none.</summary>
     RegionFirst, RegionCount: Cardinal;
+    /// <summary>Render thread: the pixels the partial frame in progress updates at most (empty: the whole target),
+    /// applied with the rectangles.</summary>
+    Scissor: TRect;
     /// <summary>Render thread: the frame in progress may draw ClearType text (TCmdBegin.ClearType).</summary>
     ClearType: Boolean;
     /// <summary>Render thread: the frame in progress has drawn ClearType glyphs, and its draws blend with dual sources
@@ -408,6 +411,8 @@ type
     ClearType: Boolean;
     /// <summary>TFastCanvasOption.D2DText (measurement aid).</summary>
     D2DText: Boolean;
+    /// <summary>Partial: the bounds of its rectangles in pixels (no pixel outside them changes).</summary>
+    Bounds: TRect;
     Bitmap: Pointer;   // TFastBitmap of a bitmap canvas, kept alive by the chunk
   end;
 
@@ -1810,6 +1815,9 @@ var
   B: TFastBitmap;
   C: PCmdBegin;
   I: Integer;
+{$IFDEF ANDROID}
+  Kept: TArray<TRectF>;
+{$ENDIF}
 begin
   CheckPartialFrames;
   if not CheckDevice then
@@ -1867,6 +1875,22 @@ begin
   FClip.Index := 0;
   FClip.Epoch := GEpoch;
   FRegion := nil;
+{$IFDEF ANDROID}
+  // FMX's Android platform paints the whole form whatever changed: the rectangles the form invalidated are kept
+  // (FastKeepInvalidated), and a window frame updates them (none: the platform paints for a reason of its own).
+  if (FTarget.Kind <> TTargetKind.Bitmap) and FastTakeInvalidated(Parent, Kept) and
+    (TCanvasStyle.SupportClipRects in GetCanvasStyle) then
+  begin
+    // FMX paints the whole form there: their bounds can be updated as one rectangle (no test of each pixel against
+    // several), unless they are most of the window (then the copy of the last frame would cost more).
+    for I := 1 to High(Kept) do
+      Kept[0] := TRectF.Union(Kept[0], Kept[I]);
+    SetLength(Kept, 1);
+    if Kept[0].Width * Kept[0].Height * Sqr(Scale) < 0.5 * FPixelW * FPixelH then
+      PartialRegion(TClipRects(Kept));
+  end
+  else
+{$ENDIF}
   if AClipRects <> nil then
     if FTarget.Kind <> TTargetKind.Bitmap then
       PartialRegion(AClipRects^)
@@ -1918,6 +1942,7 @@ begin
     FClip.Clip.Box := FRegion[0];
     for I := 1 to High(FRegion) do
       FClip.Clip.Box := TRectF.Union(FClip.Clip.Box, FRegion[I]);
+    C.Bounds := FClip.Clip.Box.Round;
     FClip.Index := -1;
     FOuterRegion := GRegionCanvas;
     GRegionCanvas := Self;
@@ -3050,6 +3075,7 @@ begin
     // The rectangles of a partial window frame hold for that window only: back to it after a bitmap scene drawn in
     // the middle of its frame, they hold again. So does its blending.
     FGpu.SetRegion(T.RegionFirst, T.RegionCount);
+    FGpu.SetScissor(T.Scissor);
     FGpu.SetDualBlend(T.Dual);
   end
   else
@@ -3096,6 +3122,11 @@ begin
   T.RegionFirst := 0;
   T.RegionCount := 0;
   FGpu.SetRegion(0, 0);
+  // A partial frame changes no pixel outside the bounds of its rectangles: the GPU does not even shade them.
+  T.Scissor := TRect.Empty;
+  if C.Partial and not FNoPresent then
+    T.Scissor := C.Bounds;
+  FGpu.SetScissor(T.Scissor);
   T.ClearType := C.ClearType;
   T.Dual := False;
   T.D2DText := C.D2DText;
@@ -3111,6 +3142,7 @@ begin
     LeaveD2D;
     FGpu.EndTarget;
     FGpu.SetRegion(0, 0);
+    FGpu.SetScissor(TRect.Empty);
     FGpu.SetDualBlend(False);
     Inc(FFrame);
     // The frame's draws are with the GPU now.
@@ -3120,6 +3152,7 @@ begin
     T := FCanvas.FTarget;
     T.RegionFirst := 0;
     T.RegionCount := 0;
+    T.Scissor := TRect.Empty;
     T.ClearType := False;
     T.Dual := False;
     if T.Window = nil then
@@ -4588,6 +4621,8 @@ begin
   // (TCanvasStyle.NeedGPUSurface) unless software canvases are enabled; then it takes the first default class that
   // needs none: ours, registered first (FMX.Graphics.pas, TCanvasManager.GetDefaultCanvas; FMX.Skia does the same).
   TCanvasManager.EnableSoftwareCanvas(True);
+  // Android: partial frames need the rectangles FMX's platform forgets.
+  FastKeepInvalidated;
 {$ENDIF}
   GInstalled := True;
 {$IFDEF MSWINDOWS}

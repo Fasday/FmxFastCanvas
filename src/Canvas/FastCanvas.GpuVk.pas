@@ -670,6 +670,7 @@ type
     FBoundGen: Integer;
     FBoundPipe: TVkPipeline;
     FBoundW, FBoundH: Integer;
+    FBoundScissor: TRect;
     // The frame constants in the upload memory of the open command buffer.
     FConstGen: Integer;
     FConstBuffer: TVkBuffer;
@@ -5017,6 +5018,17 @@ var
   MeshBuffer: TVkBuffer;
   MeshOffset: UInt64;
   Ref: Integer;
+  Area_, Band: TRect;
+
+  procedure SetScissorRect(const ACmd: TVkCommandBuffer; const R: TRect);
+  begin
+    Scissor.offset.x := R.Left;
+    Scissor.offset.y := R.Top;
+    Scissor.extent.width := Max(0, R.Width);
+    Scissor.extent.height := Max(0, R.Height);
+    C.Vk.CmdSetScissor(ACmd, 0, 1, @Scissor);
+  end;
+
 begin
   if (FPendingCount = 0) or (FTarget = nil) or (TGpuVkSurface(FTarget).Image = VK_NULL_HANDLE) then
   begin
@@ -5072,13 +5084,20 @@ begin
     Viewport.minDepth := 0;
     Viewport.maxDepth := 1;
     C.Vk.CmdSetViewport(Cmd, 0, 1, @Viewport);
-    Scissor.offset.x := 0;
-    Scissor.offset.y := 0;
-    Scissor.extent.width := Max(0, Min(FWidth, Target.Width));
-    Scissor.extent.height := Max(0, Min(FHeight, Target.Height));
-    C.Vk.CmdSetScissor(Cmd, 0, 1, @Scissor);
     FBoundW := FWidth;
     FBoundH := FHeight;
+    FBoundScissor := TRect.Create(-1, -1, -1, -1);
+  end;
+  // The target, or the part a partial frame updates (SetScissor).
+  Area_ := TRect.Create(0, 0, Max(0, Min(FWidth, Target.Width)), Max(0, Min(FHeight, Target.Height)));
+  if not FScissor.IsEmpty then
+    Area_.Intersect(FScissor);
+  if Area_.IsEmpty then
+    Area_ := TRect.Empty;
+  if Area_ <> FBoundScissor then
+  begin
+    SetScissorRect(Cmd, Area_);
+    FBoundScissor := Area_;
   end;
   C.Vk.CmdBindDescriptorSets(Cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, FLayout, 0, 1, @Set_, 0, nil);
   Variants := FVariants and not FCopy and not (FDual and C.Fast.DualSource);
@@ -5149,19 +5168,15 @@ begin
       // pixels are; the inside, which it leaves as it is, is not shaded.
       for I := 0 to BandCount - 1 do
       begin
-        Scissor.offset.x := Bands[I].Left;
-        Scissor.offset.y := Bands[I].Top;
-        Scissor.extent.width := Bands[I].Width;
-        Scissor.extent.height := Bands[I].Height;
-        C.Vk.CmdSetScissor(Cmd, 0, 1, @Scissor);
+        Band := Bands[I];
+        Band.Intersect(Area_);
+        if Band.IsEmpty then
+          Continue;
+        SetScissorRect(Cmd, Band);
         C.Vk.CmdDraw(Cmd, 4, 1, 0, First);
         Inc(FDrawCalls);
       end;
-      Scissor.offset.x := 0;
-      Scissor.offset.y := 0;
-      Scissor.extent.width := Max(0, Min(FWidth, Target.Width));
-      Scissor.extent.height := Max(0, Min(FHeight, Target.Height));
-      C.Vk.CmdSetScissor(Cmd, 0, 1, @Scissor);
+      SetScissorRect(Cmd, Area_);
     end
     else
     begin

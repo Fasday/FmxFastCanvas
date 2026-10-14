@@ -314,6 +314,8 @@ type
     FClipStage: TArray<Single>;
     FBandPixels: Single;
     FPathMeshes: Boolean;
+    /// <summary>The pixels the draws may change (SetScissor); empty: the whole target.</summary>
+    FScissor: TRect;
     procedure ReadTextParameters;
     function TextureSlot(const ATexture: Pointer): Integer;
     function FrameConstants: TGpuFrameConstants;
@@ -350,6 +352,11 @@ type
     /// <summary>The rectangles a partial window frame updates: the boxes of clip entries AFirst..AFirst + ACount - 1
     /// (set before); ACount = 0: the whole target. Draws what is pending first.</summary>
     procedure SetRegion(const AFirst, ACount: Cardinal);
+    /// <summary>The following draws change no pixel outside ARect (target pixels; empty: the whole target): the
+    /// partial frame of a window, whose rectangles are inside it. Back ends that can leave the pixels outside out of
+    /// their draws (a scissor) do; the clip test of an instance is not needed then where its clip leaves out only
+    /// pixels outside. Draws what is pending first when it changes.</summary>
+    procedure SetScissor(const ARect: TRect);
     /// <summary>The following draws blend with a second color output of the pixel shader: per-channel weights,
     /// which ClearType glyphs (GpuClearType) need and which equal the alpha for everything else. Draws what is
     /// pending first when it changes.</summary>
@@ -714,6 +721,14 @@ begin
   FFrameDirty := True;
 end;
 
+procedure TGpuRenderer.SetScissor(const ARect: TRect);
+begin
+  if ARect = FScissor then
+    Exit;
+  Flush;
+  FScissor := ARect;
+end;
+
 procedure TGpuRenderer.Invalidate;
 begin
 end;
@@ -895,7 +910,7 @@ var
   P: PGpuInstance;
   Kind: Cardinal;
   C: PGpuClip;
-  W, H, A11, A12, A21, A22, S, Det, Hx, Hy, E, X, Y: Single;
+  W, H, A11, A12, A21, A22, S, Det, Hx, Hy, E, X, Y, X0, X1, Y0, Y1: Single;
 begin
   P := AInstance;
   Kind := P.Flags and 15;
@@ -964,8 +979,20 @@ begin
   Y := (P.Y0 + P.Y1) * 0.5;
   W := X * P.M11 + Y * P.M21 + P.Dx;
   H := X * P.M12 + Y * P.M22 + P.Dy;
-  if not ((W - Hx - E >= C.Box.Left) and (W + Hx + E < C.Box.Right) and (H - Hy - E >= C.Box.Top) and
-    (H + Hy + E < C.Box.Bottom)) then
+  // The bounds of the pixels the quad can reach, within the scissor (the GPU leaves the others out).
+  X0 := W - Hx - E;
+  X1 := W + Hx + E;
+  Y0 := H - Hy - E;
+  Y1 := H + Hy + E;
+  if not FScissor.IsEmpty then
+  begin
+    // Its first and last pixel centers.
+    X0 := Max(X0, FScissor.Left + 0.5);
+    X1 := Min(X1, FScissor.Right - 0.5);
+    Y0 := Max(Y0, FScissor.Top + 0.5);
+    Y1 := Min(Y1, FScissor.Bottom - 0.5);
+  end;
+  if not ((X0 >= C.Box.Left) and (X1 < C.Box.Right) and (Y0 >= C.Box.Top) and (Y1 < C.Box.Bottom)) then
     Result := Result or GpuNeedClips;
 end;
 

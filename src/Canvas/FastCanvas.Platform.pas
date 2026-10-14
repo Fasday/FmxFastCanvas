@@ -27,6 +27,14 @@ function FastWindowReady(const AHandle: TWindowHandle): Boolean;
 /// times the scale.</summary>
 function FastWindowPixelSize(const AHandle: TWindowHandle; const AWindow: TGpuWindowHandle;
   const ALogicalWidth, ALogicalHeight: Single): TSize;
+/// <summary>Android: FMX's platform forgets the rectangles a form invalidates and paints the whole form
+/// (TFormRender.Render: PaintRects([ClientRect])); its window service is wrapped (FastCanvas installs it) so that they
+/// are kept for partial frames. Elsewhere nothing. Main thread, before forms are made.</summary>
+procedure FastKeepInvalidated;
+/// <summary>Android: the rectangles invalidated in the form of the handle since the last call (logical units), and
+/// that they are known; False where FastKeepInvalidated keeps none (other platforms: FMX passes them itself), or none
+/// were invalidated (the platform paints for a reason of its own: the whole form).</summary>
+function FastTakeInvalidated(const AHandle: TWindowHandle; out ARects: TArray<TRectF>): Boolean;
 
 implementation
 
@@ -34,8 +42,8 @@ uses
 {$IF Defined(MSWINDOWS)}
   Winapi.Windows, FMX.Platform.Win;
 {$ELSEIF Defined(ANDROID)}
-  Androidapi.JNI.GraphicsContentViewText, Androidapi.JNIBridge, Androidapi.NativeWindow, Androidapi.NativeWindowJni,
-  FMX.Platform.UI.Android;
+  System.UITypes, System.Generics.Collections, FMX.Forms, FMX.Platform, Androidapi.JNI.GraphicsContentViewText,
+  Androidapi.JNIBridge, Androidapi.NativeWindow, Androidapi.NativeWindowJni, FMX.Platform.UI.Android;
 {$ELSE}
   System.SysUtils, Posix.Dlfcn, FMX.Platform.Linux;
 {$ENDIF}
@@ -62,6 +70,16 @@ function FastWindowPixelSize(const AHandle: TWindowHandle; const AWindow: TGpuWi
   const ALogicalWidth, ALogicalHeight: Single): TSize;
 begin
   Result := WindowHandleToPlatform(AHandle).WndClientSize;
+end;
+
+procedure FastKeepInvalidated;
+begin
+end;
+
+function FastTakeInvalidated(const AHandle: TWindowHandle; out ARects: TArray<TRectF>): Boolean;
+begin
+  ARects := nil;
+  Result := False;
 end;
 
 {$ELSEIF Defined(ANDROID)}
@@ -112,6 +130,214 @@ begin
     H := Round(ALogicalHeight * AHandle.Scale);
   end;
   Result := TSize.Create(W, H);
+end;
+
+type
+  /// <summary>The window service of FMX's platform with the rectangles forms invalidate kept by window handle
+  /// (FastKeepInvalidated): everything else as the platform's.</summary>
+  TKeepingWindowService = class(TInterfacedObject, IFMXWindowService)
+  private
+    FInner: IFMXWindowService;
+  public
+    constructor Create(const AInner: IFMXWindowService);
+    function FindForm(const AHandle: TWindowHandle): TCommonCustomForm;
+    function CreateWindow(const AForm: TCommonCustomForm): TWindowHandle;
+    procedure DestroyWindow(const AForm: TCommonCustomForm);
+    procedure ReleaseWindow(const AForm: TCommonCustomForm);
+    procedure SetWindowState(const AForm: TCommonCustomForm; const AState: TWindowState);
+    procedure ShowWindow(const AForm: TCommonCustomForm);
+    procedure HideWindow(const AForm: TCommonCustomForm);
+    function ShowWindowModal(const AForm: TCommonCustomForm): TModalResult;
+    procedure InvalidateWindowRect(const AForm: TCommonCustomForm; R: TRectF);
+    procedure InvalidateImmediately(const AForm: TCommonCustomForm);
+    procedure SetWindowRect(const AForm: TCommonCustomForm; ARect: TRectF);
+    function GetWindowRect(const AForm: TCommonCustomForm): TRectF;
+    function GetClientSize(const AForm: TCommonCustomForm): TPointF;
+    procedure SetClientSize(const AForm: TCommonCustomForm; const ASize: TPointF);
+    procedure SetWindowCaption(const AForm: TCommonCustomForm; const ACaption: string);
+    procedure SetCapture(const AForm: TCommonCustomForm);
+    procedure ReleaseCapture(const AForm: TCommonCustomForm);
+    function ClientToScreen(const AForm: TCommonCustomForm; const AFormPoint: TPointF): TPointF;
+    function ScreenToClient(const AForm: TCommonCustomForm; const AScreenPoint: TPointF): TPointF;
+    procedure BringToFront(const AForm: TCommonCustomForm);
+    procedure SendToBack(const AForm: TCommonCustomForm);
+    procedure Activate(const AForm: TCommonCustomForm);
+    function GetWindowScale(const AForm: TCommonCustomForm): Single;
+    function CanShowModal: Boolean;
+  end;
+
+const
+  /// <summary>More rectangles than this become their union (as FMX's forms do).</summary>
+  MaxKeptRects = 20;
+
+var
+  /// <summary>Main thread: the rectangles invalidated in each window since FastTakeInvalidated took them.</summary>
+  GInvalidated: TDictionary<TWindowHandle, TArray<TRectF>>;
+
+constructor TKeepingWindowService.Create(const AInner: IFMXWindowService);
+begin
+  inherited Create;
+  FInner := AInner;
+end;
+
+function TKeepingWindowService.FindForm(const AHandle: TWindowHandle): TCommonCustomForm;
+begin
+  Result := FInner.FindForm(AHandle);
+end;
+
+function TKeepingWindowService.CreateWindow(const AForm: TCommonCustomForm): TWindowHandle;
+begin
+  Result := FInner.CreateWindow(AForm);
+end;
+
+procedure TKeepingWindowService.DestroyWindow(const AForm: TCommonCustomForm);
+begin
+  if (GInvalidated <> nil) and AForm.IsHandleAllocated then
+    GInvalidated.Remove(AForm.Handle);
+  FInner.DestroyWindow(AForm);
+end;
+
+procedure TKeepingWindowService.ReleaseWindow(const AForm: TCommonCustomForm);
+begin
+  FInner.ReleaseWindow(AForm);
+end;
+
+procedure TKeepingWindowService.SetWindowState(const AForm: TCommonCustomForm; const AState: TWindowState);
+begin
+  FInner.SetWindowState(AForm, AState);
+end;
+
+procedure TKeepingWindowService.ShowWindow(const AForm: TCommonCustomForm);
+begin
+  FInner.ShowWindow(AForm);
+end;
+
+procedure TKeepingWindowService.HideWindow(const AForm: TCommonCustomForm);
+begin
+  FInner.HideWindow(AForm);
+end;
+
+function TKeepingWindowService.ShowWindowModal(const AForm: TCommonCustomForm): TModalResult;
+begin
+  Result := FInner.ShowWindowModal(AForm);
+end;
+
+procedure TKeepingWindowService.InvalidateWindowRect(const AForm: TCommonCustomForm; R: TRectF);
+var
+  Rects: TArray<TRectF>;
+  I: Integer;
+begin
+  if (GInvalidated <> nil) and AForm.IsHandleAllocated then
+  begin
+    if not GInvalidated.TryGetValue(AForm.Handle, Rects) then
+      Rects := nil;
+    Rects := Rects + [R];
+    if Length(Rects) > MaxKeptRects then
+    begin
+      for I := 1 to High(Rects) do
+        Rects[0] := TRectF.Union(Rects[0], Rects[I]);
+      SetLength(Rects, 1);
+    end;
+    GInvalidated.AddOrSetValue(AForm.Handle, Rects);
+  end;
+  FInner.InvalidateWindowRect(AForm, R);
+end;
+
+procedure TKeepingWindowService.InvalidateImmediately(const AForm: TCommonCustomForm);
+begin
+  FInner.InvalidateImmediately(AForm);
+end;
+
+procedure TKeepingWindowService.SetWindowRect(const AForm: TCommonCustomForm; ARect: TRectF);
+begin
+  FInner.SetWindowRect(AForm, ARect);
+end;
+
+function TKeepingWindowService.GetWindowRect(const AForm: TCommonCustomForm): TRectF;
+begin
+  Result := FInner.GetWindowRect(AForm);
+end;
+
+function TKeepingWindowService.GetClientSize(const AForm: TCommonCustomForm): TPointF;
+begin
+  Result := FInner.GetClientSize(AForm);
+end;
+
+procedure TKeepingWindowService.SetClientSize(const AForm: TCommonCustomForm; const ASize: TPointF);
+begin
+  FInner.SetClientSize(AForm, ASize);
+end;
+
+procedure TKeepingWindowService.SetWindowCaption(const AForm: TCommonCustomForm; const ACaption: string);
+begin
+  FInner.SetWindowCaption(AForm, ACaption);
+end;
+
+procedure TKeepingWindowService.SetCapture(const AForm: TCommonCustomForm);
+begin
+  FInner.SetCapture(AForm);
+end;
+
+procedure TKeepingWindowService.ReleaseCapture(const AForm: TCommonCustomForm);
+begin
+  FInner.ReleaseCapture(AForm);
+end;
+
+function TKeepingWindowService.ClientToScreen(const AForm: TCommonCustomForm; const AFormPoint: TPointF): TPointF;
+begin
+  Result := FInner.ClientToScreen(AForm, AFormPoint);
+end;
+
+function TKeepingWindowService.ScreenToClient(const AForm: TCommonCustomForm; const AScreenPoint: TPointF): TPointF;
+begin
+  Result := FInner.ScreenToClient(AForm, AScreenPoint);
+end;
+
+procedure TKeepingWindowService.BringToFront(const AForm: TCommonCustomForm);
+begin
+  FInner.BringToFront(AForm);
+end;
+
+procedure TKeepingWindowService.SendToBack(const AForm: TCommonCustomForm);
+begin
+  FInner.SendToBack(AForm);
+end;
+
+procedure TKeepingWindowService.Activate(const AForm: TCommonCustomForm);
+begin
+  FInner.Activate(AForm);
+end;
+
+{$WARN SYMBOL_DEPRECATED OFF}
+function TKeepingWindowService.GetWindowScale(const AForm: TCommonCustomForm): Single;
+begin
+  Result := FInner.GetWindowScale(AForm);
+end;
+{$WARN SYMBOL_DEPRECATED ON}
+
+function TKeepingWindowService.CanShowModal: Boolean;
+begin
+  Result := FInner.CanShowModal;
+end;
+
+procedure FastKeepInvalidated;
+var
+  Inner: IFMXWindowService;
+begin
+  if (GInvalidated <> nil) or
+    not TPlatformServices.Current.SupportsPlatformService(IFMXWindowService, Inner) then
+    Exit;
+  GInvalidated := TDictionary<TWindowHandle, TArray<TRectF>>.Create;
+  TPlatformServices.Current.RemovePlatformService(IFMXWindowService);
+  TPlatformServices.Current.AddPlatformService(IFMXWindowService, TKeepingWindowService.Create(Inner));
+end;
+
+function FastTakeInvalidated(const AHandle: TWindowHandle; out ARects: TArray<TRectF>): Boolean;
+begin
+  ARects := nil;
+  Result := (GInvalidated <> nil) and GInvalidated.TryGetValue(AHandle, ARects) and (Length(ARects) > 0);
+  if GInvalidated <> nil then
+    GInvalidated.Remove(AHandle);
 end;
 
 {$ELSE}
@@ -191,6 +417,16 @@ function FastWindowPixelSize(const AHandle: TWindowHandle; const AWindow: TGpuWi
   const ALogicalWidth, ALogicalHeight: Single): TSize;
 begin
   Result := TSize.Create(Round(ALogicalWidth * AHandle.Scale), Round(ALogicalHeight * AHandle.Scale));
+end;
+
+procedure FastKeepInvalidated;
+begin
+end;
+
+function FastTakeInvalidated(const AHandle: TWindowHandle; out ARects: TArray<TRectF>): Boolean;
+begin
+  ARects := nil;
+  Result := False;
 end;
 
 {$ENDIF}
