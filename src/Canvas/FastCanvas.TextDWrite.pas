@@ -775,7 +775,13 @@ var
 begin
   D := TFastDWriteLayoutData(Data);
   if (D = nil) or (D.Layout = nil) then
+  begin
+    // No text, no layout: the caret's only place. FMX's text controls ask where a click into an empty edit goes,
+    // and raise ETextLayoutException for -1 (FMX's own layouts give 0).
+    if Text.IsEmpty then
+      Exit(0);
     Exit(-1);
+  end;
   P := APoint - LayoutOrigin;
   D.Lock;
   try
