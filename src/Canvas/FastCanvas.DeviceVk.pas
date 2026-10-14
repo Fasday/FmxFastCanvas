@@ -15,9 +15,9 @@ unit FastCanvas.DeviceVk;
 
   FASTCANVAS_VK_DEBUG=<file>: the Khronos validation layer, whose warnings and errors a VK_EXT_debug_utils messenger
   appends to that file (as FASTCANVAS_D3D12_DEBUG does for the Direct3D 12 debug layer). FASTCANVAS_VK_STATS=<file>:
-  a line with the peak numbers of memory objects and allocations appended when the device goes. FASTCANVAS_VK_API=1.1
-  or 1.2: an instance of that version, so any device is used the way of devices below Vulkan 1.3 (a test of that
-  path).
+  a line with the peak numbers of memory objects and allocations (and the path: features in use) appended when the
+  device goes. FASTCANVAS_VK_API=1.1 or 1.2: an instance of that version, so any device is used the way of devices
+  below Vulkan 1.3 (a test of that path); 1.0: no device qualifies (a test of the fallback).
 
   The loader is held until Destroy: the unit Vulkan frees its handle in its finalization, which runs before FMX frees
   the forms and the canvas shuts the device down (FastCanvas.Service). Thread use as with Direct3D 12: the device is
@@ -722,8 +722,11 @@ begin
   FInstanceVersion := VK_API_VERSION_1_3;
   if (Version and $1FFFFFFF) < VK_API_VERSION_1_3 then
     FInstanceVersion := Version and $1FFFFFFF;
-  // FASTCANVAS_VK_API=1.1 or 1.2: an instance of that version, which takes any device the way of devices below 1.3.
-  if GetEnvironmentVariable(ApiVariable) = '1.1' then
+  // FASTCANVAS_VK_API=1.1 or 1.2: an instance of that version, which takes any device the way of devices below 1.3;
+  // 1.0: no device qualifies (a test of the fallback).
+  if GetEnvironmentVariable(ApiVariable) = '1.0' then
+    FInstanceVersion := VK_API_VERSION_1_0
+  else if GetEnvironmentVariable(ApiVariable) = '1.1' then
     FInstanceVersion := Min(FInstanceVersion, VK_API_VERSION_1_1)
   else if GetEnvironmentVariable(ApiVariable) = '1.2' then
     FInstanceVersion := Min(FInstanceVersion, VK_API_VERSION_1_2);
@@ -817,7 +820,11 @@ begin
     Version := Min(Props.apiVersion and $1FFFFFFF, FInstanceVersion);
     if Version < VK_API_VERSION_1_1 then
     begin
-      Rejected := Rejected + '; ' + Name + ': Vulkan 1.1 is needed';
+      if (Props.apiVersion and $1FFFFFFF) < VK_API_VERSION_1_1 then
+        Rejected := Rejected + '; ' + Name + ': Vulkan 1.1 is needed'
+      else
+        Rejected := Rejected + '; ' + Name + ': the instance has Vulkan ' + FastVulkanVersionText(FInstanceVersion) +
+          ', 1.1 is needed';
       Continue;
     end;
     Count := 0;
