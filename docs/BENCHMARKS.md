@@ -242,6 +242,62 @@ up to 15 %). Screenshots (`tools\compare-shots.ps1`, pixels whose summed RGB dif
 0.35 %, `paths` 0.17 %, `rare` 0.026 %, `roundrects` 0.003 % (antialiasing at curves and dash ends), every other scene
 0 % (but for the window's corner pixels).
 
+### Android phone (Mali-G57)
+
+The benchmark's scenes in PortProbe (`--scene=<name> --interval=1`; the APK of `tools\build-android.ps1`, options
+in `options.txt`, see `USAGE.md`) on a TECNO KL7 (Mali-G57 MC2, Vulkan 1.1.177, 1080 x 2436 at 120 Hz),
+FastCanvas (`FASTCANVAS_VK_GPUTIME=1`) against FMX's `TCanvasGpu` (`--fmx`), 2026-10-14. The counts are the presets'
+for the benchmark's 1280 x 720 scaled to the area the scene got (about 0.27 of it); frames per second averaged over
+about 9 s after a warm-up of 5 s. Main thread: the form's paint, recording (between `BeginScene` and `EndScene`) and
+`EndScene`; `TCanvasGpu` draws and presents in `EndScene`, FastCanvas hands the frame to its render thread there
+and waits for the frame before (the display's pace). GPU: the render passes of a frame from timestamps (FastCanvas
+only), without the presenting thread's copy into the swap chain (0.7-1.3 ms). "Before": the merge of the Linux work;
+"after": with the opaque interiors, the paths as pieces and the scissor of partial frames.
+
+`light`: FPS, main thread ms, GPU ms
+
+| Scene | N | TCanvasGpu FPS | rec / end | FastCanvas before FPS | GPU | after FPS | rec | GPU |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| `rects` | 1094 | 119.0 | 2.5 / 5.4 | 29.9 | 32.7 | 119.2 | 1.1 | 4.1 |
+| `roundrects` | 46 | 117.6 | 7.3 / 0.9 | 119.1 | 4.8 | 119.0 | 0.2 | 4.0 |
+| `ellipses` | 36 | 102.4 | 7.0 / 2.6 | 119.0 | 6.5 | 119.1 | 0.1 | 4.7 |
+| `lines` | 101 | 119.1 | 3.8 / 4.2 | 119.1 | 3.0 | 119.1 | 0.3 | 3.0 |
+| `strokes` | 27 | 117.4 | 4.5 / 3.6 | 61.1 | 15.3 | 118.9 | 0.2 | 5.5 |
+| `gradients` | 7 | 119.0 | 2.2 / 5.7 | 119.1 | 1.0 | 119.0 | 0.1 | 0.9 |
+| `paths` | 19 | 99.9 | 9.0 / 0.7 | 55.3 | 17.3 | 119.1 | 0.6 | 5.8 |
+| `bitmaps` | 656 | 118.1 | 6.5 / 1.7 | 118.9 | 3.9 | 119.1 | 0.8 | 4.0 |
+| `bitmapscaled` | 602 | 119.1 | 6.3 / 1.8 | 119.1 | 6.7 | 119.2 | 0.8 | 6.7 |
+| `clip` | 4 | 119.1 | 3.2 / 4.8 | 119.1 | 3.6 | 119.1 | 0.1 | 3.8 |
+| `text` | 16 | 118.8 | 4.3 / 3.7 | 119.0 | 1.0 | 119.1 | 0.3 | 0.8 |
+| `textcached` | 16 | 119.0 | 1.8 / 6.1 | 119.1 | 0.8 | 119.1 | 0.1 | 0.9 |
+| `paragraph` | 4 | 119.1 | 3.4 / 4.6 | 119.1 | 2.0 | 119.1 | 0.1 | 2.1 |
+| `controls` | 11 | 118.9 | 4.4 / 3.4 | 119.1 | 2.2 | 119.2 | 2.6 | 2.3 |
+| `listbox` | 273 | 118.9 | 5.0 / 1.8 | 98.9 | 9.1 | 119.1 | 2.5 | 6.8 |
+| `effects` | 7 | 119.2 | 3.6 / 4.3 | 119.1 | 2.9 | 119.0 | 0.2 | 2.4 |
+| `viewport3d` | 5 | 119.1 | 2.6 / 5.1 | 35.2 | 19.8 | 35.7 | 0.3 | 19.8 |
+
+`medium` (after): FPS, main thread ms, GPU ms
+
+| Scene | N | TCanvasGpu FPS | rec / end | FastCanvas FPS | rec | GPU |
+|---|---:|---:|---:|---:|---:|---:|
+| `rects` | 4375 | 32.6 | 3.3 / 27.0 | 79.1 | 3.4 | 11.5 |
+| `roundrects` | 219 | 28.1 | 32.5 / 2.3 | 111.7 | 0.6 | 7.7 |
+| `ellipses` | 191 | 41.0 | 21.9 / 2.2 | 72.2 | 0.4 | 13.0 |
+| `lines` | 520 | 117.3 | 7.3 / 0.9 | 113.2 | 1.2 | 7.6 |
+| `strokes` | 123 | 65.7 | 12.9 / 2.0 | 37.5 | 0.5 | 24.9 |
+| `paths` | 90 | 22.9 | 41.4 / 2.3 | 67.4 | 2.1 | 14.0 |
+| `bitmaps` | 3145 | 36.0 | 25.4 / 2.2 | 89.1 | 3.1 | 10.4 |
+| `text` | 68 | 96.7 | 9.2 / 0.8 | 119.1 | 1.1 | 1.7 |
+| `textcached` | 68 | 119.1 | 3.4 / 4.6 | 119.1 | 0.2 | 1.8 |
+| `controls` | 52 | 117.4 | 5.9 / 1.8 | 119.0 | 3.4 | 4.4 |
+| `listbox` | 1094 | 92.8 | 7.7 / 0.8 | 113.9 | 5.3 | 7.2 |
+| `gradients` | 27 | 118.9 | 4.1 / 3.9 | 119.0 | 0.1 | 5.2 |
+
+Where many shapes are drawn, `TCanvasGpu`'s main thread is the limit (`roundrects` 32.5 ms, `paths` 41.4 ms,
+`bitmaps` 25.4 ms a frame of recording and drawing) and FastCanvas records the same in 0.4-3.4 ms; where a few large
+shapes are drawn the GPU decides. Still slower than `TCanvasGpu` on the phone: `strokes` medium (dashed outlines,
+24.9 ms of GPU) and `viewport3d` (the 3D context's 4x multisampled target is stored and resolved through memory:
+19.8 ms of render passes and 7.6 ms of copies a frame; with one sample 6.7 ms and 0.9 ms).
 ## Running the benchmark
 
 Everything that produced the tables is in the repository:

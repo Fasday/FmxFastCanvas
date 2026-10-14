@@ -24,7 +24,8 @@ FMX itself (forms, controls, styles, layout, animations) is unchanged.
 | `FastCanvas.Context3D11`, `FastCanvas.Context3D12`, `FastCanvas.Context3DVk` | The 3D contexts (`TContext3D`) for `TViewport3D`, `TForm3D` and the effects. |
 | `FastCanvas.Context3D12.Ray.inc`, `Shaders/FastRay.hlsl` → `FastCanvas.RayShaders.inc` | Ray-traced effects (DXR 1.1, shader model 6.5). |
 | `FastCanvas.DeviceVk` | The Vulkan device (1.1 and up; dynamic rendering, synchronization2 and timeline semaphores where it has them, core or extension): the loader and surface extension of the platform, instance, physical and logical device and their optional features, the render passes of devices without dynamic rendering, the memory suballocator, the queue lock. |
-| `FastCanvas.GpuVk` | The Vulkan back end of the renderer: the recording context, surfaces, windows (Win32, Android and Xlib surfaces) and the threads that present them, pipelines. |
+| `FastCanvas.GpuVk` | The Vulkan back end of the renderer: the recording context, surfaces, windows (Win32, Android and Xlib surfaces) and the threads that present them, pipelines; on phones the shader variants, opaque interiors and paths as pieces. |
+| `FastCanvas.PathMesh` | The pieces of a path's polygon that the Vulkan back end draws on phones instead of a quad over its bounds (see "The Vulkan back end"). |
 | `FastCanvas.VkShaders.inc`, `FastCanvas.VkRayShaders.inc`, `FastCanvas.VkFmxShaders.inc` | SPIR-V: `FastCanvas.hlsl`, `FastOutput.hlsl` and `FastRay.hlsl` (dxc), FMX's own shaders (from their GLSL, `tools/compile-fmx-shaders-vk.ps1`). |
 | `FastCanvas.Context3DVk.Ray.inc` | Ray-traced effects on Vulkan (ray queries). |
 | `FastCanvas.D2D1Ext`, `FastCanvas.DWriteExt`, `FastCanvas.DCompExt` | Headers of Direct2D 1.1+, DirectWrite 2 and DirectComposition that Delphi's RTL lacks. |
@@ -65,8 +66,12 @@ suboptimal while the display is turned); the frame is blitted into the `R8G8B8A8
 to the background) ends the window's presenting thread, which drops its swap chain; the next frame of the window
 drops the surface and is not presented, and FMX makes the canvas again for the next native window. On Android the
 render thread waits until the presenting thread has taken the frame before (it presents with `FIFO`), so the frames
-keep the display's pace as when the render thread presented itself. The Vulkan 3D context runs there too (a
-`TForm3D` window gets its native window through `FastCanvas.Platform`): FMX ships the Direct3D sources of its
+keep the display's pace as when the render thread presented itself. FMX's Android platform forgets the rectangles a
+form invalidates (`InvalidateWindowRect` only schedules a paint) and paints the whole form; `InstallFastCanvas`
+wraps its window service so that they are kept (`FastCanvas.Platform`, `FastKeepInvalidated`), and a window frame
+updates their bounds (all controls are painted, the canvas culls what lies outside; a whole frame when they are half
+the window or more, where the copy of the last frame would cost more than it saves). The Vulkan 3D context runs there
+too (a `TForm3D` window gets its native window through `FastCanvas.Platform`): FMX ships the Direct3D sources of its
 shaders, whose variables lay the constants out, on Windows only, so the generated include keeps those variables with
 each shader's SPIR-V, and off Windows `FastCanvas.Context3D` asks the device context for them (`ShaderLayout`), which
 finds the shader by its GLSL source.
@@ -257,6 +262,37 @@ fewer edges (the ones it skips add nothing to its coverage). A discrete GPU keep
 and the splits only cost it (paragraph light on the RX 9070 XT: 1370 FPS with the variants, 1950 without). On the
 RX 9070 XT with `FASTCANVAS_VK_VARIANTS=1` the benchmark's scenes draw the same pixels as with the full shader.
 
+**Opaque interiors** (with the variants, `FASTCANVAS_VK_INTERIORS`). A phone GPU shades every pixel of every quad, in
+order, blended: a scene of overlapping opaque rectangles costs its whole overdraw (the benchmark's rects scene, 1094
+rectangles on the Mali-G57: 32.7 ms a frame). Targets of 256 x 256 pixels and more get a depth buffer (one per size,
+transient: cleared when a rendering instance begins and never stored, lazily allocated memory where the device has
+it), and every instance of a rendering instance a depth number, closer the later it is drawn (`1 - n / 2^22`, exact in
+float; the vertex shaders of these targets add the instance index to a base pushed per draw). A draw then has two
+passes. First the opaque interiors of its instances, front to back, without blending, with the depth test and writes
+(`VSInterior`, `PSInterior`: triangles in pixels with a color per vertex): filled rectangles with an opaque solid
+color, or an opaque linear gradient whose ramp is linear and that does not clamp inside (the colors at the corners,
+from the ramp as the sampler reads it), and no clip test; the interior is the rectangle less half a pixel and the
+corner radii, where the shader's coverage is 1. Then every instance as before, with the depth test only: a pixel under
+an interior of its own instance or of a later one is not shaded (its value would be replaced: an opaque pixel of
+coverage 1 blends to its own color), and the GPU drops the hidden pixels of the first pass. Solid interiors draw the
+same pixels as the shader (the benchmark's scenes match with `FASTCANVAS_VK_VARIANTS=1`); gradients interpolated per
+vertex differ by one level at most (0.65 % of the gradients scene's pixels).
+
+**Paths as pieces** (with the opaque interiors, `FASTCANVAS_VK_PATHMESH`). A path is drawn by its pieces instead of
+one quad over its bounds (`FastCanvas.PathMesh`, built once with its edges and cached with them): the bounds are cut
+into bands of about eight pixels; in a band every edge has a fringe, a trapezoid that holds every pixel whose square
+(as `PathCoverage` takes it, at the scale bucket's smallest scale) reaches the edge; overlapping fringes merge, and the
+gaps between them, which no edge passes through, are inside or outside the fill as a whole. The cover pieces (runs of
+fringes joined by inside gaps) are drawn with the instance's own pixel shader and the depth test and writes, so that a
+pixel two overlapping pieces share is shaded once; the outside gaps are left out (most of the bounds of a dashed
+outline, of a widened curve). An opaque fill's inside gaps go to the interiors' pass. Only where the pieces stay
+within the quad (scales close to uniform): what they reach beyond the bounds has a coverage of 0. On the RX 9070 XT
+(forced on) the paths and strokes scenes differ from the quads at 0.64 % and 1.2 % of the pixels, by 1-3 levels.
+
+**Partial frames** draw within a scissor of the bounds of their rectangles (`TGpuRenderer.SetScissor`); the clip test
+of an instance is left out where its clip leaves out only pixels outside the scissor, so that partial frames keep the
+cheap variants and the interiors.
+
 Each of the three features is optional (Vulkan 1.1 core path, as on many 2021-2024 phones):
 
 - **No dynamic rendering**: a rendering instance (`TVkRenderingInfo`, the canvas's and the 3D context's alike) begins
@@ -291,8 +327,14 @@ ray-traced effect and `Form3DProbe` draw the same pixels that way, with no messa
   fast as with Direct3D 12 presenting with sync interval 0. **Direct** (`FASTCANVAS_VK_DIRECT=1`, a measurement aid):
   the render thread draws the frame into an image of a swap chain of its own (pipelines for `R8G8B8A8` too), acquired
   when the frame begins (the acquire's semaphore goes with the next submission; the image's old content is discarded
-  after that wait) and presented when it ends; no partial frames. It saves the copy but did not pay on the Mali-G57:
-  its render passes into the swap chain's images took 0.9 ms more per frame than the copy (0.7 ms) costs.
+  after that wait) and presented when it ends; no partial frames. It saves the copy but does not pay on the Mali-G57
+  (2026-10-14, PortProbe's scene without the cube): a render pass into the swap chain's images takes 6.1 ms, into the
+  window's surface 4.5-4.8 ms plus 1.2 ms for the copy; for an empty frame 2.3 ms against 1.7 + 1.4 ms. The swap chain
+  is as cheap as Vulkan lets it be asked for (images for color attachment only, the only format offered, R8G8B8A8,
+  opaque or inherited alpha, no transform); writing its images costs what the copy costs, likely because they are not
+  compressed (the display of the phone's MediaTek chip would have to read Arm's AFBC), while the window's surface, a
+  GPU-only image, may be. A mutable-format flag on the surface (which keeps some Mali drivers from compressing) changed
+  nothing measurable.
 
 ## The 3D contexts
 

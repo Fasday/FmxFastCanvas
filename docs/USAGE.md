@@ -423,7 +423,16 @@ but for a few pixels of strokes), at about its speed (`BENCHMARKS.md`). It is th
   and the renderer splits its runs of instances into draws of the cheapest variant where the pixels saved pay for a
   draw; large rectangle outlines are drawn around their inside. They draw the same pixels as the full shader
   (`FASTCANVAS_VK_VARIANTS=1` on a desktop GPU: the benchmark's scenes match pixel for pixel), several times faster
-  on a Mali GPU. A discrete GPU keeps the full shader (the variants would only cost it draws).
+  on a Mali GPU. A discrete GPU keeps the full shader (the variants would only cost it draws). With the variants:
+  **opaque interiors** (`FASTCANVAS_VK_INTERIORS`): targets of 256 x 256 pixels and more get a transient depth
+  buffer; the inside of filled rectangles with an opaque solid color or an opaque two-stop linear gradient is drawn
+  first, without blending, and nothing under it is shaded again (overlapping opaque shapes cost a phone their visible
+  pixels, not their overdraw); **paths as pieces** (`FASTCANVAS_VK_PATHMESH`): a path, a widened stroke, a dashed
+  outline is drawn as trapezoids around its edges and over its inside instead of a quad over its bounds; partial
+  frames are drawn within a scissor. Solid colors and paths match the full shader within a level or three of 255
+  where a path's pixel is antialiased (0.04-1.2 % of the pixels of the benchmark's path scenes); gradient interiors,
+  interpolated per vertex rather than read from the ramp, differ by one level (0.65 % of the gradients scene). Off
+  on discrete GPUs (with the variants).
 - **The 3D context** runs FMX's own shaders (materials, filters, effects, transitions) as SPIR-V made from the GLSL
   sources FMX ships, with the constants laid out as for Direct3D: `tools\compile-fmx-shaders-vk.ps1` writes
   `FastCanvas.VkFmxShaders.inc` (run it again, with the Vulkan SDK, when a Delphi update changes FMX's shaders). A
@@ -497,6 +506,10 @@ Android:
   (`dcu\android-debug.keystore`). The `.dproj` needs the Android64 platform with `BT_BuildType` `Debug` (an installable
   development APK), `minSdkVersion` 24 or more, and the `EnabledSysJars` of a project the IDE made
   (`src\Probe\PortProbe.dproj` has them). Installing: `adb install -r <apk>` with USB debugging on.
+- Partial frames: FMX's Android platform forgets which rectangles a form invalidated and paints the whole form;
+  `InstallFastCanvas` wraps its window service so that they are kept, and a window frame updates only their bounds
+  (`FastCanvasPartialFrames`; FMX still paints every control, the canvas leaves out what is outside, the GPU starts
+  from a copy of the frame shown last). Bounds of half the window or more take a whole frame.
 - Without a phone: an Android 14 x86_64 emulator image (`system-images;android-34;google_apis;x86_64`) runs the
   arm64 library through its ARM translation, with the host GPU's Vulkan (`emulator -avd <name> -gpu host`); PortProbe
   was tested so (before the 3D context and the own geometry engine came to Android).
@@ -518,6 +531,15 @@ Android:
   Linux work) the phone draws PortProbe's cube with that context on the Vulkan 1.1 core path: 84-100 FPS with the cube
   (three render passes, 9.1-9.2 ms of GPU time, 10.7-11.1 ms with the copies and resolves of the viewport), 116-120
   FPS without it (`--parts` without `cube`: 6.9-7.1 ms, as with Skia's geometry before); no Vulkan errors in the log.
+  With the opaque interiors and paths as pieces (same day) the scene without the cube takes 3.7-4.3 ms of render
+  passes a frame (before: 6.7-7.2 ms; see "Phones" under "Vulkan back end"): with the controls and labels alone
+  1.4 ms either way, the gradient background added 2.5 ms before and 0.6 ms now, the wave 2.1 and 0.5 ms, the star
+  with its dashed outline 1.8 and 0.3 ms; with the cube 7.0 ms; the scene paused with only
+  a button changing (`--pause=1`) 1.0 ms of render pass plus 1.6 ms of copies (the last frame into the new one, the
+  frame into the swap chain) against 4.4 ms for whole frames (`--partial=0`). PortProbe `--scene=<name>` runs a scene
+  of the benchmark (`--preset`, `--count`): FastCanvas against `TCanvasGpu` on that phone is in `BENCHMARKS.md`.
+  `FASTCANVAS_VK_DIRECT=1` stays slower there: a render pass into the swap chain's images costs about as much more as
+  the copy it saves (`ARCHITECTURE.md`).
 
 Linux:
 
@@ -593,8 +615,10 @@ Linux:
   presented copies, from timestamps (a tile-based GPU cannot time its draws one by one: the render passes are the
   unit).
 - `FASTCANVAS_VK_VARIANTS=1`: the shader variants of phones on any GPU (a test of their pixels on a desktop GPU), `0`:
-  the full shader everywhere. `FASTCANVAS_VK_DIRECT=1`: frames drawn straight into the images of a swap chain of the
-  render thread (no copy, no presenting thread, no partial frames; on the Mali-G57 slower than the copy it saves).
+  the full shader everywhere. `FASTCANVAS_VK_INTERIORS=0`: no opaque interiors (and no paths as pieces) where the
+  variants are; `FASTCANVAS_VK_PATHMESH=0`: no paths as pieces. `FASTCANVAS_VK_DIRECT=1`: frames drawn straight into
+  the images of a swap chain of the render thread (no copy, no presenting thread, no partial frames; on the Mali-G57
+  slower than the copy it saves).
 - `FASTCANVAS_VK_API=1.1` or `1.2` (environment variable): the Vulkan instance of that version, so any device is used
   the way of devices below Vulkan 1.3 (a test of that path on a desktop GPU; no ray-traced effects then); `1.0`: no
   device qualifies (a test of the fallback). `FASTCANVAS_VK_NOPUSH=1`: `VK_KHR_push_descriptor` stays off, so the
