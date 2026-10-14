@@ -22,7 +22,8 @@ unit FastCanvas.TextPango;
   Pango's cut instead (a line of one word keeps its first character), leaving out the white space before it, as
   DirectWrite does, and lays the shortened text out again (positions and ranges are mapped between the texts). Leading
   and trailing alignment follow RightToLeft (the base direction of the paragraphs, not guessed from the text); the
-  vertical alignment moves the layout in the box.
+  vertical alignment moves the layout in the box. Fonts added through FMX's TFontManager are found: FMX's GTK library
+  (FMUX) adds them to fontconfig's configuration, and the font map looks at it again when their number changed.
   Lines are as high as their fonts' ascent and descent (HarfBuzz's metrics: hhea, or OS/2 with USE_TYPO_METRICS).
 
   Libraries, loaded at run time (dlopen) on first use; GTK 3, which FMX needs on Linux, brings them:
@@ -139,7 +140,7 @@ implementation
 {$IFDEF LINUX}
 
 uses
-  Posix.Dlfcn, FastCanvas.Geometry;
+  Posix.Dlfcn, FMX.FontManager, FastCanvas.Geometry;
 
 {$POINTERMATH ON}
 
@@ -352,6 +353,8 @@ var
   pango_ft2_font_map_new: function: Pointer; cdecl;
   pango_ft2_font_map_set_resolution: procedure(AFontMap: Pointer; ADpiX, ADpiY: Double); cdecl;
   pango_fc_font_get_pattern: function(AFont: Pointer): Pointer; cdecl;
+  pango_fc_font_map_set_config: procedure(AFontMap, AConfig: Pointer); cdecl;
+  pango_fc_font_map_config_changed: procedure(AFontMap: Pointer); cdecl;
   pango_font_map_create_context: function(AFontMap: Pointer): Pointer; cdecl;
   pango_context_set_round_glyph_positions: procedure(AContext: Pointer; ARound: Integer); cdecl;
   pango_context_set_base_dir: procedure(AContext: Pointer; ADirection: Integer); cdecl;
@@ -421,6 +424,7 @@ var
   FcPatternGetBool: function(APattern: Pointer; AObject: PAnsiChar; AN: Integer; out AValue: Integer): Integer; cdecl;
   FcPatternGetMatrix: function(APattern: Pointer; AObject: PAnsiChar; AN: Integer; out AValue: PFcMatrix): Integer;
     cdecl;
+  FcConfigGetCurrent: function: Pointer; cdecl;
   // FreeType.
   FT_Init_FreeType: function(out ALibrary: Pointer): Integer; cdecl;
   FT_Library_Version: procedure(ALibrary: Pointer; out AMajor, AMinor, APatch: Integer); cdecl;
@@ -483,6 +487,8 @@ var
   GLoadError: string;
   GFontMap, GContextLtr, GContextRtl: Pointer;
   GPangoVersion: Integer;
+  /// <summary>The fonts FMX's font manager had added when the font map last looked at fontconfig's.</summary>
+  GCustomFonts: Integer;
   GFt: Pointer;
   /// <summary>PangoFonts (referenced) and what they stand for.</summary>
   GFonts: TDictionary<Pointer, TPangoFontInfo>;
@@ -534,6 +540,8 @@ begin
   @pango_ft2_font_map_set_resolution := Sym(PangoFt2, 'pango_ft2_font_map_set_resolution');
   // Pango 1.48 and later; before, the pattern is the field after the GObject (PangoFcFont.font_pattern).
   @pango_fc_font_get_pattern := Sym(PangoFt2, 'pango_fc_font_get_pattern', True);
+  @pango_fc_font_map_set_config := Sym(PangoFt2, 'pango_fc_font_map_set_config');
+  @pango_fc_font_map_config_changed := Sym(PangoFt2, 'pango_fc_font_map_config_changed');
   @pango_font_map_create_context := Sym(Pango, 'pango_font_map_create_context');
   @pango_context_set_round_glyph_positions := Sym(Pango, 'pango_context_set_round_glyph_positions');
   @pango_context_set_base_dir := Sym(Pango, 'pango_context_set_base_dir');
@@ -596,6 +604,7 @@ begin
   @FcPatternGetInteger := Sym(Fc, 'FcPatternGetInteger');
   @FcPatternGetBool := Sym(Fc, 'FcPatternGetBool');
   @FcPatternGetMatrix := Sym(Fc, 'FcPatternGetMatrix');
+  @FcConfigGetCurrent := Sym(Fc, 'FcConfigGetCurrent');
   @FT_Init_FreeType := Sym(Ft, 'FT_Init_FreeType');
   @FT_Library_Version := Sym(Ft, 'FT_Library_Version');
   @FT_New_Face := Sym(Ft, 'FT_New_Face');
@@ -619,6 +628,7 @@ begin
     Exit(False);
   end;
   GPangoVersion := pango_version;
+  GCustomFonts := TFontManager.CustomFontInfoCount;
   GFontMap := pango_ft2_font_map_new;
   pango_ft2_font_map_set_resolution(GFontMap, 96, 96);
   // One context per base direction: FMX's RightToLeft sets the paragraphs' direction (not guessed from the text);
@@ -635,14 +645,25 @@ begin
   Result := True;
 end;
 
-/// <summary>LoadPango under the lock, raising when the libraries are not there.</summary>
+/// <summary>LoadPango under the lock, raising when the libraries are not there. Fonts that FMX's font manager added
+/// meanwhile (FMUX adds them to fontconfig's configuration) make the font map look at fontconfig's fonts again.
+/// </summary>
 procedure EnsurePango;
 var
   Ok: Boolean;
+  Custom: Integer;
 begin
+  Custom := TFontManager.CustomFontInfoCount;
   TMonitor.Enter(GPangoLock);
   try
     Ok := LoadPango;
+    if Ok and (Custom <> GCustomFonts) then
+    begin
+      GCustomFonts := Custom;
+      // The configuration may be another one now; the font map's caches go either way.
+      pango_fc_font_map_set_config(GFontMap, FcConfigGetCurrent);
+      pango_fc_font_map_config_changed(GFontMap);
+    end;
   finally
     TMonitor.Exit(GPangoLock);
   end;

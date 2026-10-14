@@ -170,8 +170,10 @@ them installed). Only Pango's documented structures are read (glyph strings, ite
 face, glyph slot and bitmap), their layouts checked with `offsetof` against Pango 1.57 and FreeType 2.14 and
 asserted by size at compile time.
 
-- **Layout**: one PangoFT2 font map for the process (fontconfig's fonts and fallback) and a context per base
-  direction (FMX's `RightToLeft`; the direction is not guessed from the text), glyph positions not rounded. A layout is
+- **Layout**: one PangoFT2 font map for the process (fontconfig's fonts and fallback; when FMX's `TFontManager` has
+  added fonts, which FMUX adds to fontconfig's configuration, the map is told that the configuration changed) and a
+  context per base direction (FMX's `RightToLeft`; the direction is not guessed from the text), glyph positions not
+  rounded. A layout is
   a `PangoLayout` with the text in UTF-8 (byte offsets mapped to UTF-16 indices both ways), a font description of
   `TFont` with an absolute size (FMX's sizes are pixels), attributes for the ranges of other fonts, decorations and
   colors (a color only makes Pango end a run; the canvas draws runs in their colors), and the box's width with

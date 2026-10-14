@@ -513,8 +513,9 @@ Linux:
   work as with the other engines. Lines are as high as their fonts' ascent and descent, in fractions of a pixel
   (Skia's paragraphs round them to whole pixels: on DejaVu Sans 14 px a line is 16.30 px with Pango, 16 with Skia).
   Glyphs: FreeType (the engine's own `FT_Library`, a face per font file), unhinted outlines at quarter pixels as with
-  Skia, or lightly hinted (`FastPangoLightHinting`); rotated and large text from FreeType's outlines. Fonts added
-  through FMX's `TFontManager` are not known to it (as to Skia).
+  Skia, or lightly hinted (`FastPangoLightHinting`); rotated and large text from FreeType's outlines. Variable fonts
+  (Ubuntu's) at every weight and width. Fonts added through FMX's `TFontManager` are found (FMX's GTK library adds
+  them to fontconfig's configuration; the engine looks at it again when their number changed), unlike with Skia.
 - **Without Skia**: a Linux program that leaves the Skia units out runs without `libsk4d.so`
   (`tools\build-linux.ps1 -Define FASTCANVAS_NOSKIA` builds the probes so and does not copy it). PortProbe: 15.5 MB
   alone; with the Skia engines linked 16.0 MB and `libsk4d.so` (26.7 MB) next to it (MB of 2^20 bytes).

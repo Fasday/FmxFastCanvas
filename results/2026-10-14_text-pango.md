@@ -37,7 +37,11 @@ took 8.5 s on Linux, Pango's 0.34 s.
   mixed lines; lines 16.30 px (Pango, DejaVu Sans 14) against 16 (Skia rounds line heights); identical glyph shapes
   (both unhinted coverage at quarter pixels).
 - Pango draws what Skia's engine does not: underline and strikeout given as attributes of ranges, word trimming
-  (Skia ellipsizes at characters), emoji presentation of U+2764 U+FE0F (Skia: the text heart).
+  (Skia ellipsizes at characters), emoji presentation of U+2764 U+FE0F (Skia: the text heart), a font added through
+  FMX's `TFontManager` (`--customfont`: Comic Sans MS from a file, also when added after the first layouts; Skia falls
+  back to Noto Sans).
+- A variable font (Ubuntu Sans, weight and width axes): every FMX weight and the condensed width as Skia draws them
+  (the line 900.47 px wide with Pango, 899.98 with Skia).
 - Arabic (joined, right to left), Hebrew, Devanagari conjuncts, Thai marks, the fi ligature, emoji with skin tones,
   ZWJ families and flags: drawn correctly. Korean shows missing glyphs (no Hangul font installed); U+3001 and U+3002
   come from Noto Sans Mongolian, as fontconfig orders the fallback fonts for the C locale (GTK shows the same).
