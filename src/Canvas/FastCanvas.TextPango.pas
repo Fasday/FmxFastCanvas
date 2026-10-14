@@ -6,21 +6,23 @@ unit FastCanvas.TextPango;
   TFastPangoTextLayout lays text out with a PangoLayout on a PangoFT2 font map (fontconfig's fonts and font fallback,
   HarfBuzz shaping, line breaking, bidi, ellipsizing) with absolute font sizes (FMX's sizes are pixels) and glyph
   positions that are not rounded. The layout's runs become the glyph runs right away; the PangoFont of a run is told
-  by its fontconfig pattern (font file, face index, synthetic emboldening and slant) and gets an FT_Face of this unit's
-  own FreeType library, which makes the glyph coverage (unhinted outlines rendered at the canvas's subpixel positions:
-  plain coverage, which the canvas corrects for gamma and contrast as it does DirectWrite's), the glyph outlines (large
-  and rotated text) and the CPU image of layouts with color glyphs (the bitmaps of color fonts such as Noto Color
-  Emoji, scaled; COLR layers as FreeType renders them). Hit testing and regions ask the PangoLayout, made again when
-  asked for (cached layouts do not keep it).
+  by its fontconfig pattern (font file, face index, synthetic emboldening and slant) and the position of its HarfBuzz
+  font on the axes of a variable font, and gets an FT_Face of this unit's own FreeType library at that position,
+  which makes the glyph coverage (unhinted outlines rendered at the canvas's subpixel positions: plain coverage, which
+  the canvas corrects for gamma and contrast as it does DirectWrite's), the glyph outlines (large and rotated text)
+  and the CPU image of layouts with color glyphs (the bitmaps of color fonts such as Noto Color Emoji, scaled; COLR
+  layers as FreeType renders them). Hit testing and regions ask the PangoLayout, made again when asked for (cached
+  layouts do not keep it).
 
   How FMX's layout parameters map, as FastCanvas.TextSkia maps them: WordWrap wraps at word boundaries, inside a word
   longer than the line (PANGO_WRAP_WORD_CHAR); without it lines are as long as they are and the text is moved by the
   alignment (overflowing text extends past the box as with DirectWrite). Trimming: without WordWrap every line
   (paragraph) is ellipsized at the box width; with it, the lines that fit in the box are shown, the last one
   ellipsized. Character trimming is Pango's (PANGO_ELLIPSIZE_END); word trimming cuts at the last word boundary before
-  Pango's cut instead, leaving out the white space before it, as DirectWrite does, and lays the shortened text out
-  again (positions and ranges are mapped between the texts). Leading and trailing alignment follow RightToLeft (the
-  base direction of the paragraphs, not guessed from the text); the vertical alignment moves the layout in the box.
+  Pango's cut instead (a line of one word keeps its first character), leaving out the white space before it, as
+  DirectWrite does, and lays the shortened text out again (positions and ranges are mapped between the texts). Leading
+  and trailing alignment follow RightToLeft (the base direction of the paragraphs, not guessed from the text); the
+  vertical alignment moves the layout in the box.
   Lines are as high as their fonts' ascent and descent (HarfBuzz's metrics: hhea, or OS/2 with USE_TYPO_METRICS).
 
   Libraries, loaded at run time (dlopen) on first use; GTK 3, which FMX needs on Linux, brings them:
@@ -184,6 +186,8 @@ const
   FontWeights: array[TFontWeight] of Integer = (100, 200, 300, 350, 400, 500, 600, 700, 800, 900, 950);
   /// <summary>Pango units of the widest and highest box (a million pixels: within its 32-bit units).</summary>
   MaxPangoSize = 1E6;
+  /// <summary>PangoFonts the table of fonts keeps before it starts over.</summary>
+  MaxFonts = 1024;
 
 type
   // Pango's structs (pango-glyph.h, pango-item.h, pango-layout.h; x86-64, offsets checked with offsetof).
@@ -406,6 +410,7 @@ var
   // HarfBuzz.
   hb_font_get_scale: procedure(AFont: Pointer; out AXScale, AYScale: Integer); cdecl;
   hb_font_get_glyph_h_advance: function(AFont: Pointer; AGlyph: Cardinal): Integer; cdecl;
+  hb_font_get_var_coords_normalized: function(AFont: Pointer; out ALength: Cardinal): PInteger; cdecl;
   // fontconfig.
   FcPatternGetString: function(APattern: Pointer; AObject: PAnsiChar; AN: Integer; out AValue: PAnsiChar): Integer;
     cdecl;
@@ -426,6 +431,7 @@ var
   FT_Load_Glyph: function(AFace: PFTFaceRec; AGlyph: Cardinal; AFlags: Integer): Integer; cdecl;
   FT_Render_Glyph: function(ASlot: PFTGlyphSlotRec; AMode: Integer): Integer; cdecl;
   FT_GlyphSlot_Embolden: procedure(ASlot: PFTGlyphSlotRec); cdecl;
+  FT_Set_Var_Blend_Coordinates: function(AFace: PFTFaceRec; ACount: Cardinal; ACoords: PNativeInt): Integer; cdecl;
   FT_Outline_Decompose: function(AOutline: PFTOutline; AFuncs: PFTOutlineFuncs; AUser: Pointer): Integer; cdecl;
 
 type
@@ -438,6 +444,8 @@ type
     FEmbolden: Boolean;
     FHasMatrix: Boolean;
     FMatrix: TFTMatrix;
+    /// <summary>Variable fonts: the position on the axes HarfBuzz shapes with (normalized, 16.16).</summary>
+    FCoords: TArray<NativeInt>;
     FFace: PFTFaceRec;
     FOpened: Boolean;
     FScalable: Boolean;
@@ -581,6 +589,7 @@ begin
   @pango_font_get_hb_font := Sym(Pango, 'pango_font_get_hb_font');
   @hb_font_get_scale := Sym(HarfBuzz, 'hb_font_get_scale');
   @hb_font_get_glyph_h_advance := Sym(HarfBuzz, 'hb_font_get_glyph_h_advance');
+  @hb_font_get_var_coords_normalized := Sym(HarfBuzz, 'hb_font_get_var_coords_normalized');
   @FcPatternGetString := Sym(Fc, 'FcPatternGetString');
   @FcPatternGetInteger := Sym(Fc, 'FcPatternGetInteger');
   @FcPatternGetBool := Sym(Fc, 'FcPatternGetBool');
@@ -595,6 +604,7 @@ begin
   @FT_Load_Glyph := Sym(Ft, 'FT_Load_Glyph');
   @FT_Render_Glyph := Sym(Ft, 'FT_Render_Glyph');
   @FT_GlyphSlot_Embolden := Sym(Ft, 'FT_GlyphSlot_Embolden');
+  @FT_Set_Var_Blend_Coordinates := Sym(Ft, 'FT_Set_Var_Blend_Coordinates');
   @FT_Outline_Decompose := Sym(Ft, 'FT_Outline_Decompose');
   if Missing <> '' then
   begin
@@ -690,6 +700,8 @@ begin
       FFace := nil
     else
     begin
+      if FCoords <> nil then
+        FT_Set_Var_Blend_Coordinates(FFace, Length(FCoords), @FCoords[0]);
       FScalable := FFace.FaceFlags and FT_FACE_FLAG_SCALABLE <> 0;
       if FFace.FaceFlags and FT_FACE_FLAG_COLOR <> 0 then
         FColor := True;
@@ -768,8 +780,10 @@ var
   HasMatrix: Boolean;
   Key: string;
   Face: TPangoFace;
-  Hb: Pointer;
-  Sx, Sy: Integer;
+  Hb, Font: Pointer;
+  Sx, Sy, I: Integer;
+  Coords: PInteger;
+  CoordCount: Cardinal;
 begin
   if (AFont = nil) or GFonts.TryGetValue(AFont, Result) then
   begin
@@ -778,10 +792,31 @@ begin
     Exit;
   end;
   Result := Default(TPangoFontInfo);
+  // The fonts are kept (referenced) by the table; a program that goes through many sizes starts it over now and
+  // then (the runs hold their faces).
+  if GFonts.Count >= MaxFonts then
+  begin
+    for Font in GFonts.Keys do
+      g_object_unref(Font);
+    GFonts.Clear;
+  end;
   if Assigned(pango_fc_font_get_pattern) then
     Pattern := pango_fc_font_get_pattern(AFont)
   else
     Pattern := PPointer(PByte(AFont) + 3 * SizeOf(Pointer))^;
+  // The size HarfBuzz shapes with (bitmap fonts: the requested size, not the strike's), and the position on the axes
+  // of a variable font (normalized, 2.14).
+  Hb := pango_font_get_hb_font(AFont);
+  Sx := 0;
+  Sy := 0;
+  Coords := nil;
+  CoordCount := 0;
+  if Hb <> nil then
+  begin
+    hb_font_get_scale(Hb, Sx, Sy);
+    Coords := hb_font_get_var_coords_normalized(Hb, CoordCount);
+  end;
+  Result.EmSize := Abs(Sy) / PANGO_SCALE;
   FileName := nil;
   Index := 0;
   Embolden := 0;
@@ -797,6 +832,10 @@ begin
     Key := Format('%s|%d|%d', [string(UTF8String(FileName)), Index, Embolden]);
     if HasMatrix then
       Key := Key + Format('|%g,%g,%g,%g', [M.XX, M.XY, M.YX, M.YY], TFormatSettings.Invariant);
+    if Coords = nil then
+      CoordCount := 0;
+    for I := 0 to Integer(CoordCount) - 1 do
+      Key := Key + Format('|%d', [Coords[I]]);
     if not GFaces.TryGetValue(Key, Result.Face) then
     begin
       Face := TPangoFace.Create;
@@ -813,6 +852,10 @@ begin
         Face.FMatrix.YX := Round(M.YX * 65536);
         Face.FMatrix.YY := Round(M.YY * 65536);
       end;
+      // FreeType's blend coordinates are 16.16.
+      SetLength(Face.FCoords, CoordCount);
+      for I := 0 to Integer(CoordCount) - 1 do
+        Face.FCoords[I] := NativeInt(Coords[I]) * 4;
       // Opened here: the face tells color fonts that fontconfig does not mark.
       TMonitor.Enter(GFtLock);
       try
@@ -823,13 +866,6 @@ begin
       GFaces.Add(Key, Result.Face);
     end;
   end;
-  // The size HarfBuzz shapes with (bitmap fonts: the requested size, not the strike's).
-  Hb := pango_font_get_hb_font(AFont);
-  Sx := 0;
-  Sy := 0;
-  if Hb <> nil then
-    hb_font_get_scale(Hb, Sx, Sy);
-  Result.EmSize := Abs(Sy) / PANGO_SCALE;
   g_object_ref(AFont);
   GFonts.Add(AFont, Result);
 end;
