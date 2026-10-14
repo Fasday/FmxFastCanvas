@@ -156,12 +156,12 @@ uses
   FMX.Types3D, FMX.Controls,
   FastCanvas.D2D1Ext, FastCanvas.DWriteExt, FastCanvas.Device, FastCanvas.Gpu11, FastCanvas.Gpu12,
   FastCanvas.GpuVk, FastCanvas.Text, FastCanvas.RenderQueue, FastCanvas.Service, FastCanvas.Bridge,
-  FastCanvas.Geometry, FastCanvas.GeometryD2D, FastCanvas.TextDWrite, FastCanvas.Platform;
+  FastCanvas.Geometry, FastCanvas.GeometryD2D, FastCanvas.TextDWrite, FastCanvas.Platform, FastCanvas.PathMesh;
 {$ELSE}
   System.Generics.Collections, System.Math.Vectors, System.Messaging, System.Diagnostics, FMX.TextLayout,
   FMX.Types3D, FMX.Controls, FastCanvas.Device, FastCanvas.GpuVk, FastCanvas.Text, FastCanvas.RenderQueue,
   FastCanvas.Service, FastCanvas.Bridge, FastCanvas.Geometry, FastCanvas.GeometryOwn, FastCanvas.GeometrySkia,
-  FastCanvas.TextSkia, FastCanvas.Platform;
+  FastCanvas.TextSkia, FastCanvas.Platform, FastCanvas.PathMesh;
 {$ENDIF}
 
 type
@@ -542,6 +542,10 @@ type
     Frame, TransGen: Integer;
     Bounds: TRectF;
     EvenOdd: Boolean;
+    /// <summary>The renderer draws paths as pieces (TGpuRenderer.PathMeshes): the cover pieces, then the solid ones
+    /// (FastCanvas.PathMesh); nil: the quad.</summary>
+    Mesh: TArray<TPathPiece>;
+    MeshCover, MeshSolid: Integer;
   end;
 
   TEdge = TFastEdge;
@@ -578,6 +582,7 @@ type
     // when the main thread holds the same block lock).
     FSink: TFastEdgeSink;
     FBanded: TArray<TEdge>;
+    FCover, FSolidPieces: TArray<TPathPiece>;
     FFrame, FEdgeResetFrame: Integer;
     /// <summary>The frame in progress is partial but found no frame to start from: it is not presented.</summary>
     FNoPresent: Boolean;
@@ -3562,9 +3567,9 @@ var
   Geometry: IFastGeometry;
   Done: Boolean;
   Fill, Shape: Byte;
-  Bands, N, I, Start: Integer;
+  Bands, N, I, Start, NC, NS: Integer;
   R: TRectF;
-  Q: Single;
+  Q, MinScale, MaxScale, Half, Grow: Single;
   Persistent: Boolean;
 begin
   Bucket := Round(Log2(Max(AScaleMax, 1E-3)) * 4);
@@ -3642,6 +3647,26 @@ begin
     AEdges.Count := FSink.Count;
     AEdges.Bounds := TRectF.Create(FSink.MinX, FSink.MinY, FSink.MaxX, FSink.MaxY);
     AEdges.EvenOdd := FSink.EvenOdd;
+    if FGpu.PathMeshes then
+    begin
+      // Pieces for any scale of the buckets: pixels at most 1 / MinScale local units (the shader's pixel square is
+      // smaller), bands of about eight pixels. Only where the pieces stay within the instance's quad (a pixel around
+      // the bounds at the largest scale): what they draw beyond the bounds then has a coverage of 0.
+      MinScale := Power(2, (BucketMin - 0.5) / 4);
+      MaxScale := Power(2, (Bucket + 0.5) / 4);
+      Half := 0.52 / MinScale;
+      Grow := 0.02 / MinScale;
+      if (Half + Grow <= 1 / MaxScale) and BuildPathMesh(FSink.Edges, FSink.Count, FSink.EvenOdd, FSink.MinY,
+        FSink.MaxY, Half, Grow, 8 / MaxScale, FCover, FSolidPieces, NC, NS) and (NC > 0) then
+      begin
+        SetLength(AEdges.Mesh, NC + NS);
+        Move(FCover[0], AEdges.Mesh[0], NC * SizeOf(TPathPiece));
+        if NS > 0 then
+          Move(FSolidPieces[0], AEdges.Mesh[NC], NS * SizeOf(TPathPiece));
+        AEdges.MeshCover := NC;
+        AEdges.MeshSolid := NS;
+      end;
+    end;
     if not Persistent then
     begin
       AEdges.Frame := FFrame;
@@ -3783,6 +3808,8 @@ begin
   PCardinal(@Inst.U1)^ := Ord(E.EvenOdd);
   PCardinal(@Inst.V1)^ := 0;
   Inst.Texture := nil;
+  if E.MeshCover > 0 then
+    FGpu.AddMesh(@E.Mesh[0], E.MeshCover, E.MeshSolid);
   Result := True;
 end;
 

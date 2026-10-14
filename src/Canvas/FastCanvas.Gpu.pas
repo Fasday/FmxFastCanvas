@@ -48,6 +48,9 @@ const
   GpuClearType = $20000;
   /// <summary>Paths: hard edges (aliased text drawn as outlines).</summary>
   GpuAliased = $40000;
+  /// <summary>Paths with pieces (TGpuRenderer.AddMesh): the back end may draw them instead of the quad. Not read by the
+  /// shaders.</summary>
+  GpuMesh = $80000;
 
   GpuMaxClips = 16384;
   GpuMaxPaints = 4096;
@@ -310,6 +313,7 @@ type
     // Shader data of the changed clip entries (reused: the render thread must not allocate per draw).
     FClipStage: TArray<Single>;
     FBandPixels: Single;
+    FPathMeshes: Boolean;
     procedure ReadTextParameters;
     function TextureSlot(const ATexture: Pointer): Integer;
     function FrameConstants: TGpuFrameConstants;
@@ -380,6 +384,12 @@ type
     /// <summary>Paths: bands of the edge table at most this many pixels tall (0: a band per six edges), where the
     /// back end shades a path's pixels slowly (phones): fewer edges per pixel, more entries in the table.</summary>
     property BandPixels: Single read FBandPixels;
+    /// <summary>The instance appended last is a path, and these are its pieces (FastCanvas.PathMesh: ACover cover
+    /// pieces, then ASolid solid ones, six floats each, in its local space): the back end may draw them instead of the
+    /// quad (PathMeshes). Nothing by default.</summary>
+    procedure AddMesh(const APieces: Pointer; const ACover, ASolid: Integer); virtual;
+    /// <summary>The back end draws paths by their pieces where it can: the canvas makes them (AddMesh).</summary>
+    property PathMeshes: Boolean read FPathMeshes;
     property Target: TGpuSurface read FTarget;
     property DrawCalls: Integer read FDrawCalls write FDrawCalls;
   end;
@@ -705,6 +715,10 @@ begin
 end;
 
 procedure TGpuRenderer.Invalidate;
+begin
+end;
+
+procedure TGpuRenderer.AddMesh(const APieces: Pointer; const ACover, ASolid: Integer);
 begin
 end;
 

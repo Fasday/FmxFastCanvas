@@ -604,6 +604,17 @@ type
   end;
   PGpuVkInteriorVertex = ^TGpuVkInteriorVertex;
 
+  /// <summary>A piece of a path (FastCanvas.PathMesh.TPathPiece): a trapezoid in local units.</summary>
+  TGpuVkPiece = record
+    Y0, Y1, L0, R0, L1, R1: Single;
+  end;
+
+  /// <summary>The pieces of a pending path instance (Index): Cover cover pieces from First in the renderer's pieces,
+  /// then Solid solid ones; Vertex: the first of its triangles in the draw's upload (UploadMeshes).</summary>
+  TGpuVkMeshRef = record
+    Index, First, Cover, Solid, Vertex: Integer;
+  end;
+
   TGpuVkRenderer = class(TGpuRenderer)
   private
     FSamplers: array[0..2] of TVkSampler;
@@ -628,6 +639,19 @@ type
     /// a level (a linear gradient of it is interpolated per vertex in an interior).</summary>
     FRampTexels: array of array[0..GpuRampWidth - 1] of Cardinal;
     FRampLinear: array of Boolean;
+    /// <summary>Paths as pieces (FASTCANVAS_VK_PATHMESH, with the opaque interiors): the pending paths' pieces
+    /// (AddMesh). On a target with the depth buffer such a path is drawn as its cover pieces (FMeshPipes: the
+    /// instance with the triangles' local positions, FVSMeshZ, the depth test and writes) instead of the quad, which
+    /// leaves out the pixels of its bounds that no edge comes near and that it does not cover; an opaque one's solid
+    /// pieces are drawn with the interiors.</summary>
+    FMeshRefs: TArray<TGpuVkMeshRef>;
+    FMeshRefCount: Integer;
+    FMeshPieces: TArray<TGpuVkPiece>;
+    FMeshPieceCount: Integer;
+    FVSMeshZ: TVkShaderModule;
+    FMeshPipes: array[0..1, TGpuVkVariant] of TVkPipeline;
+    /// <summary>DrawPending: the paths with pieces are drawn by them (runs end before them).</summary>
+    FRunStopMesh: Boolean;
     /// <summary>Blending draws in runs of the cheapest variant that fits, with the vertex shader that hands the table
     /// entries to the pixel shader (FVSFlat; the full shader of these runs is FastCanvasVkPSFlat): on GPUs other than
     /// discrete ones, with FASTCANVAS_VK_VARIANTS=1 on any, with 0 on none (the full shader, FPipeBlend). Modules and
@@ -666,10 +690,23 @@ type
       const APixel: TVkShaderModule = VK_NULL_HANDLE; const AVertex: TVkShaderModule = VK_NULL_HANDLE;
       const ADepth: Integer = 0; const AGeometry: TGpuVkGeometry = TGpuVkGeometry.Quads): TVkPipeline;
     function TargetSlot: Integer;
+    /// <summary>The instance has an opaque solid color or a linear gradient whose ramp is opaque and linear (ARow; -1
+    /// for a solid color), and no clip test: its interior can be drawn without blending.</summary>
+    function InteriorPaint(const AInstance: PGpuInstance; out ARow: Integer): Boolean;
+    /// <summary>A vertex of an interior at the local position (X, Y): False where a gradient clamps.</summary>
+    function InteriorVertex(const AInstance: PGpuInstance; const ARow: Integer; const X, Y, AZ: Single;
+      var AOut: PGpuVkInteriorVertex): Boolean;
     /// <summary>The opaque interior of a pending instance as two triangles (6 vertices at AOut) with the depth AZ:
     /// filled rectangles (rounded ones inside their corners) with an opaque solid color or a linear gradient whose ramp
     /// is linear and that covers the interior without clamping, and no clip test. False for others.</summary>
     function InteriorOf(const AInstance: PGpuInstance; const AZ: Single; const AOut: PGpuVkInteriorVertex): Boolean;
+    /// <summary>The solid pieces of a path (mesh reference ARef) as triangles at AOut: their vertex count (0 for a
+    /// path that is not opaque).</summary>
+    function MeshInterior(const AInstance: PGpuInstance; const ARef: Integer; const AZ: Single;
+      const AOut: PGpuVkInteriorVertex): Integer;
+    /// <summary>The cover pieces of the draw's paths into upload memory; False when there are none.</summary>
+    function UploadMeshes(out ABuffer: TVkBuffer; out AOffset: UInt64): Boolean;
+    function MeshPipeline(const AVariant: TGpuVkVariant): TVkPipeline;
     /// <summary>Pass one of a draw on a depth target: the opaque interiors of the pending instances, front to back.
     /// </summary>
     procedure DrawInteriors(const ABase: Cardinal);
@@ -700,6 +737,7 @@ type
     procedure FillCopy(const ARect: TRectF; const AColor: Cardinal; const AClip: Cardinal); override;
     procedure UploadRamp(const ARow: Integer; const AData: Pointer); override;
     procedure UploadGlyph(const X, Y, W, H: Integer; const AData: Pointer; const APitch: Integer); override;
+    procedure AddMesh(const APieces: Pointer; const ACover, ASolid: Integer); override;
   end;
 
   TGpuVkBackend = class(TGpuBackend)
@@ -790,6 +828,7 @@ const
   SlotFormats: array[0..3] of TVkFormat = (VK_FORMAT_B8G8R8A8_UNORM, VK_FORMAT_R8G8B8A8_UNORM,
     VK_FORMAT_B8G8R8A8_UNORM, VK_FORMAT_R8G8B8A8_UNORM);
   InteriorVariable = 'FASTCANVAS_VK_INTERIORS';
+  PathMeshVariable = 'FASTCANVAS_VK_PATHMESH';
   /// <summary>Depth numbers of a rendering instance (shader InstanceDepth: 1 - n / 2^22).</summary>
   DepthNumbers = 4194304;
   /// <summary>Targets with at least this many pixels get a depth buffer for opaque interiors.</summary>
@@ -3946,7 +3985,12 @@ begin
         C.Retire(TGpuVkObject.Pipeline, FVariantPipes[I, V]);
     end;
     for I := 0 to 1 do
+    begin
       C.Retire(TGpuVkObject.Pipeline, FInteriorPipes[I]);
+      for V := Low(TGpuVkVariant) to High(TGpuVkVariant) do
+        C.Retire(TGpuVkObject.Pipeline, FMeshPipes[I, V]);
+    end;
+    C.Retire(TGpuVkObject.ShaderModule, FVSMeshZ);
     C.Retire(TGpuVkObject.ShaderModule, FVSFlatZ);
     C.Retire(TGpuVkObject.ShaderModule, FVSInterior);
     C.Retire(TGpuVkObject.ShaderModule, FPSInterior);
@@ -4342,6 +4386,8 @@ begin
   // Opaque interiors where the variants are (they draw through them), unless turned off.
   FInteriors := FVariants and (C.Fast.DepthFormat <> VK_FORMAT_UNDEFINED) and
     (GetEnvironmentVariable(InteriorVariable) <> '0');
+  // Paths as pieces need the depth buffer of the interiors.
+  FPathMeshes := FInteriors and (GetEnvironmentVariable(PathMeshVariable) <> '0');
   SetLength(FRampTexels, GpuRampRows);
   SetLength(FRampLinear, GpuRampRows);
 
@@ -4504,8 +4550,8 @@ begin
   I := AFirst + 1;
   while I < FPendingCount do
   begin
-    // An outline drawn around its inside (DrawPending) is a run of its own.
-    if Hollow(I, Bands, BandCount) then
+    // An outline drawn around its inside (DrawPending) is a run of its own, and so is a path drawn as pieces.
+    if Hollow(I, Bands, BandCount) or (FRunStopMesh and ((FPending[I].Flags and GpuMesh) <> 0)) then
       Break;
     Needs := InstanceNeeds(@FPending[I], Area);
     Own := GVariantOf[Needs];
@@ -4530,6 +4576,79 @@ begin
   Result := I - AFirst;
 end;
 
+function TGpuVkRenderer.InteriorPaint(const AInstance: PGpuInstance; out ARow: Integer): Boolean;
+var
+  P: PGpuInstance;
+  Area: Single;
+  G: ^TGpuPaint;
+begin
+  Result := False;
+  P := AInstance;
+  ARow := -1;
+  if (P.Color shr 24) <> 255 then
+    Exit;
+  if (InstanceNeeds(P, Area) and (GpuNeedClips or GpuNeedBrushes)) <> 0 then
+    Exit;
+  if P.Paint <> 0 then
+  begin
+    // A linear gradient over a ramp that is opaque and linear.
+    if P.Paint > Cardinal(Length(FPaintData)) then
+      Exit;
+    G := @FPaintData[P.Paint - 1];
+    if G.Data[11] >= 1.5 then
+      Exit;
+    ARow := Trunc(G.Data[10] * GpuRampRows);
+    if (ARow < 0) or (ARow >= Length(FRampLinear)) or not FRampLinear[ARow] or
+      not (Sqr(G.Data[2] - G.Data[0]) + Sqr(G.Data[3] - G.Data[1]) > 1E-12) then
+      Exit;
+  end;
+  Result := True;
+end;
+
+function TGpuVkRenderer.InteriorVertex(const AInstance: PGpuInstance; const ARow: Integer; const X, Y, AZ: Single;
+  var AOut: PGpuVkInteriorVertex): Boolean;
+var
+  P: PGpuInstance;
+  G: ^TGpuPaint;
+  Ex, Ey, T, U, F: Single;
+  K: Integer;
+  C0, C1: Cardinal;
+begin
+  P := AInstance;
+  AOut.X := X * P.M11 + Y * P.M21 + P.Dx;
+  AOut.Y := X * P.M12 + Y * P.M22 + P.Dy;
+  AOut.Z := AZ;
+  AOut.A := 1;
+  if ARow < 0 then
+  begin
+    // The color the shader unpacks.
+    AOut.R := ((P.Color shr 16) and 255) / 255;
+    AOut.G := ((P.Color shr 8) and 255) / 255;
+    AOut.B := (P.Color and 255) / 255;
+  end
+  else
+  begin
+    // The gradient there, without clamping (else no interior), from the ramp as the sampler reads it: texel centers
+    // at t * 255.
+    G := @FPaintData[P.Paint - 1];
+    Ex := G.Data[2] - G.Data[0];
+    Ey := G.Data[3] - G.Data[1];
+    T := ((X - G.Data[0]) * Ex + (Y - G.Data[1]) * Ey) / (Ex * Ex + Ey * Ey);
+    if not ((T >= 0) and (T <= 1)) then
+      Exit(False);
+    U := T * (GpuRampWidth - 1);
+    K := Min(Trunc(U), GpuRampWidth - 2);
+    F := U - K;
+    C0 := FRampTexels[ARow][K];
+    C1 := FRampTexels[ARow][K + 1];
+    AOut.R := ((C0 and 255) * (1 - F) + (C1 and 255) * F) / 255;
+    AOut.G := (((C0 shr 8) and 255) * (1 - F) + ((C1 shr 8) and 255) * F) / 255;
+    AOut.B := (((C0 shr 16) and 255) * (1 - F) + ((C1 shr 16) and 255) * F) / 255;
+  end;
+  Inc(AOut);
+  Result := True;
+end;
+
 function TGpuVkRenderer.InteriorOf(const AInstance: PGpuInstance; const AZ: Single;
   const AOut: PGpuVkInteriorVertex): Boolean;
 const
@@ -4538,39 +4657,17 @@ const
   HalfPixel = 0.52;
 var
   P: PGpuInstance;
-  Area: Single;
-  Det, W, Mx, My, X0, Y0, X1, Y1, Sx, Sy, Ex, Ey, L2: Single;
-  G: ^TGpuPaint;
-  Row, I, K: Integer;
-  Xs, Ys, T: array[0..3] of Single;
-  Colors: array[0..3, 0..3] of Single;
-  Needs: Cardinal;
+  Area, Det, W, Mx, My, X0, Y0, X1, Y1: Single;
+  Row: Integer;
   V: PGpuVkInteriorVertex;
-  U, F: Single;
-  C0, C1: Cardinal;
-
-  procedure Put(const AIndex: Integer);
-  begin
-    V.X := Xs[AIndex] * P.M11 + Ys[AIndex] * P.M21 + P.Dx;
-    V.Y := Xs[AIndex] * P.M12 + Ys[AIndex] * P.M22 + P.Dy;
-    V.Z := AZ;
-    V.R := Colors[AIndex, 0];
-    V.G := Colors[AIndex, 1];
-    V.B := Colors[AIndex, 2];
-    V.A := 1;
-    Inc(V);
-  end;
-
 begin
   Result := False;
   P := AInstance;
-  if ((P.Flags and 15) <> GpuKindFillRect) or ((P.Color shr 24) <> 255) then
+  if (P.Flags and 15) <> GpuKindFillRect then
     Exit;
-  Needs := InstanceNeeds(P, Area);
-  if (Needs and (GpuNeedClips or GpuNeedBrushes)) <> 0 then
-    Exit;
+  InstanceNeeds(P, Area);
   // Too small for the triangles to pay.
-  if Area < 256 then
+  if (Area < 256) or not InteriorPaint(P, Row) then
     Exit;
   Det := P.M11 * P.M22 - P.M12 * P.M21;
   if not (Abs(Det) > 1E-12) then
@@ -4591,85 +4688,66 @@ begin
   Y1 := Max(P.Y0, P.Y1) - My;
   if not ((X1 - X0) * (Y1 - Y0) * Abs(Det) >= 64) or not (Abs(X0) + Abs(X1) + Abs(Y0) + Abs(Y1) < 1E7) then
     Exit;
-  Xs[0] := X0;
-  Ys[0] := Y0;
-  Xs[1] := X1;
-  Ys[1] := Y0;
-  Xs[2] := X0;
-  Ys[2] := Y1;
-  Xs[3] := X1;
-  Ys[3] := Y1;
-  if P.Paint = 0 then
-  begin
-    // The color the shader unpacks.
-    for I := 0 to 3 do
-    begin
-      Colors[I, 0] := ((P.Color shr 16) and 255) / 255;
-      Colors[I, 1] := ((P.Color shr 8) and 255) / 255;
-      Colors[I, 2] := (P.Color and 255) / 255;
-    end;
-  end
-  else
-  begin
-    // A linear gradient over a ramp that is opaque and linear, without clamping inside: the colors at the corners.
-    if P.Paint > Cardinal(Length(FPaintData)) then
-      Exit;
-    G := @FPaintData[P.Paint - 1];
-    if G.Data[11] >= 1.5 then
-      Exit;
-    Row := Trunc(G.Data[10] * GpuRampRows);
-    if (Row < 0) or (Row >= Length(FRampLinear)) or not FRampLinear[Row] then
-      Exit;
-    Sx := G.Data[0];
-    Sy := G.Data[1];
-    Ex := G.Data[2] - Sx;
-    Ey := G.Data[3] - Sy;
-    L2 := Ex * Ex + Ey * Ey;
-    if not (L2 > 1E-12) then
-      Exit;
-    for I := 0 to 3 do
-    begin
-      T[I] := ((Xs[I] - Sx) * Ex + (Ys[I] - Sy) * Ey) / L2;
-      if not ((T[I] >= 0) and (T[I] <= 1)) then
-        Exit;
-      // The ramp as the sampler reads it: texel centers at t * 255.
-      U := T[I] * (GpuRampWidth - 1);
-      K := Min(Trunc(U), GpuRampWidth - 2);
-      F := U - K;
-      C0 := FRampTexels[Row][K];
-      C1 := FRampTexels[Row][K + 1];
-      Colors[I, 0] := ((C0 and 255) * (1 - F) + (C1 and 255) * F) / 255;
-      Colors[I, 1] := (((C0 shr 8) and 255) * (1 - F) + ((C1 shr 8) and 255) * F) / 255;
-      Colors[I, 2] := (((C0 shr 16) and 255) * (1 - F) + ((C1 shr 16) and 255) * F) / 255;
-    end;
-  end;
   V := AOut;
-  Put(0);
-  Put(1);
-  Put(2);
-  Put(1);
-  Put(3);
-  Put(2);
-  Result := True;
+  Result := InteriorVertex(P, Row, X0, Y0, AZ, V) and InteriorVertex(P, Row, X1, Y0, AZ, V) and
+    InteriorVertex(P, Row, X0, Y1, AZ, V) and InteriorVertex(P, Row, X1, Y0, AZ, V) and
+    InteriorVertex(P, Row, X1, Y1, AZ, V) and InteriorVertex(P, Row, X0, Y1, AZ, V);
+end;
+
+function TGpuVkRenderer.MeshInterior(const AInstance: PGpuInstance; const ARef: Integer; const AZ: Single;
+  const AOut: PGpuVkInteriorVertex): Integer;
+var
+  P: PGpuInstance;
+  R: ^TGpuVkMeshRef;
+  S: ^TGpuVkPiece;
+  Row, I: Integer;
+  V: PGpuVkInteriorVertex;
+begin
+  // The solid pieces of an opaque path (PathCoverage is 1 at their pixel centers).
+  Result := 0;
+  P := AInstance;
+  R := @FMeshRefs[ARef];
+  if (R.Solid = 0) or not InteriorPaint(P, Row) then
+    Exit;
+  V := AOut;
+  for I := 0 to R.Solid - 1 do
+  begin
+    S := @FMeshPieces[R.First + R.Cover + I];
+    if not (InteriorVertex(P, Row, S.L0, S.Y0, AZ, V) and InteriorVertex(P, Row, S.R0, S.Y0, AZ, V) and
+      InteriorVertex(P, Row, S.L1, S.Y1, AZ, V) and InteriorVertex(P, Row, S.R0, S.Y0, AZ, V) and
+      InteriorVertex(P, Row, S.R1, S.Y1, AZ, V) and InteriorVertex(P, Row, S.L1, S.Y1, AZ, V)) then
+      // A gradient that clamps there: the whole path in pass two.
+      Exit(0);
+    Inc(Result, 6);
+  end;
 end;
 
 procedure TGpuVkRenderer.DrawInteriors(const ABase: Cardinal);
 var
   C: TGpuVkContext;
-  I, N, S: Integer;
+  I, N, S, Ref, Need: Integer;
   Z: Single;
   P: PByte;
   Buffer: TVkBuffer;
   Offset: UInt64;
 begin
   N := 0;
-  if Length(FInteriorData) < 6 * FPendingCount then
-    SetLength(FInteriorData, Max(6 * FPendingCount, 2 * Length(FInteriorData)));
+  Need := 6 * FPendingCount + 6 * FMeshPieceCount;
+  if Length(FInteriorData) < Need then
+    SetLength(FInteriorData, Max(Need, 2 * Length(FInteriorData)));
+  Ref := FMeshRefCount - 1;
   // Front to back: the later an instance, the closer (the GPU drops what an earlier one would shade under it).
   for I := FPendingCount - 1 downto 0 do
   begin
     Z := 1 - (ABase + Cardinal(I) + 1) * (1 / DepthNumbers);
-    if InteriorOf(@FPending[I], Z, @FInteriorData[N]) then
+    if (FPending[I].Flags and GpuMesh) <> 0 then
+    begin
+      while (Ref >= 0) and (FMeshRefs[Ref].Index > I) do
+        Dec(Ref);
+      if (Ref >= 0) and (FMeshRefs[Ref].Index = I) then
+        Inc(N, MeshInterior(@FPending[I], Ref, Z, @FInteriorData[N]));
+    end
+    else if InteriorOf(@FPending[I], Z, @FInteriorData[N]) then
       Inc(N, 6);
   end;
   if N = 0 then
@@ -4695,6 +4773,89 @@ begin
   C.Vk.CmdBindVertexBuffers(C.Cmd, 0, 1, @Buffer, @Offset);
   C.Vk.CmdDraw(C.Cmd, N, 1, 0, 0);
   Inc(FDrawCalls);
+end;
+
+procedure TGpuVkRenderer.AddMesh(const APieces: Pointer; const ACover, ASolid: Integer);
+var
+  R: ^TGpuVkMeshRef;
+begin
+  if not FPathMeshes or (FPendingCount = 0) or (ACover <= 0) then
+    Exit;
+  if FMeshRefCount = Length(FMeshRefs) then
+    SetLength(FMeshRefs, Max(16, 2 * FMeshRefCount));
+  if FMeshPieceCount + ACover + ASolid > Length(FMeshPieces) then
+    SetLength(FMeshPieces, Max(FMeshPieceCount + ACover + ASolid, 2 * Length(FMeshPieces)));
+  R := @FMeshRefs[FMeshRefCount];
+  Inc(FMeshRefCount);
+  R.Index := FPendingCount - 1;
+  R.First := FMeshPieceCount;
+  R.Cover := ACover;
+  R.Solid := ASolid;
+  Move(APieces^, FMeshPieces[FMeshPieceCount], (ACover + ASolid) * SizeOf(TGpuVkPiece));
+  Inc(FMeshPieceCount, ACover + ASolid);
+  FPending[FPendingCount - 1].Flags := FPending[FPendingCount - 1].Flags or GpuMesh;
+end;
+
+function TGpuVkRenderer.UploadMeshes(out ABuffer: TVkBuffer; out AOffset: UInt64): Boolean;
+var
+  I, J, N: Integer;
+  R: ^TGpuVkMeshRef;
+  S: ^TGpuVkPiece;
+  D: PSingle;
+  P: PByte;
+
+  procedure Put(const X, Y: Single);
+  begin
+    D^ := X;
+    Inc(D);
+    D^ := Y;
+    Inc(D);
+  end;
+
+begin
+  // The cover pieces of every path of the draw as triangles of local positions (TGpuVkMeshRef.Vertex: the first).
+  N := 0;
+  for I := 0 to FMeshRefCount - 1 do
+    Inc(N, 6 * FMeshRefs[I].Cover);
+  Result := N > 0;
+  if not Result then
+    Exit;
+  P := GpuVk.Upload(N * 8, 16, ABuffer, AOffset);
+  D := PSingle(P);
+  N := 0;
+  for I := 0 to FMeshRefCount - 1 do
+  begin
+    R := @FMeshRefs[I];
+    R.Vertex := N;
+    for J := 0 to R.Cover - 1 do
+    begin
+      S := @FMeshPieces[R.First + J];
+      Put(S.L0, S.Y0);
+      Put(S.R0, S.Y0);
+      Put(S.L1, S.Y1);
+      Put(S.R0, S.Y0);
+      Put(S.R1, S.Y1);
+      Put(S.L1, S.Y1);
+    end;
+    Inc(N, 6 * R.Cover);
+  end;
+end;
+
+function TGpuVkRenderer.MeshPipeline(const AVariant: TGpuVkVariant): TVkPipeline;
+var
+  S: Integer;
+begin
+  S := TargetSlot and 1;
+  Result := FMeshPipes[S, AVariant];
+  if Result <> VK_NULL_HANDLE then
+    Exit;
+  // The variant's pixel shader (made with its pipeline).
+  VariantPipeline(AVariant);
+  if FVSMeshZ = VK_NULL_HANDLE then
+    FVSMeshZ := NewModule(@FastCanvasVkVSMeshZ[0], Length(FastCanvasVkVSMeshZ));
+  // The depth test and writes: a pixel two pieces of the path overlap at is shaded once.
+  Result := NewPipeline(SlotFormats[S], True, False, FVariantPS[AVariant], FVSMeshZ, 3, TGpuVkGeometry.Meshes);
+  FMeshPipes[S, AVariant] := Result;
 end;
 
 procedure TGpuVkRenderer.CreateEdgeTable(const ACapacity: Integer);
@@ -4853,10 +5014,15 @@ var
   Bands: TGpuBands;
   Area: Single;
   Base: Cardinal;
+  MeshBuffer: TVkBuffer;
+  MeshOffset: UInt64;
+  Ref: Integer;
 begin
   if (FPendingCount = 0) or (FTarget = nil) or (TGpuVkSurface(FTarget).Image = VK_NULL_HANDLE) then
   begin
     FPendingCount := 0;
+    FMeshRefCount := 0;
+    FMeshPieceCount := 0;
     Exit;
   end;
   C := GpuVk;
@@ -4928,9 +5094,32 @@ begin
     DrawInteriors(Base);
   end;
   C.Vk.CmdBindVertexBuffers(Cmd, 0, 1, @Buffer, @Offset);
+  // Paths with pieces on a target with the depth buffer: drawn by their cover pieces (local positions at binding 1).
+  FRunStopMesh := Variants and C.RenderingDepth and UploadMeshes(MeshBuffer, MeshOffset);
+  if FRunStopMesh then
+    C.Vk.CmdBindVertexBuffers(Cmd, 1, 1, @MeshBuffer, @MeshOffset);
+  Ref := 0;
   First := 0;
   while First < FPendingCount do
   begin
+    if FRunStopMesh and ((FPending[First].Flags and GpuMesh) <> 0) then
+    begin
+      while (Ref < FMeshRefCount - 1) and (FMeshRefs[Ref].Index < First) do
+        Inc(Ref);
+      if FMeshRefs[Ref].Index = First then
+      begin
+        Pipe := MeshPipeline(GVariantOf[InstanceNeeds(@FPending[First], Area)]);
+        if Pipe <> FBoundPipe then
+        begin
+          C.Vk.CmdBindPipeline(Cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, Pipe);
+          FBoundPipe := Pipe;
+        end;
+        C.Vk.CmdDraw(Cmd, 6 * FMeshRefs[Ref].Cover, 1, FMeshRefs[Ref].Vertex, First);
+        Inc(FDrawCalls);
+        Inc(First);
+        Continue;
+      end;
+    end;
     // Blending draws: runs of the variants of the pixel shader (the pipelines share the layout: the set stays
     // bound). Copies and dual-source blending: one draw with the full shader.
     BandCount := 0;
@@ -4981,7 +5170,10 @@ begin
     end;
     Inc(First, Count);
   end;
+  FRunStopMesh := False;
   FPendingCount := 0;
+  FMeshRefCount := 0;
+  FMeshPieceCount := 0;
 end;
 
 procedure TGpuVkRenderer.Clear(const AColor: Cardinal);
