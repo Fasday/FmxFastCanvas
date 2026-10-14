@@ -296,8 +296,25 @@ only), without the presenting thread's copy into the swap chain (0.7-1.3 ms). "B
 Where many shapes are drawn, `TCanvasGpu`'s main thread is the limit (`roundrects` 32.5 ms, `paths` 41.4 ms,
 `bitmaps` 25.4 ms a frame of recording and drawing) and FastCanvas records the same in 0.4-3.4 ms; where a few large
 shapes are drawn the GPU decides. Still slower than `TCanvasGpu` on the phone: `strokes` medium (dashed outlines,
-24.9 ms of GPU) and `viewport3d` (the 3D context's 4x multisampled target is stored and resolved through memory:
-19.8 ms of render passes and 7.6 ms of copies a frame; with one sample 6.7 ms and 0.9 ms).
+24.9 ms of GPU) and, until the change below, `viewport3d` (the 3D context's 4x multisampled target was stored and
+resolved through memory: 19.8 ms of render passes and 7.6 ms of copies a frame; with one sample 6.7 ms and 0.9 ms).
+
+The 3D context's multisampled scenes resolved in their rendering instance, their samples and depth not stored
+(`ARCHITECTURE.md`, "The 3D contexts"), same phone and day, FPS and GPU ms a frame (render passes / command buffers,
+which hold the copies too); `TCanvasGpu` draws its viewports without multisampling. "Before" is `ea546c1`. The
+pictures are the same: PortProbe's scene with the cube at `--time=3.7` pixel for pixel, `viewport3d` antialiased as
+before.
+
+| Scene | N | TCanvasGpu FPS | before FPS | GPU | after FPS | GPU |
+|---|---:|---:|---:|---:|---:|---:|
+| `viewport3d` light | 5 | 117.8 | 35.1 | 19.9 / 27.6 | 115.5-119.0 | 5.9-6.5 / 6.8-7.4 |
+| `viewport3d` medium | 44 | 118.5 | 26.1 | 29.8 / 37.6 | 116.6 | 5.8 / 6.7 |
+| `effects` light | 7 | 119.2 | 119.1 | 1.8 / 1.8 | 119.1 | 1.8 / 1.8 |
+| PortProbe's scene (cube) | | | 115.1 | 5.4 / 7.0 | 114.9-118.3 | 4.9 / 5.4-5.8 |
+
+`viewport3d` medium needed the chunk held for the scene too: its vertices passed the canvas's 256 KB hand-over, the
+chunk's end split the scene's rendering instance (stored and loaded again: 31.6 FPS, 30.3 ms of render passes).
+`effects` has no multisampled scene (FMX's filters draw single-sampled quads).
 ## Running the benchmark
 
 Everything that produced the tables is in the repository:

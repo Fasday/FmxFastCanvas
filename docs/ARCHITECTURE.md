@@ -19,7 +19,7 @@ FMX itself (forms, controls, styles, layout, animations) is unchanged.
 | `FastCanvas.Device` | The device of the process (Direct3D 11 or 12), DXGI, Direct2D factory (CPU geometry), DirectWrite. |
 | `FastCanvas.Hdr`, `Shaders/FastOutput.hlsl` | HDR output: the setting, what the display of a window can show (DXGI outputs, SDR white level), the pass that turns a window's frame into scRGB. |
 | `FastCanvas.Service` | Installs the canvas class and the 3D context class into FMX (`IFMXCanvasService`, `IFMXContextService`). |
-| `FastCanvas.Bridge` | What a 3D context needs from the canvas: device, lock, bitmap textures, a way into the command stream. |
+| `FastCanvas.Bridge` | What a 3D context needs from the canvas: device, lock, bitmap textures, a way into the command stream and a look at the commands ahead of the running one, a hold on the chunk. |
 | `FastCanvas.Context3D` | The part of the 3D contexts that does not depend on the API: shaders and their variables, pipeline state, vertex layouts, the settings of the ray-traced effects. |
 | `FastCanvas.Context3D11`, `FastCanvas.Context3D12`, `FastCanvas.Context3DVk` | The 3D contexts (`TContext3D`) for `TViewport3D`, `TForm3D` and the effects. |
 | `FastCanvas.Context3D12.Ray.inc`, `Shaders/FastRay.hlsl` → `FastCanvas.RayShaders.inc` | Ray-traced effects (DXR 1.1, shader model 6.5). |
@@ -404,6 +404,28 @@ own for each back end, on the canvas's device:
   variables too, for the platforms without Direct3D sources (found by the GLSL alone there; the script checks that a
   source and stage has one layout). The SPIR-V targets Vulkan 1.1. A `TForm3D` draws into the frame surface of a
   canvas window, presented as the canvas's windows are.
+- **Vulkan, multisampling on tilers**: a 4x multisampled scene used to store its samples and its depth at the end of
+  its rendering instance and resolve them with `vkCmdResolveImage`: on the Mali-G57 the samples went through memory
+  twice (19.8 ms of render passes and 7.6 ms of copies a frame for the benchmark's `viewport3d`, light). Now the
+  multisampled color is a transient attachment (and so is the depth where no ray-traced effects read it: lazily
+  allocated memory where the device has it, `VK_IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT`), and a scene is resolved by its
+  own rendering instance: a resolve attachment of the render pass on the Vulkan 1.1 core path (the framebuffer gets
+  the resolve view; pipelines stay those of the pass without it, compatible since there is one subpass), the resolve
+  mode `AVERAGE` of the color attachment with dynamic rendering. Store operations are chosen when an instance begins,
+  so the render thread looks ahead (`FastBridge.NextCommand`: the commands after the running one in the chunk being
+  executed): when only the scene's draws (whose textures are ready: no barrier, no deferred clear of a canvas bitmap),
+  clears and its target come before its end command (`HandleEnd`), the instance resolves into the scene's texture at
+  its end and stores neither the samples nor the depth and stencil (`DONT_CARE`) unless a later scene reads them: the
+  context learns that on the main thread (a scene that draws before it clears them, or ends without clearing its
+  multisampled color, `KeepColor`/`KeepDepth`/`KeepStencil`; content left undefined is cleared by the next instance's
+  load operations). Anything else before the end (a copy, a texture update, canvas drawing into a bitmap, the ray
+  passes, another context's scene, the end of the chunk) and the instance stores them as before; the end then resolves
+  them in an instance of its own (`ResolvePass`). An instance that was to last to the end and did not (a fault of the
+  look ahead) is counted in the GPU timing's report. So that a large scene (vertices travel in the stream) reaches the
+  render thread in one chunk, a scene with samples or depth holds the canvas's chunk (`FastChunkHold`: no early
+  hand-over at 256 KB, up to 32 MB). On the Mali-G57 (2026-10-14) `viewport3d` light went from 35 to 115-119 FPS (19.9
+  -> 5.9-6.5 ms of render passes, 27.6 -> 6.8-7.4 ms of command buffers), medium from 31.6 (split by the chunk's end)
+  to 116.6 FPS; the desktop's pictures are the same pixel for pixel (`BENCHMARKS.md`).
 - Bitmaps of the canvas are used in place as textures and render targets: a `TViewport3D` renders and copies its image
   into the form's bitmap on the GPU (the stock contexts read it back through the CPU), and the effects filter canvas
   bitmaps without leaving the GPU.

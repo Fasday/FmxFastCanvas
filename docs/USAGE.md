@@ -447,6 +447,18 @@ but for a few pixels of strokes), at about its speed (`BENCHMARKS.md`). It is th
   shader (the variables of its Direct3D source: offsets, sizes, texture units) is kept in the generated include with
   its SPIR-V and attribute locations, so the context runs where FMX ships no Direct3D sources too (Android, Linux):
   there it finds a shader by its GLSL source alone. The SPIR-V is version 1.3, for Vulkan 1.1 devices.
+- **Multisampling** (a `TViewport3D` has 4 samples by default, a `TForm3D` what its `Multisample` says): a scene is
+  resolved by its own rendering instance (a resolve attachment of the render pass; with dynamic rendering the
+  resolve mode of the color attachment), and the samples, the depth and the stencil are not written to memory at the
+  scene's end; they are transient attachments, in lazily allocated memory where the device has it (the depth only
+  where there are no ray queries: the ray-traced effects read it). On a tiler (phones) the samples then never leave
+  tile memory: on the Mali-G57 the benchmark's `viewport3d` went from 35 to 115-119 FPS (`BENCHMARKS.md`). What
+  interrupts a scene (a copy or a texture update recorded in it, canvas drawing into a bitmap during it, the ray-traced
+  effects, a nested scene of another context) stores them as before and the scene's end resolves them in a rendering
+  instance of its own; the pictures are the same either way. As with FMX's Metal context, the multisampled color, the
+  depth and the stencil do not outlast a scene: one that draws before it clears them (or ends without clearing its
+  color) makes the context keep them for the scenes after it, and finds them cleared (transparent, depth 1, stencil 0)
+  itself. FMX's `TViewport3D` and `TForm3D` clear color and depth at every scene.
 - **Memory**: textures and buffers share blocks of device memory (32 MB device-local, 8 MB host-visible; larger
   resources get memory of their own), so thousands of bitmaps take a few memory objects. `FASTCANVAS_VK_STATS=<file>`
   appends the peak numbers of memory objects and allocations when the device goes.
@@ -542,7 +554,12 @@ Android:
   1.4 ms either way, the gradient background added 2.5 ms before and 0.6 ms now, the wave 2.1 and 0.5 ms, the star
   with its dashed outline 1.8 and 0.3 ms; with the cube 7.0 ms; the scene paused with only
   a button changing (`--pause=1`) 1.0 ms of render pass plus 1.6 ms of copies (the last frame into the new one, the
-  frame into the swap chain) against 4.4 ms for whole frames (`--partial=0`). PortProbe `--scene=<name>` runs a scene
+  frame into the swap chain) against 4.4 ms for whole frames (`--partial=0`). With the cube's samples resolved in its
+  rendering instance and not stored ("Multisampling" under "Vulkan back end", same day) the scene with the cube takes
+  4.9 ms of render passes and 5.4-5.8 ms of command buffers a frame (before: 5.4 and 6.7-7.0 ms), 115-118 FPS either
+  way; the picture is the same, pixel for pixel (`--time=3.7`). `--split=1` adds a plane to the cube's viewport that
+  shows a bitmap the cube's `OnRender` draws into: canvas drawing in the middle of the scene, which then stores its
+  samples and loads them again (5 render passes, 6.6 ms). PortProbe `--scene=<name>` runs a scene
   of the benchmark (`--preset`, `--count`): FastCanvas against `TCanvasGpu` on that phone is in `BENCHMARKS.md`.
   `FASTCANVAS_VK_DIRECT=1` stays slower there: a render pass into the swap chain's images costs about as much more as
   the copy it saves (`ARCHITECTURE.md`).
@@ -647,7 +664,9 @@ Linux:
 - `FASTCANVAS_VK_GPUTIME=1` (the platform's log: `adb logcat`, tag `FastCanvas`; `OutputDebugString` on Windows) or
   `=<file>`: every two seconds the GPU time per window frame of the render passes, of the command buffers and of the
   presented copies, from timestamps (a tile-based GPU cannot time its draws one by one: the render passes are the
-  unit).
+  unit), and how the 3D context's scenes ended: in their rendering instance (resolved there), resolved apart, with
+  rendering instances stored before their end, and instances that ended before the end they were planned to last to
+  (0 but for a fault).
 - `FASTCANVAS_VK_VARIANTS=1`: the shader variants of phones on any GPU (a test of their pixels on a desktop GPU), `0`:
   the full shader everywhere. `FASTCANVAS_VK_INTERIORS=0`: no opaque interiors (and no paths as pieces) where the
   variants are; `FASTCANVAS_VK_PATHMESH=0`: no paths as pieces. `FASTCANVAS_VK_DIRECT=1`: frames drawn straight into

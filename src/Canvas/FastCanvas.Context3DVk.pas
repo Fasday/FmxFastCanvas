@@ -26,8 +26,16 @@ unit FastCanvas.Context3DVk;
 
   Targets: TViewport3D and filters draw into textures (a bitmap of the canvas is used in place: DoBitmapToTexture,
   DoCopyToBitmap), a TForm3D into the frame surface of a window of the canvas back end (TGpuVkWindow: presented by its
-  own thread). Depth and stencil in D32_SFLOAT_S8_UINT (the AMD driver has no D24_UNORM_S8_UINT). Multisampling with
-  a resolve at the end of the scene. Mipmaps are made on the CPU when a texture is updated.
+  own thread). Depth and stencil in D32_SFLOAT_S8_UINT (the AMD driver has no D24_UNORM_S8_UINT). Mipmaps are made on
+  the CPU when a texture is updated.
+
+  Multisampling and tilers: the multisampled color (and the depth, where no ray-traced effects read it) is a transient
+  attachment. A rendering instance into the target looks ahead in the chunk being executed (EndsInPass): when nothing
+  but the scene's own draws and clears comes before the scene's end, it resolves into the scene's texture at its end
+  (a subpass resolve attachment, or the resolve mode of dynamic rendering) and does not store the samples, the depth
+  and the stencil unless a later scene reads them (TFastContext3DVk.FKeep), so a tiler keeps them in tile memory;
+  else it stores them as before, and the scene's end resolves them in a rendering instance of its own (ResolvePass).
+  A scene holds the canvas's chunk (FastChunkHold) so that its commands reach the render thread together.
 
   Ray-traced effects (RayTracing, FastContext3DRayTracing: shadows, soft shadows, ambient occlusion, reflections) with
   ray queries over the scene's acceleration structures (FastCanvas.Context3DVk.Ray.inc), where the device has them
