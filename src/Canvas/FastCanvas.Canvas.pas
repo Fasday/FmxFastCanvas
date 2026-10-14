@@ -11,12 +11,13 @@ unit FastCanvas.Canvas;
   text is drawn from glyph outlines, color fonts from an image rasterized once. Clips are a table of pixel boxes plus
   up to two oriented rectangles per entry, tested per pixel, so clip changes do not split draw calls.
 
-  Contract: TCanvas (FMX.Graphics.pas:980-1229), TTextLayout (FMX.TextLayout.pas:48-177). On Direct3D 12 the canvas
-  reports TCanvasStyle.SupportClipRects (FastCanvasPartialFrames): FMX then repaints only the rectangles that changed
-  (FMX.Forms.pas:6387-6464); such a frame starts from the swap chain buffer shown last (flip sequential) and draws
-  only inside them (a clip box around them, the rectangles tested per pixel when there are several). A frame that
-  finds nothing to start from (a new or resized swap chain) is not presented, and the forms repaint in full. On
-  Direct3D 11 FMX repaints the whole form every time. }
+  Contract: TCanvas (FMX.Graphics.pas:980-1229), TTextLayout (FMX.TextLayout.pas:48-177). On Direct3D 12 and Vulkan
+  the canvas reports TCanvasStyle.SupportClipRects (FastCanvasPartialFrames): FMX then repaints only the rectangles
+  that changed (FMX.Forms.pas:6387-6464); such a frame starts from the frame shown last (Direct3D 12: the swap chain
+  buffer, flip sequential; Vulkan: the window's surface) and draws only inside them (a clip box around them, the
+  rectangles tested per pixel when there are several). A frame that finds nothing to start from (a new or resized
+  swap chain or surface) is not presented, and the forms repaint in full. On Direct3D 11 FMX repaints the whole form
+  every time. }
 
 interface
 
@@ -93,14 +94,14 @@ var
   /// so that a new device after a device removal gets them back (the stock Direct2D canvas loses them). Bitmaps the
   /// GPU draws into do not keep one: FMX draws them again.</summary>
   FastCanvasKeepBitmapCopies: Boolean = True;
-  /// <summary>Direct3D 12: the canvas reports TCanvasStyle.SupportClipRects, so FMX paints only the controls in the
-  /// rectangles that changed (FMX.Forms.pas:6434-6464, :6509-6560); a window frame then starts from the one shown
-  /// last and draws only inside those rectangles. As the stock Direct2D canvas. Measured 2026-10-08: listbox (lists
-  /// scrolled in part of a form) 327 -> 357 and 181 -> 207 FPS; controls (hundreds of moving controls, every frame
-  /// the whole window) -5 %: FMX then works out the update rectangle of every control that moves
-  /// (FMX.Controls.pas:3637). Direct3D 11 has no access to the buffer shown last (flip model: buffer 0 only), so it
-  /// keeps full repaints. Read by GetCanvasStyle, which FMX asks at every paint and invalidation: change it before
-  /// forms are shown.</summary>
+  /// <summary>Direct3D 12 and Vulkan: the canvas reports TCanvasStyle.SupportClipRects, so FMX paints only the
+  /// controls in the rectangles that changed (FMX.Forms.pas:6434-6464, :6509-6560); a window frame then starts from
+  /// the one shown last and draws only inside those rectangles. As the stock Direct2D canvas. Measured 2026-10-08:
+  /// listbox (lists scrolled in part of a form) 327 -> 357 and 181 -> 207 FPS; controls (hundreds of moving controls,
+  /// every frame the whole window) -5 %: FMX then works out the update rectangle of every control that moves
+  /// (FMX.Controls.pas:3637); Vulkan 2026-10-14: listbox 373 -> 477, controls -5 %. Direct3D 11 has no access to the
+  /// buffer shown last (flip model: buffer 0 only), so it keeps full repaints. Read by GetCanvasStyle, which FMX asks
+  /// at every paint and invalidation: change it before forms are shown.</summary>
   FastCanvasPartialFrames: Boolean = True;
   /// <summary>How windows show their frames (not transparent forms, which are layered windows, nor TForm3D). Read at
   /// every window frame: a change makes the window's swap chain again, and the form repaints in full. A form whose
@@ -1714,7 +1715,7 @@ end;
 class function TFastCanvas.GetCanvasStyle: TCanvasStyles;
 begin
   // The global canvas lock stays on: recording into the shared command stream relies on it.
-  if FastCanvasPartialFrames and (TFastDevice.Backend = TFastCanvasBackend.D3D12) then
+  if FastCanvasPartialFrames and (TFastDevice.Backend <> TFastCanvasBackend.D3D11) then
     Result := [TCanvasStyle.SupportClipRects]
   else
     Result := [];
@@ -1905,7 +1906,7 @@ end;
 procedure TFastCanvas.PartialRegion(const ARects: TClipRects);
 begin
   if (FKeptW <> FPixelW) or (FKeptH <> FPixelH) or (FKeptGen <> GDeviceGen) or
-    (TFastDevice.Backend <> TFastCanvasBackend.D3D12) then
+    (TFastDevice.Backend = TFastCanvasBackend.D3D11) then
     Exit;
   RegionOf(ARects);
 end;

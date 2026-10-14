@@ -147,13 +147,11 @@ begin
       if not FastCanvasRenderThread then
         Result := Result + '+MainThread';
       if FastCanvasBackend = TFastCanvasBackend.D3D12 then
-      begin
-        Result := Result + '+D3D12';
-        if not FastCanvasPartialFrames then
-          Result := Result + '+NoPartial';
-      end
+        Result := Result + '+D3D12'
       else if FastCanvasBackend = TFastCanvasBackend.Vulkan then
         Result := Result + '+Vulkan';
+      if (FastCanvasBackend <> TFastCanvasBackend.D3D11) and not FastCanvasPartialFrames then
+        Result := Result + '+NoPartial';
       if FastContext3DRayTracing.Shadows then
         Result := Result + '+RayShadows';
       if FastContext3DRayTracing.ShadowSoftness > 0 then
