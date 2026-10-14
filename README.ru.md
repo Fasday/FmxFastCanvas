@@ -165,6 +165,11 @@ msbuild Examples.groupproj /p:Config=Release /p:Platform=Win64
 - DLSS: только окна `TForm3D`, без мультисэмплинга; векторы движения — только у непрозрачных объектов, которые движутся
   своими матрицами.
 
+## Участники
+
+- [Hemul GM](https://github.com/HemulGM): NVIDIA DLSS Super Resolution в 3D-контексте Direct3D 12 (`FastCanvas.Dlss`,
+  `FastCanvas.Context3D12.Dlss.inc`, `Shaders\FastDlss.hlsl`, панель DLSS в `HelloForm3D`); первым проверил её на RTX 5080.
+
 ## Лицензия
 
 MIT, см. [LICENSE](LICENSE). Сторонний код и формулы: [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). FastCanvas не

@@ -160,6 +160,12 @@ Global variables, set before `Application.Initialize`; all of them in [docs/USAG
 - The ray-traced effects do not trace transparent objects.
 - DLSS: `TForm3D` windows only, no multisampling; motion vectors only for opaque objects moved by their matrices.
 
+## Contributors
+
+- [Hemul GM](https://github.com/HemulGM): NVIDIA DLSS Super Resolution in the Direct3D 12 3D context (`FastCanvas.Dlss`,
+  `FastCanvas.Context3D12.Dlss.inc`, `Shaders\FastDlss.hlsl`, the DLSS panel of `HelloForm3D`), first tested by him on an
+  RTX 5080.
+
 ## License
 
 MIT, see [LICENSE](LICENSE). Third-party code and formulas: [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

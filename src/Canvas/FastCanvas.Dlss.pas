@@ -2,7 +2,8 @@ unit FastCanvas.Dlss;
 
 { Native NVIDIA DLSS Super Resolution through the driver's NGX Core. The declarations follow NVIDIA's nvsdk_ngx.h and
   nvsdk_ngx_params.h (NVIDIA RTX SDK, see THIRD_PARTY_NOTICES.md). No C++ wrapper or static NGX library is linked;
-  nvngx_dlss.dll of the DLSS SDK goes next to the EXE. Win64 only.
+  nvngx_dlss.dll of the DLSS SDK goes next to the EXE. Win64 only. Originally written by Hemul GM
+  (https://github.com/HemulGM).
 
   One NGX session per device for the process (TFastDlss.Acquire, main thread): initialized when a 3D context first
   uses DLSS, shut down when its last user (the DLSS state of a 3D context) goes, with its window; a new device gets a

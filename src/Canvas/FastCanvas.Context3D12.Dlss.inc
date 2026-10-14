@@ -1,4 +1,5 @@
-{ Native DLSS SR. A low-resolution 3D scene is reconstructed before the first screen-projected draw.
+{ Native DLSS SR (originally written by Hemul GM, https://github.com/HemulGM). A low-resolution 3D scene is
+  reconstructed before the first screen-projected draw.
   The settings panel is composited afterward at the window's resolution.
   The state of a context lives as long as the context: made when DLSS is first wanted (DlssMode, DlssAvailable,
   DlssStatus), with the NGX session of the device (TFastDlss.Acquire) and the context's feature; FreeBuffer drops its
