@@ -9,10 +9,12 @@
   x64 under X11 (Vulkan back end; it compiles, it has not run yet).
 - Direct3D 11 back end: a GPU with feature level 10_0 or higher (WARP when there is none).
 - Direct3D 12 back end: a GPU with feature level 11_0 or higher.
-- Vulkan back end: Vulkan 1.3 with dynamic rendering, synchronization2 and timeline semaphores, or Vulkan 1.1 or 1.2
-  with the extensions of these (`VK_KHR_dynamic_rendering`, `VK_KHR_synchronization2`, below 1.2
-  `VK_KHR_timeline_semaphore`, `VK_KHR_depth_stencil_resolve`, `VK_KHR_create_renderpass2`), as on many phones.
-  What it does not have is listed under "Vulkan back end".
+- Vulkan back end: Vulkan 1.1 with `VK_KHR_swapchain` and a queue that draws and presents. Dynamic rendering,
+  synchronization2 and timeline semaphores are used where the device has them (Vulkan 1.3 core, or
+  `VK_KHR_dynamic_rendering`, `VK_KHR_synchronization2`, `VK_KHR_timeline_semaphore`), else render passes, Vulkan 1.0
+  barriers and fences stand in for them (many 2021-2024 phones: Mali, older Adreno and PowerVR). What it does not
+  have is listed under "Vulkan back end". Without a device that qualifies, `TFastDevice.Ensure` raises `EFastDevice`
+  with what each device lacks.
 - Ray-traced effects: a GPU with DirectX Raytracing tier 1.1 (NVIDIA RTX 20 and later, AMD RX 6000 and later,
   Intel Arc); on Vulkan, a Vulkan 1.3 device with ray queries (`VK_KHR_ray_query` with acceleration structures, buffer
   device addresses and descriptor indexing; AMD's 32-bit driver has none). Without it they are simply not drawn.
@@ -397,7 +399,7 @@ A program without FMX forms (a console test) shuts FastCanvas down as FMX's `Fin
 ## Vulkan back end
 
 With `FastCanvasBackend := TFastCanvasBackend.Vulkan` and `InstallFastContext3DVk` everything is drawn with Vulkan
-(1.3, or 1.1/1.2 with the extensions listed under "Requirements"; headers from `third_party\pasvulkan`): the canvas,
+(1.1 and up, see "Requirements"; headers from `third_party\pasvulkan`): the canvas,
 text (ClearType included), bitmaps, transparent forms, the effects, `TViewport3D`, `TForm3D` and the ray-traced
 effects, with device loss handled as on Direct3D. The benchmark's scenes draw as on Direct3D 12 (identical screenshots
 but for a few pixels of strokes), at about its speed (`BENCHMARKS.md`). It is the back end of Android and Linux too
@@ -421,8 +423,17 @@ but for a few pixels of strokes), at about its speed (`BENCHMARKS.md`). It is th
   resources get memory of their own), so thousands of bitmaps take a few memory objects. `FASTCANVAS_VK_STATS=<file>`
   appends the peak numbers of memory objects and allocations when the device goes.
 - **Devices below Vulkan 1.3** (most phones): dynamic rendering, synchronization2 and timeline semaphores come from
-  their extensions; push descriptors and `FIFO_LATEST_READY` where the device has them; no ray-traced effects (their
-  shaders are built for Vulkan 1.2 with buffer device addresses). `FASTCANVAS_VK_API=1.1` takes any GPU this way.
+  their extensions where they have them; push descriptors and `FIFO_LATEST_READY` likewise; no ray-traced effects
+  (their shaders are built for Vulkan 1.2 with buffer device addresses). `FASTCANVAS_VK_API=1.1` takes any GPU this
+  way.
+- **The Vulkan 1.1 core path** (devices without some or all of the three features; the Mali-G57 of a TECNO KL7,
+  Vulkan 1.1.177, has only timeline semaphores): draws run in render passes (made once per set of attachments and
+  operations, framebuffers per target view), barriers are `vkCmdPipelineBarrier`, submissions `vkQueueSubmit`, and
+  without timeline semaphores every submission signals a fence. It draws the same pixels: on a desktop GPU with
+  `FASTCANVAS_VK_LEGACY=1` and `FASTCANVAS_VK_NOTIMELINE=1` the benchmark's scenes, the 3D context and its ray-traced
+  effects match the default path pixel for pixel, with no message of the validation layer. What such a device lacks
+  otherwise: without `VK_KHR_push_descriptor` the 3D context binds descriptor sets (no visible difference), without
+  dual-source blending (`dualSrcBlend`, which that Mali lacks) ClearType text is drawn grayscale.
 
 Not on Vulkan: HDR output (`FastCanvasHdr`, `Hdr`, `DrawIntensity`), DirectComposition, DLSS, the application ray
 passes (`RayScene`, `RayDispatch`, `RayDraw` and their types are Direct3D 12 only), application shaders in the 3D
@@ -474,13 +485,22 @@ Android:
 - Without a phone: an Android 14 x86_64 emulator image (`system-images;android-34;google_apis;x86_64`) runs the
   arm64 library through its ARM translation, with the host GPU's Vulkan (`emulator -avd <name> -gpu host`); PortProbe
   was tested so.
+- On a phone (2026-10-14): a TECNO KL7 (Helio G99, Mali-G57 MC2, driver r32p1, Vulkan 1.1.177, Android 14, 1080x2436
+  at 120 Hz) runs PortProbe on the Vulkan 1.1 core path (render passes, Vulkan 1.0 barriers, timeline semaphores; with
+  fences too), through cold starts, the app in the background and back, and the screen off and on. It shows 55-59 FPS
+  where FMX's `TCanvasGpu` shows 97: it is GPU-bound, the canvas's render passes take about 16 ms of GPU time per
+  frame (an almost empty frame about 10 ms: the instanced shader is heavy for a two-core Mali), the copy into the
+  presented surface 0.85 ms, the blit into the swap chain 0.76 ms (GPU timestamps); the main thread records the scene
+  in 0.8 ms. PortProbe reads `options.txt` in the app's files directory (`adb shell run-as <package>`): options as on
+  its command line and `NAME=VALUE` environment variables such as `FASTCANVAS_VK_NOTIMELINE=1`; its status line (also
+  in the log, `adb logcat`) gives the frame rate, the recording and render-thread times per frame.
 
 Linux (compiles with `tools\check-port.ps1`, has not run yet):
 
 - X11 only: FMX's Linux platform (FMUX) runs GTK 3; the canvas makes the form's drawing area a native window and
   presents to its X11 window (`VK_KHR_xlib_surface`, the XID and the display through GDK, loaded at run time). In a
   Wayland session the program has to run through XWayland (`GDK_BACKEND=x11`); Wayland surfaces are not supported.
-- Running it needs `libvulkan.so.1` and a Vulkan 1.1 driver with the extensions above (Mesa: radv, anv, nvk; lavapipe
+- Running it needs `libvulkan.so.1` and a Vulkan 1.1 driver (Mesa: radv, anv, nvk; lavapipe
   on the CPU), GTK 3, and `libsk4d.so` next to the program.
 - Building a Linux program needs the Linux SDK in the IDE (Tools > Options > Deployment > SDK Manager, a Linux 64-bit
   profile pulled from a Linux machine running PAServer: `LinuxPAServer37.0.tar.gz`, a download of Embarcadero's, not
@@ -506,9 +526,13 @@ Linux (compiles with `tools\check-port.ps1`, has not run yet):
   layer's synchronization validation. `FASTCANVAS_VK_STATS=<file>`: the peak numbers of Vulkan memory objects and
   allocations, appended when the device goes.
 - `FASTCANVAS_VK_API=1.1` or `1.2` (environment variable): the Vulkan instance of that version, so any device is used
-  the way of devices below Vulkan 1.3 (a test of that path on a desktop GPU; no ray-traced effects then).
-  `FASTCANVAS_VK_NOPUSH=1`: `VK_KHR_push_descriptor` stays off, so the Vulkan 3D context binds descriptor sets (the
-  path of devices without it).
+  the way of devices below Vulkan 1.3 (a test of that path on a desktop GPU; no ray-traced effects then); `1.0`: no
+  device qualifies (a test of the fallback). `FASTCANVAS_VK_NOPUSH=1`: `VK_KHR_push_descriptor` stays off, so the
+  Vulkan 3D context binds descriptor sets (the path of devices without it). `FASTCANVAS_VK_LEGACY=1`: no dynamic
+  rendering, synchronization2 or push descriptors on any device, `FASTCANVAS_VK_NOTIMELINE=1`: no timeline semaphores
+  (fences): the Vulkan 1.1 core path of phones on a desktop GPU, ray-traced effects included; with
+  `FASTCANVAS_VK_API=1.1` as well it is the path of such a phone. `FASTCANVAS_VK_STATS` also notes the features in
+  use and the number of render passes.
 - `FastCanvasSimulateDeviceLoss`: the next scene treats the device as lost and recreates everything, as after a driver
   update or a GPU reset.
 - `FastCanvasCaptureWindow`: the frame a window presented last, as floats (checks of HDR output).

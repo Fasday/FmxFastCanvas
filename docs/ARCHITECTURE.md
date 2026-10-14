@@ -24,7 +24,7 @@ FMX itself (forms, controls, styles, layout, animations) is unchanged.
 | `FastCanvas.Context3D` | The part of the 3D contexts that does not depend on the API: shaders and their variables, pipeline state, vertex layouts, the settings of the ray-traced effects. |
 | `FastCanvas.Context3D11`, `FastCanvas.Context3D12`, `FastCanvas.Context3DVk` | The 3D contexts (`TContext3D`) for `TViewport3D`, `TForm3D` and the effects. |
 | `FastCanvas.Context3D12.Ray.inc`, `Shaders/FastRay.hlsl` → `FastCanvas.RayShaders.inc` | Ray-traced effects (DXR 1.1, shader model 6.5). |
-| `FastCanvas.DeviceVk` | The Vulkan device (1.3, or 1.1/1.2 with the extensions of the same features): the loader and surface extension of the platform, instance, physical and logical device and their optional features, the memory suballocator, the queue lock. |
+| `FastCanvas.DeviceVk` | The Vulkan device (1.1 and up; dynamic rendering, synchronization2 and timeline semaphores where it has them, core or extension): the loader and surface extension of the platform, instance, physical and logical device and their optional features, the render passes of devices without dynamic rendering, the memory suballocator, the queue lock. |
 | `FastCanvas.GpuVk` | The Vulkan back end of the renderer: the recording context, surfaces, windows (Win32, Android and Xlib surfaces) and the threads that present them, pipelines. |
 | `FastCanvas.VkShaders.inc`, `FastCanvas.VkRayShaders.inc`, `FastCanvas.VkFmxShaders.inc` | SPIR-V: `FastCanvas.hlsl`, `FastOutput.hlsl` and `FastRay.hlsl` (dxc), FMX's own shaders (from their GLSL, `tools/compile-fmx-shaders-vk.ps1`). |
 | `FastCanvas.Context3DVk.Ray.inc` | Ray-traced effects on Vulkan (ray queries). |
@@ -56,10 +56,11 @@ seams, so the same recording, player and renderer run on Android and Linux on th
 Off Windows the render queue waits on `TEvent`s, the device lock, the queue lock and the locks of the memory
 allocator, of the presenting threads and of the 3D context are monitors, thread ids come from `pthread_self`. The
 Vulkan back end takes devices below 1.3 through `VK_KHR_dynamic_rendering`, `VK_KHR_synchronization2` (and
-`VK_KHR_timeline_semaphore` below 1.2) with the KHR commands under the core names (`FASTCANVAS_VK_API=1.1` tests that
-path on any GPU); such a device gets push descriptors (the 3D context) and `FIFO_LATEST_READY` where it has them, but
-no ray tracing features (the ray-tracing shaders are built for Vulkan 1.2). Windows present from a thread of their own
-there too. On Android the swap chain is not rotated by the canvas and a suboptimal swap chain is kept (it stays
+`VK_KHR_timeline_semaphore` below 1.2) where they have them, with the KHR commands under the core names
+(`FASTCANVAS_VK_API=1.1` tests that path on any GPU), and through the Vulkan 1.1 core path where they lack them (see
+"The Vulkan back end"); such a device gets push descriptors (the 3D context) and `FIFO_LATEST_READY` where it has
+them, but no ray tracing features (the ray-tracing shaders are built for Vulkan 1.2). Windows present from a thread of
+their own there too. On Android the swap chain is not rotated by the canvas and a suboptimal swap chain is kept (it stays
 suboptimal while the display is turned); the frame is blitted into the `R8G8B8A8` images. A lost surface (the app went
 to the background) ends the window's presenting thread, which drops its swap chain; the next frame of the window
 drops the surface and is not presented, and FMX makes the canvas again for the next native window. On Android the
@@ -191,6 +192,26 @@ timeline has passed the submission that used them. Image layouts are tracked per
 synchronization2 barriers; draws run in dynamic rendering instances. The canvas pipeline has one descriptor set layout
 (the frame constants, eight textures, atlas, ramps, the tables as uniform texel buffers, immutable samplers) and
 three pipelines; the viewport flips y (negative height), so the shaders keep Direct3D's coordinates.
+
+Each of the three features is optional (Vulkan 1.1 core path, as on many 2021-2024 phones):
+
+- **No dynamic rendering**: a rendering instance (`TVkRenderingInfo`, the canvas's and the 3D context's alike) begins
+  a render pass of the same attachments, load and store operations and layouts (one subpass, no layout changes: the
+  barriers before it make them, as with dynamic rendering). Render passes are made once per such set and kept with the
+  device; framebuffers are made per target view and size and destroyed with the view. Pipelines are made for a
+  compatible render pass (same formats and samples), so the pipeline caches keep their keys.
+- **No synchronization2**: a batch of barriers becomes one `vkCmdPipelineBarrier` with the union of the batch's stages
+  (TOP/BOTTOM_OF_PIPE where there are none) and each barrier's accesses and layouts (the stage and access bits used
+  have the same values in both); submissions go through `vkQueueSubmit`, the timeline value in
+  `VkTimelineSemaphoreSubmitInfo`.
+- **No timeline semaphores**: every submission signals a fence of its own; the fences of one queue signal in
+  submission order, so the last signaled one gives the timeline's value (`TGpuVkTimeline`, also of the presenting
+  threads).
+
+`FASTCANVAS_VK_LEGACY=1` turns off dynamic rendering, synchronization2 and push descriptors on any device,
+`FASTCANVAS_VK_NOTIMELINE=1` timeline semaphores: on the RX 9070 XT the benchmark's scenes, the 3D scenes with every
+ray-traced effect and `Form3DProbe` draw the same pixels that way, with no message of the validation layer
+(synchronization validation included).
 
 - **Memory** (`FastCanvas.DeviceVk`): blocks of device memory per memory type (32 MB device-local, 8 MB host-visible,
   host-visible ones mapped), buffers and images in blocks of their own, suballocated first fit; resources larger than
