@@ -1315,6 +1315,7 @@ var
   H: TFastNativeHandler;
   Draw: PCmdDraw;
   Dest: TTextureVk;
+  Pending: TGpuVkSurface;
   I: Integer;
 begin
   Result := False;
@@ -1322,13 +1323,16 @@ begin
   // The first draw makes the blank texture otherwise (a copy).
   if not Assigned(FastBridge.NextCommand) or not G.BlankReady then
     Exit;
+  Pending := GpuVk.PendingClear;
   Cursor := nil;
   while FastBridge.NextCommand(Cursor, H, Data) do
     if @H = @HandleDraw then
     begin
       Draw := Data;
+      // A texture to be moved to another use, or a canvas bitmap whose clear is still deferred.
       for I := 0 to Draw.UnitCount - 1 do
-        if TTextureVk(Draw.Units[I]).CurrentUse <> TGpuVkUse.ShaderRead then
+        if (TTextureVk(Draw.Units[I]).CurrentUse <> TGpuVkUse.ShaderRead) or
+          ((Pending <> nil) and (TTextureVk(Draw.Units[I]).Surface = Pending)) then
           Exit;
     end
     else if @H = @HandleClear then

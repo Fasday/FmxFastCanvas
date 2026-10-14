@@ -353,6 +353,9 @@ type
     /// <summary>What the active rendering instance draws into (a canvas surface, another renderer's object), nil
     /// outside rendering.</summary>
     property Rendering: TObject read FRendering;
+    /// <summary>The surface whose clear is deferred (FClearSurface), nil: none. Any use of it records the clear first
+    /// (which ends the active rendering instance).</summary>
+    property PendingClear: TGpuVkSurface read FClearSurface;
     /// <summary>The active rendering instance of a canvas surface has a depth buffer (cleared to 1 at its start).
     /// </summary>
     property RenderingDepth: Boolean read FRenderingDepth;
