@@ -6,7 +6,9 @@
   code: about 1.4 to 1.9 times the frame time on scenes with many shapes, strings or controls, measured 2026-10-13);
   the GPU work is the same.
 - Windows 10 or 11; Android 7.0 (API 24) or later on arm64 (Vulkan back end only, see "Android and Linux"); Linux
-  x64 with GTK 3 on X11 (Vulkan back end; tested on Ubuntu 26.04 in WSL2 with WSLg, on Mesa's lavapipe).
+  x64 with glibc 2.35 or later (programs linked against the default SDK, Ubuntu 22.04's) and GTK 3 on X11 (Vulkan
+  back end; tested on Ubuntu 26.04 in WSL2 with WSLg and on Ubuntu 22.04, Debian 12 and Fedora 44 in containers, on
+  Mesa's lavapipe).
 - Direct3D 11 back end: a GPU with feature level 10_0 or higher (WARP when there is none).
 - Direct3D 12 back end: a GPU with feature level 11_0 or higher.
 - Vulkan back end: Vulkan 1.3 with dynamic rendering, synchronization2 and timeline semaphores, or Vulkan 1.1 or 1.2
@@ -491,12 +493,16 @@ Linux:
 - Running it needs `libvulkan.so.1` and a Vulkan 1.1 driver with the extensions under "Requirements" (Mesa: radv,
   anv, nvk; lavapipe on the CPU), GTK 3 (`libgtk-3.so.0`), and `libsk4d.so` next to the program.
 - Building without PAServer: Delphi links Linux programs against a copy of the target's libraries, the platform SDK.
-  `tools\make-linux-sdk.ps1 [-Distro Ubuntu-26.04] [-Sdk D:\LinuxSDK\ubuntu-26.04] [-Install]` makes one from a WSL
-  distribution (the top-level files of `/usr/lib/x86_64-linux-gnu` and `/usr/lib/gcc/x86_64-linux-gnu/<n>`,
+  `tools\make-linux-sdk.ps1 [-Distro Ubuntu-22.04] [-Sdk D:\LinuxSDK\<distro>] [-Install] [-CreateDistro]` makes one
+  from a WSL distribution (the top-level files of `/usr/lib/x86_64-linux-gnu` and `/usr/lib/gcc/x86_64-linux-gnu/<n>`,
   `/lib64/ld-linux-x86-64.so.2` and `/usr/include`, symbolic links dereferenced, `lib` a junction to `usr\lib`;
-  `-Install` first installs `libc6-dev` and `libgcc-<n>-dev`, which hold the startup objects and linker scripts):
-  about 0.9 GB. Programs linked against it need that distribution's glibc or a later one (an SDK made from an older
-  distribution reaches more systems).
+  `-Install` first installs `libc6-dev`, `libgcc-<n>-dev` and `zlib1g-dev`, which hold the startup objects, the
+  linker scripts and `libz.so`; `-CreateDistro` installs the WSL distribution itself when it is missing, without the
+  first-run prompt: `wsl --install -d <distro> --no-launch --web-download --location D:\WSL\<distro>`): 0.6 to
+  0.9 GB. Programs linked against it need that distribution's glibc or a later one, so the default is the SDK of
+  Ubuntu 22.04 (glibc 2.35, `D:\LinuxSDK\ubuntu-22.04`): PortProbe needs `GLIBC_2.34` at most, `libsk4d.so`
+  `GLIBC_2.29`, the libfmux FMX writes out `GLIBC_2.2.5`. `-Sdk D:\LinuxSDK\ubuntu-26.04` (made with
+  `-Distro Ubuntu-26.04`) links against Ubuntu 26.04 instead (glibc 2.43 or later needed at run time).
 - `tools\build-linux.ps1 -Project <dpr> -SearchPath <dirs> [-Config Debug] [-Sdk <dir>]` builds with `dcclinux64`
   into `bin\Linux64\<Config>\<name>` and copies `libsk4d.so` next to it; with a `.dproj` that has the Linux64 platform
   it runs msbuild instead (output where the project puts it). dcclinux64 links with LLVM's lld (`bin64\ld.lld.exe`, on
@@ -513,6 +519,15 @@ Linux:
   FastCanvas presented (`FastCanvasCaptureWindow`), or `xwd -id <window> | magick xwd:- <png>` (the root window
   cannot be read under XWayland). WSLg's window manager does not close windows for `wmctrl`/`xdotool`; a
   `WM_DELETE_WINDOW` client message closes them as a title bar's close button does.
+- Other distributions without a screen: `tools\linux-compat.ps1` checks the glibc versions the program and
+  `libsk4d.so` need (`objdump -T`), then runs PortProbe on a private Xvfb for 8 seconds in the WSL distribution and in
+  Docker containers of `ubuntu:22.04`, `debian:12` and `fedora:latest` (images with GTK 3, Mesa's Vulkan drivers,
+  libGL, fontconfig, a font and Xvfb, built once as `fastcanvas-compat:<image>`), and keeps the frame FastCanvas
+  presented (`D:\Work\FastCanvas-compat\<image>\frame.png`). Passed (2026-10-14, linked against the Ubuntu 22.04
+  SDK): Ubuntu 26.04 (WSL, glibc 2.43, lavapipe of Mesa 26 with Vulkan 1.4), Ubuntu 22.04 (glibc 2.35, Vulkan 1.3
+  on LLVM 15's lavapipe, no ray queries), Debian 12 (glibc 2.36, Vulkan 1.3), Fedora 44 (glibc 2.43, Vulkan 1.4):
+  FastCanvas and its Vulkan 3D context draw the scene on all of them. On glibc 2.31 (Debian 11) the loader refuses
+  the program (`GLIBC_2.34 not found`).
 - Tested (2026-10-14, Ubuntu 26.04 in WSL2, lavapipe): PortProbe draws the scene, its text with Cyrillic and color
   emoji, the controls (clicks work), the cube by the Vulkan 3D context with ray-traced shadows, ambient occlusion and
   reflections, and FMX's effects, each pixel for pixel as Win64 on an RX 9070 XT outside the text (other fonts); with

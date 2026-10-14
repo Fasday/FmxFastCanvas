@@ -8,24 +8,44 @@
   libraries, linker scripts, crt1.o, crti.o, crtn.o, libc_nonshared.a), of /usr/lib/gcc/x86_64-linux-gnu/<gcc>
   (crtbegin.o, crtend.o, libgcc.a, libgcc_s.so), /lib64/ld-linux-x86-64.so.2 and /usr/include. Symbolic links are
   dereferenced (Windows tools do not follow them); "lib" becomes a junction to "usr\lib" (merged /usr, as the
-  distribution has it). The distribution needs the packages libc6-dev and libgcc-<n>-dev (the script installs them
-  with -Install).
+  distribution has it). The distribution needs the packages libc6-dev, libgcc-<n>-dev and zlib1g-dev (libz.so:
+  System.ZLib links -lz) (the script installs them with -Install).
 
   The SDK is a copy of one distribution's libraries: programs linked against it need that glibc version or a later
-  one (an SDK from an older distribution makes programs that run on more systems).
+  one. The default is Ubuntu 22.04 (glibc 2.35): its programs run on Ubuntu 22.04 and later, Debian 12, Fedora, ...
+  (D:\LinuxSDK\ubuntu-22.04, the default SDK of tools\build-linux.ps1); an SDK of Ubuntu 26.04 (glibc 2.43) stays
+  selectable with -Sdk.
+
+  -CreateDistro installs the WSL distribution first when it is missing, without the first-run user prompt
+  (wsl --install --no-launch --web-download --location <DistroRoot>\<Distro>); "wsl -d <Distro> -u root" works
+  then.
 
 .EXAMPLE
-  .\tools\make-linux-sdk.ps1
-  .\tools\make-linux-sdk.ps1 -Distro Ubuntu-26.04 -Sdk D:\LinuxSDK\ubuntu-26.04 -Install
+  .\tools\make-linux-sdk.ps1 -CreateDistro -Install
+  .\tools\make-linux-sdk.ps1 -Distro Ubuntu-26.04 -Install
 #>
 param(
-  [string] $Distro = 'Ubuntu-26.04',
-  [string] $Sdk = 'D:\LinuxSDK\ubuntu-26.04',
+  [string] $Distro = 'Ubuntu-22.04',
+  # Default: D:\LinuxSDK\<distro in lower case>.
+  [string] $Sdk = '',
   # apt-get install the packages with the startup objects and the linker scripts first.
-  [switch] $Install
+  [switch] $Install,
+  # Install the WSL distribution when it is not there (non-interactive, into <DistroRoot>\<Distro>).
+  [switch] $CreateDistro,
+  [string] $DistroRoot = 'D:\WSL'
 )
 
 $ErrorActionPreference = 'Stop'
+
+if (-not $Sdk) { $Sdk = Join-Path 'D:\LinuxSDK' $Distro.ToLower() }
+# (wsl -l writes UTF-16.)
+$installed = (wsl -l -q | Out-String) -replace "`0", '' -split "`r?`n" | ForEach-Object { $_.Trim() }
+if ($installed -notcontains $Distro) {
+  if (-not $CreateDistro) { throw "No WSL distribution $Distro (-CreateDistro installs it)" }
+  Write-Host "Installing the WSL distribution $Distro into $(Join-Path $DistroRoot $Distro)"
+  wsl --install -d $Distro --no-launch --web-download --location (Join-Path $DistroRoot $Distro)
+  if ($LASTEXITCODE -ne 0) { throw "wsl --install -d $Distro failed ($LASTEXITCODE)" }
+}
 
 New-Item -ItemType Directory -Force -Path $Sdk | Out-Null
 $SdkFull = (Resolve-Path $Sdk).Path
@@ -36,7 +56,9 @@ if ($Install) {
   # libgcc-s1's version names the matching libgcc-<n>-dev.
   # (--exec: no shell between, which would expand the format.)
   $gccMajor = (wsl -d $Distro -u root --exec dpkg-query -W -f '${Version}' libgcc-s1) -replace '^(\d+).*', '$1'
-  wsl -d $Distro -u root --exec env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq libc6-dev "libgcc-$gccMajor-dev"
+  wsl -d $Distro -u root --exec timeout 600 apt-get update -qq
+  if ($LASTEXITCODE -ne 0) { throw "apt-get update failed ($LASTEXITCODE)" }
+  wsl -d $Distro -u root --exec env DEBIAN_FRONTEND=noninteractive timeout 900 apt-get install -y -qq libc6-dev "libgcc-$gccMajor-dev" zlib1g-dev
   if ($LASTEXITCODE -ne 0) { throw "apt-get install failed ($LASTEXITCODE)" }
 }
 

@@ -4,7 +4,9 @@
   without PAServer.
 
 .DESCRIPTION
-  - The SDK: a copy of a Linux system's libraries (tools\make-linux-sdk.ps1 makes one from a WSL distribution).
+  - The SDK: a copy of a Linux system's libraries (tools\make-linux-sdk.ps1 makes one from a WSL distribution). The
+    default, D:\LinuxSDK\ubuntu-22.04 (glibc 2.35), makes programs that run on Ubuntu 22.04 and later, Debian 12,
+    Fedora, ...; -Sdk D:\LinuxSDK\ubuntu-26.04 links against Ubuntu 26.04 (glibc 2.43 needed at run time).
     dcclinux64 links with LLVM's lld (bin64\dcc-ld.lld.exe, found through bin64\ld.lld.exe on the PATH) and is told
     about the SDK with --syslibroot:<sdk> (the linker's --sysroot) and --libpath:<dirs> (its -L: Delphi's
     lib\linux64\<config> for librtlhelper, the SDK's usr\lib\x86_64-linux-gnu and usr\lib\gcc\x86_64-linux-gnu\<n>).
@@ -29,7 +31,7 @@ param(
   [string[]] $SearchPath = @(),
   [string[]] $Define = @(),
   [string] $OutRoot = 'bin',
-  [string] $Sdk = 'D:\LinuxSDK\ubuntu-26.04'
+  [string] $Sdk = 'D:\LinuxSDK\ubuntu-22.04'
 )
 
 $ErrorActionPreference = 'Stop'
