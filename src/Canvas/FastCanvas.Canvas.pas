@@ -9,10 +9,11 @@ unit FastCanvas.Canvas;
   runs (FastCanvas.Gpu, on Direct3D 11, 12 or Vulkan: FastCanvasBackend). Paths and stroke outlines are polygons with
   exact area coverage on the GPU (their geometry comes from a CPU geometry engine: Direct2D or Skia,
   FastCanvas.Geometry); rotated and very large text is drawn from glyph outlines, color fonts from an image rasterized
-  once (FastCanvas.Text: DirectWrite or Skia). Clips are a table of pixel boxes plus up to two oriented rectangles per
-  entry, tested per pixel, so clip changes do not split draw calls.
+  once (FastCanvas.Text: DirectWrite, Pango or Skia). Clips are a table of pixel boxes plus up to two oriented
+  rectangles per entry, tested per pixel, so clip changes do not split draw calls.
 
-  Android and Linux: Vulkan, Skia geometry and Skia text; the windows are the platform's (FastCanvas.Platform). What
+  Android and Linux: Vulkan, the own geometry, Skia text on Android, Pango text on Linux (Skia's engines where the
+  program adds their units); the windows are the platform's (FastCanvas.Platform). What
   needs Direct2D drawing (the D2DText measurement aid, brushes the GPU renderer has no paint for) draws nothing there,
   as on Direct3D 12 and Vulkan on Windows.
 
@@ -160,8 +161,14 @@ uses
 {$ELSE}
   System.Generics.Collections, System.Math.Vectors, System.Messaging, System.Diagnostics, FMX.TextLayout,
   FMX.Types3D, FMX.Controls, FastCanvas.Device, FastCanvas.GpuVk, FastCanvas.Text, FastCanvas.RenderQueue,
-  FastCanvas.Service, FastCanvas.Bridge, FastCanvas.Geometry, FastCanvas.GeometryOwn, FastCanvas.GeometrySkia,
-  FastCanvas.TextSkia, FastCanvas.Platform;
+  FastCanvas.Service, FastCanvas.Bridge, FastCanvas.Geometry, FastCanvas.GeometryOwn,
+{$IFDEF LINUX}
+  // Skia's engines only where the program uses their units (libsk4d.so next to it then).
+  FastCanvas.TextPango,
+{$ELSE}
+  FastCanvas.GeometrySkia, FastCanvas.TextSkia,
+{$ENDIF}
+  FastCanvas.Platform;
 {$ENDIF}
 
 type

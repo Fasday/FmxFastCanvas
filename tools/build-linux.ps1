@@ -11,7 +11,8 @@
     msbuild takes the same as the properties DCC_SysLibRoot and DCC_LibraryPath (an IDE SDK profile sets them through
     Profile_sysroot and Profile_LibraryPath).
   - A .dpr: dcclinux64 as build.ps1 runs dcc64. Output: bin\Linux64\<Config>\<Name> (with -OutRoot another folder),
-    libsk4d.so (Skia, Redist\linux64) copied next to it. DCUs: dcu\<OutRoot>\Linux64\<Config>\<Name>\.
+    libsk4d.so (Skia, Redist\linux64) copied next to it, not with -Define FASTCANVAS_NOSKIA (the probes then leave the
+    Skia engines out: Pango text, the own geometry). DCUs: dcu\<OutRoot>\Linux64\<Config>\<Name>\.
   - A .dproj with the Linux64 platform: msbuild (-SearchPath, -Define and -OutRoot do not apply), output where the
     project puts it (<project dir>\Linux64\<Config>\), libsk4d.so next to it; log dcu\<Name>-linux.log.
   - Always a full build (-B); a .map file (-G) for addresses in crash reports; dcu\BuildInfo.inc as build.ps1 writes
@@ -148,5 +149,10 @@ $code = $LASTEXITCODE
 $out | Where-Object { "$_" -notmatch '^(Linker command line:|Embarcadero|Copyright)' } | ForEach-Object { Write-Host "$_" }
 if ($code -ne 0) { throw "dcclinux64 failed ($code)" }
 
-Copy-Item (Join-Path $Bds 'Redist\linux64\libsk4d.so') $OutDir -Force
+if ($Define -contains 'FASTCANVAS_NOSKIA') {
+  # Built without the Skia engines: no libsk4d.so (an older copy in the folder would hide that it is not needed).
+  Remove-Item (Join-Path $OutDir 'libsk4d.so') -ErrorAction SilentlyContinue
+} else {
+  Copy-Item (Join-Path $Bds 'Redist\linux64\libsk4d.so') $OutDir -Force
+}
 Write-Host "OK -> $(Join-Path $OutDir $Name)"
