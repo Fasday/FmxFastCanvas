@@ -34,7 +34,8 @@ $ErrorActionPreference = 'Stop'
 function WslPath([string] $p) { '/mnt/' + $p.Substring(0, 1).ToLower() + $p.Substring(2).Replace('\', '/') }
 
 $Root = Split-Path $PSScriptRoot -Parent
-$exe = (Resolve-Path (Join-Path $Root $Program)).Path
+$exe = if ([IO.Path]::IsPathRooted($Program)) { (Resolve-Path $Program).Path }
+  else { (Resolve-Path (Join-Path $Root $Program)).Path }
 $binDir = Split-Path $exe
 $name = Split-Path $exe -Leaf
 $results = New-Object System.Collections.Generic.List[string]
@@ -79,9 +80,11 @@ if ($Distro) {
   CheckRun "WSL $Distro" $out
 }
 
-# 2b. The containers.
-docker info --format '{{.OSType}}' 2>&1 | Out-Null
-if ($LASTEXITCODE -ne 0) { throw 'Docker does not answer (Docker Desktop: docker desktop start)' }
+# 2b. The containers (-Images @(): none, no Docker needed).
+if ($Images.Count -gt 0) {
+  docker info --format '{{.OSType}}' 2>&1 | Out-Null
+  if ($LASTEXITCODE -ne 0) { throw 'Docker does not answer (Docker Desktop: docker desktop start)' }
+}
 foreach ($image in $Images) {
   $tagName = $image -replace '[:/]', '-'
   $tag = "fastcanvas-compat:$tagName"
