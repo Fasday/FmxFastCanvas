@@ -96,8 +96,9 @@ type
 
   {$SCOPEDENUMS ON}
   /// <summary>What an image (or a table buffer) is used for next: its layout, and the stages and accesses barriers
-  /// wait for and make visible. DepthTarget and DepthRead: depth and stencil images (the 3D context).</summary>
-  TGpuVkUse = (Undefined, ShaderRead, ColorTarget, TransferSrc, TransferDst, DepthTarget, DepthRead);
+  /// wait for and make visible. DepthTarget and DepthRead: depth and stencil images (the 3D context). Present: a swap
+  /// chain image a frame was drawn into (TGpuVkWindow with Direct), for the presentation engine.</summary>
+  TGpuVkUse = (Undefined, ShaderRead, ColorTarget, TransferSrc, TransferDst, DepthTarget, DepthRead, Present);
 
   /// <summary>Kinds of Vulkan objects that Retire keeps until the GPU is done with them (Memory: a TFastVkAllocation).
   /// </summary>
@@ -220,6 +221,10 @@ type
     /// and reads the frame once less), or is recorded before anything else uses the surface (FlushClear).</summary>
     FClearSurface: TGpuVkSurface;
     FClearColor: TVkClearColorValue;
+    /// <summary>A swap chain image acquired for the frame (TGpuVkWindow with Direct) signals this binary semaphore:
+    /// the next submission waits for it before its color output (the commands that use the image are in it or
+    /// later).</summary>
+    FAcquireWait: TVkSemaphore;
     /// <summary>GPU timing (FASTCANVAS_VK_GPUTIME): the query pool, the slot of the open command buffer (-1: not
     /// timed), the next slot, whether a rendering instance's start was stamped.</summary>
     FTimePool: TVkQueryPool;
@@ -348,6 +353,9 @@ type
     FMemory: TFastVkAllocation;
     FView: TVkImageView;
     FUse: TGpuVkUse;
+    FFormat: TVkFormat;
+    /// <summary>A swap chain image (CreateChain): the surface owns its view only.</summary>
+    FBorrowed: Boolean;
     FReadback: TVkBuffer;
     FReadbackMemory: TFastVkAllocation;
     FReadbackData: PByte;
@@ -358,6 +366,8 @@ type
     procedure Drop(const AContext: TGpuVkContext);
   public
     constructor Create(const AWidth, AHeight: Integer; const AData: Pointer; const APitch: Integer);
+    /// <summary>A surface of a swap chain image of AFormat (8-bit UNORM, BGRA or RGBA), in no layout yet.</summary>
+    constructor CreateChain(const AImage: TVkImage; const AFormat: TVkFormat; const AWidth, AHeight: Integer);
     destructor Destroy; override;
     /// <summary>Records the change to AUse (device lock held).</summary>
     procedure Use(const AUse: TGpuVkUse);
@@ -368,6 +378,8 @@ type
     procedure GpuWritten; override;
     property Image: TVkImage read FImage;
     property View: TVkImageView read FView;
+    /// <summary>B8G8R8A8_UNORM, or a swap chain's format.</summary>
+    property Format: TVkFormat read FFormat;
     /// <summary>The use the image is in (render thread).</summary>
     property State: TGpuVkUse read FUse;
   end;
@@ -396,9 +408,40 @@ type
     /// frame latency does for Direct3D 12).</summary>
     FFrameValues: array[0..FramesInFlight - 1] of UInt64;
     FFrameIndex: Cardinal;
+    /// <summary>Direct (FASTCANVAS_VK_DIRECT=1): frames are drawn into the images of a swap chain of the render
+    /// thread: Prepare acquires one, Present presents it; no presenting thread, no copy of the frame, no partial frames
+    /// (FMX repaints the whole form on Android anyway). Not the default: on a Mali-G57 the render passes into the swap
+    /// chain's images took 0.9 ms more per frame than the presenting thread's copy (0.7 ms, 2026-10-14). Decided at the
+    /// first frame; a frame without a swap chain image (no native window, a timeout) is drawn into the window's surface
+    /// and not shown.</summary>
+    FDirect, FDirectChecked: Boolean;
+    FChain: TVkSwapchainKHR;
+    FChainExtent: TVkExtent2D;
+    /// <summary>Surfaces of the images, and per image the semaphore its frame's submission signals for the present.
+    /// </summary>
+    FChainImages: TArray<TGpuVkSurface>;
+    FChainPresent: TArray<TVkSemaphore>;
+    /// <summary>Per frame in flight: the semaphore the acquire signals (its last wait is done once the frame's
+    /// submission FramesInFlight frames before is).</summary>
+    FChainAcquire: array[0..FramesInFlight - 1] of TVkSemaphore;
+    /// <summary>The image acquired for the frame; held: acquired and not presented yet (a frame that was not
+    /// presented leaves it to the next one).</summary>
+    FChainIndex: Cardinal;
+    FChainHeld, FChainStale: Boolean;
     /// <summary>The Vulkan surface of the platform's window and the present modes it offers; False when the window
     /// cannot have one now (Android: no native window).</summary>
     function CreateVkSurface: Boolean;
+    /// <summary>The present mode for the tearing asked for (the presenting thread's swap chains and direct ones).
+    /// </summary>
+    function PresentMode: TVkPresentModeKHR;
+    /// <summary>Direct: the swap chain for frames of this size (made again when it changed or is stale); False when
+    /// there is none (no size, the surface lost, a format the pipelines do not draw into: Direct goes off).</summary>
+    function DirectChain(const AWidth, AHeight: Integer): Boolean;
+    /// <summary>Direct: the swap chain and its images, semaphores go (the GPU is waited for).</summary>
+    procedure ReleaseDirectChain;
+    /// <summary>Direct: the surface of an acquired image for the frame; nil when there is none.</summary>
+    function DirectPrepare(const AWidth, AHeight: Integer): TGpuSurface;
+    function DirectPresent: HResult;
     /// <summary>The surface is lost: the presenting thread ends and the surface goes (made again at the next frame).
     /// </summary>
     procedure DropSurface;
@@ -524,9 +567,10 @@ type
     FSetLayout: TVkDescriptorSetLayout;
     FLayout: TVkPipelineLayout;
     FVS, FPS, FPSDual: TVkShaderModule;
-    FPipeBlend, FPipeCopy: TVkPipeline;
-    /// <summary>Dual-source blending (ClearType text), made on first use; none without the feature.</summary>
-    FPipeDual: TVkPipeline;
+    /// <summary>The pipelines by the format of the target (TargetSlot: 0 B8G8R8A8, the canvas's surfaces; 1 R8G8B8A8,
+    /// swap chain images frames are drawn into, TGpuVkWindow with Direct), made on first use but slot 0's blend and
+    /// copy. Dual: dual-source blending (ClearType text), none without the feature.</summary>
+    FPipeBlend, FPipeCopy, FPipeDual: array[0..1] of TVkPipeline;
     /// <summary>Blending draws in runs of the cheapest variant that fits, with the vertex shader that hands the table
     /// entries to the pixel shader (FVSFlat; the full shader of these runs is FastCanvasVkPSFlat): on GPUs other than
     /// discrete ones, with FASTCANVAS_VK_VARIANTS=1 on any, with 0 on none (the full shader, FPipeBlend). Modules and
@@ -534,7 +578,7 @@ type
     FVariants: Boolean;
     FVSFlat: TVkShaderModule;
     FVariantPS: array[TGpuVkVariant] of TVkShaderModule;
-    FVariantPipes: array[TGpuVkVariant] of TVkPipeline;
+    FVariantPipes: array[0..1, TGpuVkVariant] of TVkPipeline;
     /// <summary>A run is split when that saves more than this of pixels times variant cost (see DrawPending).
     /// </summary>
     FSplitCost: Single;
@@ -562,6 +606,7 @@ type
     /// the vertex shader module; VK_NULL_HANDLE: FVS.</summary>
     function NewPipeline(const AFormat: TVkFormat; const ABlend, ADual: Boolean;
       const APixel: TVkShaderModule = VK_NULL_HANDLE; const AVertex: TVkShaderModule = VK_NULL_HANDLE): TVkPipeline;
+    function TargetSlot: Integer;
     function TargetPipeline: TVkPipeline;
     function VariantPipeline(const AVariant: TGpuVkVariant): TVkPipeline;
     /// <summary>The pending instance is a rectangle outline with an inside large enough to leave out of its draw
@@ -652,13 +697,16 @@ const
   UseLayout: array[TGpuVkUse] of TVkImageLayout = (VK_IMAGE_LAYOUT_UNDEFINED,
     VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
     VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-    VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL);
+    VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL,
+    VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
   UseStage: array[TGpuVkUse] of UInt64 = (StageNone, StageFragmentShader, StageColorOutput, StageTransfer,
-    StageTransfer, StageEarlyTests or StageLateTests, StageFragmentShader or StageEarlyTests or StageLateTests);
+    StageTransfer, StageEarlyTests or StageLateTests, StageFragmentShader or StageEarlyTests or StageLateTests,
+    StageNone);
   UseAccess: array[TGpuVkUse] of UInt64 = (0, AccessShaderRead, AccessColorRead or AccessColorWrite,
-    AccessTransferRead, AccessTransferWrite, AccessDepthRead or AccessDepthWrite, AccessShaderRead or AccessDepthRead);
+    AccessTransferRead, AccessTransferWrite, AccessDepthRead or AccessDepthWrite, AccessShaderRead or AccessDepthRead,
+    0);
   /// <summary>The writes of a use, which a barrier makes available.</summary>
-  UseWrites: array[TGpuVkUse] of UInt64 = (0, 0, AccessColorWrite, 0, AccessTransferWrite, AccessDepthWrite, 0);
+  UseWrites: array[TGpuVkUse] of UInt64 = (0, 0, AccessColorWrite, 0, AccessTransferWrite, AccessDepthWrite, 0, 0);
 
   /// <summary>What each variant of the pixel shader draws (GpuNeed*), and what a pixel of it costs, relatively: the
   /// cycles of its longest path on a Mali-G57 (Mali Offline Compiler), the full shader's doubled for its registers
@@ -667,10 +715,13 @@ const
     GpuNeedShapes or GpuNeedGradients or GpuNeedClips, GpuNeedGlyphs, GpuNeedGlyphs or GpuNeedClips, GpuNeedImages,
     GpuNeedImages or GpuNeedClips, GpuNeedShapes or GpuNeedGradients or GpuNeedGlyphs or GpuNeedImages,
     GpuNeedShapes or GpuNeedGradients or GpuNeedGlyphs or GpuNeedImages or GpuNeedClips,
-    GpuNeedShapes or GpuNeedGradients or GpuNeedPaths, GpuNeedShapes or GpuNeedGradients or GpuNeedPaths or GpuNeedClips,
-    GpuNeedAll);
+    GpuNeedShapes or GpuNeedGradients or GpuNeedPaths,
+    GpuNeedShapes or GpuNeedGradients or GpuNeedPaths or GpuNeedClips, GpuNeedAll);
   VariantCost: array[TGpuVkVariant] of Single = (3, 4.5, 1, 2.5, 2.5, 4, 4, 6, 4.5, 6, 12);
   VariantVariable = 'FASTCANVAS_VK_VARIANTS';
+  DirectVariable = 'FASTCANVAS_VK_DIRECT';
+  /// <summary>The formats of TGpuVkRenderer.TargetSlot.</summary>
+  SlotFormats: array[0..1] of TVkFormat = (VK_FORMAT_B8G8R8A8_UNORM, VK_FORMAT_R8G8B8A8_UNORM);
 
   /// <summary>GPU timing: 1 for the platform's log (Android: logcat, tag FastCanvas; Windows: OutputDebugString), else
   /// a file the report lines are appended to.</summary>
@@ -1363,6 +1414,8 @@ end;
 function TGpuVkContext.Submit(const AWait: TVkSemaphore; const AWaitStage: UInt64;
   const ASignal: TVkSemaphore): UInt64;
 var
+  Wait: TVkSemaphore;
+  WaitStage: UInt64;
   Opened: Boolean;
   I: Integer;
   P: TGpuVkPage;
@@ -1378,6 +1431,14 @@ begin
   Opened := FOpen;
   if not Opened and (AWait = VK_NULL_HANDLE) and (ASignal = VK_NULL_HANDLE) then
     Exit(0);
+  Wait := AWait;
+  WaitStage := AWaitStage;
+  if (Wait = VK_NULL_HANDLE) and (FAcquireWait <> VK_NULL_HANDLE) then
+  begin
+    Wait := FAcquireWait;
+    WaitStage := StageColorOutput;
+    FAcquireWait := VK_NULL_HANDLE;
+  end;
   Buffer := VK_NULL_HANDLE;
   if Opened then
   begin
@@ -1395,7 +1456,7 @@ begin
   end;
   FFast.LockQueue;
   try
-    Res := QueueSubmit(FFast, Buffer, AWait, AWaitStage, ASignal, FTimeline, FSignaled, Fence);
+    Res := QueueSubmit(FFast, Buffer, Wait, WaitStage, ASignal, FTimeline, FSignaled, Fence);
   finally
     FFast.UnlockQueue;
   end;
@@ -2114,7 +2175,7 @@ begin
   Info.layerCount := 1;
   Info.colorAttachmentCount := 1;
   Info.pColorAttachments := @Attachment;
-  StartRendering(Info, VK_FORMAT_B8G8R8A8_UNORM, 1);
+  StartRendering(Info, ATarget.FFormat, 1);
   FRendering := ATarget;
 end;
 
@@ -2291,6 +2352,7 @@ begin
   inherited Create;
   FWidth := AWidth;
   FHeight := AHeight;
+  FFormat := VK_FORMAT_B8G8R8A8_UNORM;
   TFastDevice.Lock;
   try
     C := GpuVk;
@@ -2312,6 +2374,29 @@ begin
   end;
 end;
 
+constructor TGpuVkSurface.CreateChain(const AImage: TVkImage; const AFormat: TVkFormat; const AWidth,
+  AHeight: Integer);
+var
+  C: TGpuVkContext;
+  Info: TVkImageViewCreateInfo;
+begin
+  inherited Create;
+  FWidth := AWidth;
+  FHeight := AHeight;
+  FFormat := AFormat;
+  FImage := AImage;
+  FBorrowed := True;
+  C := GpuVk;
+  FillChar(Info, SizeOf(Info), 0);
+  Info.sType := VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+  Info.image := AImage;
+  Info.viewType := VK_IMAGE_VIEW_TYPE_2D;
+  Info.format := AFormat;
+  Info.subresourceRange := ColorRange;
+  C.Check(C.Vk.CreateImageView(C.Device, @Info, nil, @FView), 'vkCreateImageView');
+  C.FSurfaces.Add(Self);
+end;
+
 destructor TGpuVkSurface.Destroy;
 begin
   TFastDevice.Lock;
@@ -2325,8 +2410,11 @@ begin
         GCtx.FClearSurface := nil;
       // Command buffers that are not executed yet may use them.
       GCtx.Retire(TGpuVkObject.ImageView, FView);
-      GCtx.Retire(TGpuVkObject.Image, FImage);
-      GCtx.Retire(TGpuVkObject.Memory, MemoryHandle(FMemory));
+      if not FBorrowed then
+      begin
+        GCtx.Retire(TGpuVkObject.Image, FImage);
+        GCtx.Retire(TGpuVkObject.Memory, MemoryHandle(FMemory));
+      end;
       GCtx.Retire(TGpuVkObject.Buffer, FReadback);
       GCtx.Retire(TGpuVkObject.Memory, MemoryHandle(FReadbackMemory));
     end;
@@ -2350,8 +2438,11 @@ begin
   if C.FClearSurface = Self then
     C.FClearSurface := nil;
   C.DestroyObject(TGpuVkObject.ImageView, FView);
-  C.DestroyObject(TGpuVkObject.Image, FImage);
-  C.DestroyObject(TGpuVkObject.Memory, MemoryHandle(FMemory));
+  if not FBorrowed then
+  begin
+    C.DestroyObject(TGpuVkObject.Image, FImage);
+    C.DestroyObject(TGpuVkObject.Memory, MemoryHandle(FMemory));
+  end;
   C.DestroyObject(TGpuVkObject.Buffer, FReadback);
   C.DestroyObject(TGpuVkObject.Memory, MemoryHandle(FReadbackMemory));
   FView := VK_NULL_HANDLE;
@@ -2485,6 +2576,7 @@ begin
   try
     if GCtx <> nil then
     begin
+      ReleaseDirectChain;
       GCtx.FWindows.Remove(Self);
       if FVkSurface <> VK_NULL_HANDLE then
         GCtx.Fast.InstanceVk.DestroySurfaceKHR(GCtx.Fast.Instance, FVkSurface, nil);
@@ -2507,8 +2599,31 @@ begin
 end;
 
 procedure TGpuVkWindow.Drop(const AContext: TGpuVkContext);
+var
+  S: TGpuVkSurface;
+  I: Integer;
 begin
   StopPresenter;
+  // The GPU is idle: the direct swap chain's objects go at once.
+  for S in FChainImages do
+  begin
+    S.Drop(AContext);
+    S.Free;
+  end;
+  FChainImages := nil;
+  for I := 0 to High(FChainPresent) do
+    AContext.Vk.DestroySemaphore(AContext.Device, FChainPresent[I], nil);
+  FChainPresent := nil;
+  for I := 0 to High(FChainAcquire) do
+  begin
+    if FChainAcquire[I] <> VK_NULL_HANDLE then
+      AContext.Vk.DestroySemaphore(AContext.Device, FChainAcquire[I], nil);
+    FChainAcquire[I] := VK_NULL_HANDLE;
+  end;
+  if FChain <> VK_NULL_HANDLE then
+    AContext.Vk.DestroySwapchainKHR(AContext.Device, FChain, nil);
+  FChain := VK_NULL_HANDLE;
+  FChainHeld := False;
   AContext.FWindows.Remove(Self);
   if FVkSurface <> VK_NULL_HANDLE then
     AContext.Fast.InstanceVk.DestroySurfaceKHR(AContext.Fast.Instance, FVkSurface, nil);
@@ -2571,12 +2686,27 @@ end;
 
 procedure TGpuVkWindow.DropSurface;
 begin
-  // The thread presenting to it ends first (its swap chain is gone already).
+  // The thread presenting to it ends first (its swap chain is gone already), the direct swap chain too.
   StopPresenter;
+  ReleaseDirectChain;
   if FVkSurface <> VK_NULL_HANDLE then
     GCtx.Fast.InstanceVk.DestroySurfaceKHR(GCtx.Fast.Instance, FVkSurface, nil);
   FVkSurface := VK_NULL_HANDLE;
   FModes := nil;
+end;
+
+function TGpuVkWindow.PresentMode: TVkPresentModeKHR;
+begin
+  // FIFO_LATEST_READY shows the newest frame queued at a refresh and frees the ones before it. Android: vertical sync
+  // unless tearing is asked for (the window's frames keep the display's pace there, TGpuVkWindow.Present).
+  if FTearingAsked and HasMode(VK_PRESENT_MODE_IMMEDIATE_KHR) then
+    Result := VK_PRESENT_MODE_IMMEDIATE_KHR
+  else if {$IFDEF ANDROID}FTearingAsked and {$ENDIF}HasMode(VK_PRESENT_MODE_MAILBOX_KHR) then
+    Result := VK_PRESENT_MODE_MAILBOX_KHR
+  else if GpuVk.Fast.FifoLatestReady and HasMode(VK_PRESENT_MODE_FIFO_LATEST_READY_KHR) then
+    Result := VK_PRESENT_MODE_FIFO_LATEST_READY_KHR
+  else
+    Result := VK_PRESENT_MODE_FIFO_KHR;
 end;
 
 function TGpuVkWindow.HasMode(const AMode: TVkPresentModeKHR): Boolean;
@@ -2681,9 +2811,76 @@ begin
   CmdImageBarrier(AFast, ACmd, Barrier);
 end;
 
+/// <summary>The extent of a swap chain for frames of AWidth x AHeight; zero when the window has no size (minimized).
+/// </summary>
+function ChainExtent(const ACaps: TVkSurfaceCapabilitiesKHR; const AWidth, AHeight: Integer): TVkExtent2D;
+begin
+  Result := ACaps.currentExtent;
+{$IFDEF ANDROID}
+  // The extent there is the one of the display's natural orientation: the frame's size instead (the compositor
+  // rotates the images, preTransform in FillChainInfo).
+  Result.width := High(Cardinal);
+{$ENDIF}
+  if Result.width = High(Cardinal) then
+  begin
+    // The surface takes the swap chain's size: the frame's.
+    Result.width := EnsureRange(Cardinal(AWidth), ACaps.minImageExtent.width, ACaps.maxImageExtent.width);
+    Result.height := EnsureRange(Cardinal(AHeight), ACaps.minImageExtent.height, ACaps.maxImageExtent.height);
+  end;
+end;
+
+/// <summary>The fields of a swap chain's creation that do not depend on the present mode and size.</summary>
+procedure FillChainInfo(var AInfo: TVkSwapchainCreateInfoKHR; const ASurface: TVkSurfaceKHR;
+  const ACaps: TVkSurfaceCapabilitiesKHR; const AFormat: TVkSurfaceFormatKHR);
+begin
+  if (ACaps.supportedUsageFlags and Ord(VK_IMAGE_USAGE_TRANSFER_DST_BIT)) = 0 then
+    raise EFastDevice.Create('FastCanvas: the window''s swap chain cannot be copied into');
+  FillChar(AInfo, SizeOf(AInfo), 0);
+  AInfo.sType := VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR;
+  AInfo.surface := ASurface;
+  AInfo.minImageCount := Max(ACaps.minImageCount, SwapImages);
+  if ACaps.maxImageCount > 0 then
+    AInfo.minImageCount := Min(AInfo.minImageCount, ACaps.maxImageCount);
+  AInfo.imageFormat := AFormat.format;
+  AInfo.imageColorSpace := AFormat.colorSpace;
+  AInfo.imageArrayLayers := 1;
+  AInfo.imageUsage := Ord(VK_IMAGE_USAGE_TRANSFER_DST_BIT);
+  AInfo.imageSharingMode := VK_SHARING_MODE_EXCLUSIVE;
+  AInfo.preTransform := ACaps.currentTransform;
+{$IFDEF ANDROID}
+  // Unrotated images of the frame's size (ChainExtent): the compositor rotates them.
+  if (ACaps.supportedTransforms and Ord(VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR)) <> 0 then
+    AInfo.preTransform := VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
+{$ENDIF}
+  if (ACaps.supportedCompositeAlpha and Ord(VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR)) <> 0 then
+    AInfo.compositeAlpha := VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR
+  else if (ACaps.supportedCompositeAlpha and Ord(VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR)) <> 0 then
+    AInfo.compositeAlpha := VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR
+  else
+    AInfo.compositeAlpha := VK_COMPOSITE_ALPHA_PRE_MULTIPLIED_BIT_KHR;
+  AInfo.clipped := VK_TRUE;
+end;
+
 function TGpuVkWindow.Prepare(const AWidth, AHeight: Integer; const ATearing: Boolean;
   const AOutput: TGpuOutput): TGpuSurface;
 begin
+  if ATearing <> FTearingAsked then
+  begin
+    FTearingAsked := ATearing;
+    FStale := True;
+    FChainStale := True;
+  end;
+  if not FDirectChecked then
+  begin
+    FDirectChecked := True;
+    FDirect := not FLayered and (GetEnvironmentVariable(DirectVariable) = '1');
+  end;
+  if FDirect then
+  begin
+    Result := DirectPrepare(AWidth, AHeight);
+    if Result <> nil then
+      Exit;
+  end;
   // Frames are drawn into a surface of the window (8-bit: no HDR output yet), which Present hands to the presenting
   // thread and transparent windows read back.
   if (FSurface <> nil) and ((FSurface.Width <> AWidth) or (FSurface.Height <> AHeight)) then
@@ -2698,12 +2895,239 @@ begin
     FSurface := TGpuVkSurface.Create(AWidth, AHeight, nil, 0);
     FDrawn := False;
   end;
-  if ATearing <> FTearingAsked then
-  begin
-    FTearingAsked := ATearing;
-    FStale := True;
-  end;
   Result := FSurface;
+end;
+
+function TGpuVkWindow.DirectChain(const AWidth, AHeight: Integer): Boolean;
+var
+  C: TGpuVkContext;
+  F: TFastVulkan;
+  Caps: TVkSurfaceCapabilitiesKHR;
+  Extent: TVkExtent2D;
+  Format: TVkSurfaceFormatKHR;
+  Info: TVkSwapchainCreateInfoKHR;
+  SemInfo: TVkSemaphoreCreateInfo;
+  Chain: TVkSwapchainKHR;
+  Images: TArray<TVkImage>;
+  Count: Cardinal;
+  Res: TVkResult;
+  I: Integer;
+begin
+  Result := False;
+  C := GpuVk;
+  F := C.Fast;
+  Res := F.Track(F.InstanceVk.GetPhysicalDeviceSurfaceCapabilitiesKHR(F.Physical, FVkSurface, @Caps));
+  if Res = VK_ERROR_SURFACE_LOST_KHR then
+  begin
+    DropSurface;
+    Exit;
+  end;
+  if Ord(Res) < 0 then
+    Exit;
+  Extent := ChainExtent(Caps, AWidth, AHeight);
+  if (Extent.width = 0) or (Extent.height = 0) then
+    Exit;
+  if (FChain <> VK_NULL_HANDLE) and not FChainStale and (Extent.width = FChainExtent.width) and
+    (Extent.height = FChainExtent.height) then
+    Exit(True);
+  // Made again (a new size, tearing): rare, the GPU is waited for.
+  ReleaseDirectChain;
+  Format := ChooseFormat(F, FVkSurface);
+  if ((Format.format <> VK_FORMAT_B8G8R8A8_UNORM) and (Format.format <> VK_FORMAT_R8G8B8A8_UNORM)) or
+    ((Caps.supportedUsageFlags and Ord(VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT)) = 0) then
+  begin
+    // Not a format the pipelines draw into: the presenting thread copies the frames.
+    FDirect := False;
+    Exit;
+  end;
+  FillChainInfo(Info, FVkSurface, Caps, Format);
+  Info.imageUsage := Ord(VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT);
+  Info.imageExtent := Extent;
+  Info.presentMode := PresentMode;
+  Chain := VK_NULL_HANDLE;
+  Res := F.Track(C.Vk.CreateSwapchainKHR(C.Device, @Info, nil, @Chain));
+  if (Res = VK_ERROR_SURFACE_LOST_KHR) or (Res = VK_ERROR_NATIVE_WINDOW_IN_USE_KHR) then
+  begin
+    DropSurface;
+    Exit;
+  end;
+  F.Check(Res, 'vkCreateSwapchainKHR');
+  FChain := Chain;
+  Count := 0;
+  C.Vk.GetSwapchainImagesKHR(C.Device, FChain, @Count, nil);
+  SetLength(Images, Count);
+  if Count > 0 then
+    C.Vk.GetSwapchainImagesKHR(C.Device, FChain, @Count, @Images[0]);
+  FillChar(SemInfo, SizeOf(SemInfo), 0);
+  SemInfo.sType := VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+  SetLength(FChainImages, Count);
+  SetLength(FChainPresent, Count);
+  for I := 0 to Integer(Count) - 1 do
+  begin
+    FChainImages[I] := TGpuVkSurface.CreateChain(Images[I], Format.format, Extent.width, Extent.height);
+    F.Check(C.Vk.CreateSemaphore(C.Device, @SemInfo, nil, @FChainPresent[I]), 'vkCreateSemaphore');
+  end;
+  for I := 0 to High(FChainAcquire) do
+    F.Check(C.Vk.CreateSemaphore(C.Device, @SemInfo, nil, @FChainAcquire[I]), 'vkCreateSemaphore');
+  FChainExtent := Extent;
+  FChainStale := False;
+  FChainHeld := False;
+  Result := True;
+end;
+
+procedure TGpuVkWindow.ReleaseDirectChain;
+var
+  C: TGpuVkContext;
+  S: TGpuVkSurface;
+  I: Integer;
+begin
+  C := GCtx;
+  if (C = nil) or ((FChain = VK_NULL_HANDLE) and (FChainImages = nil) and (FChainAcquire[0] = VK_NULL_HANDLE)) then
+    Exit;
+  // An acquire no submission waited for yet is waited for now; then presents and waits on the semaphores are done.
+  for I := 0 to High(FChainAcquire) do
+    if (FChainAcquire[I] <> VK_NULL_HANDLE) and (C.FAcquireWait = FChainAcquire[I]) then
+    begin
+      C.FAcquireWait := VK_NULL_HANDLE;
+      C.Submit(FChainAcquire[I], StageColorOutput);
+    end;
+  C.WaitIdle;
+  C.Fast.LockQueue;
+  try
+    C.Vk.QueueWaitIdle(C.Queue);
+  finally
+    C.Fast.UnlockQueue;
+  end;
+  for I := 0 to High(FChainAcquire) do
+  begin
+    C.DestroyObject(TGpuVkObject.Semaphore, FChainAcquire[I]);
+    FChainAcquire[I] := VK_NULL_HANDLE;
+  end;
+  for S in FChainImages do
+    S.Free;
+  FChainImages := nil;
+  for I := 0 to High(FChainPresent) do
+    C.DestroyObject(TGpuVkObject.Semaphore, FChainPresent[I]);
+  FChainPresent := nil;
+  // The surfaces' views were retired: they go with the next collection, after the swap chain is gone.
+  C.Collect;
+  if FChain <> VK_NULL_HANDLE then
+    C.Vk.DestroySwapchainKHR(C.Device, FChain, nil);
+  FChain := VK_NULL_HANDLE;
+  FChainHeld := False;
+end;
+
+function TGpuVkWindow.DirectPrepare(const AWidth, AHeight: Integer): TGpuSurface;
+var
+  C: TGpuVkContext;
+  S: TGpuVkSurface;
+  Sem: TVkSemaphore;
+  Res: TVkResult;
+  Attempt, Waits: Integer;
+begin
+  Result := nil;
+  C := GpuVk;
+  if FChainHeld then
+  begin
+    // The frame before was not presented: this one takes its image.
+    if not FChainStale and (FChainExtent.width = Cardinal(AWidth)) and (FChainExtent.height = Cardinal(AHeight)) then
+      Exit(FChainImages[FChainIndex]);
+    ReleaseDirectChain;
+  end;
+  if FPresenter <> nil then
+    StopPresenter;
+  if (FVkSurface = VK_NULL_HANDLE) and not CreateVkSurface then
+    Exit;
+  if not DirectChain(AWidth, AHeight) then
+    Exit;
+  // The acquire semaphore of this frame in flight: its last wait (FramesInFlight frames before) is done.
+  C.WaitFor(FFrameValues[FFrameIndex mod FramesInFlight]);
+  Sem := FChainAcquire[FFrameIndex mod FramesInFlight];
+  // Where FIFO waits for the display (the frames keep its pace); in slices, at most a second.
+  Attempt := 0;
+  Waits := 0;
+  repeat
+    Res := C.Fast.Track(C.Vk.AcquireNextImageKHR(C.Device, FChain, 100000000, Sem, VK_NULL_HANDLE, @FChainIndex));
+    if Res = VK_ERROR_OUT_OF_DATE_KHR then
+    begin
+      Inc(Attempt);
+      FChainStale := True;
+      if (Attempt > 1) or not DirectChain(AWidth, AHeight) then
+        Exit;
+      Sem := FChainAcquire[FFrameIndex mod FramesInFlight];
+      Continue;
+    end;
+    if (Res <> VK_TIMEOUT) and (Res <> VK_NOT_READY) then
+      Break;
+    Inc(Waits);
+    if (Waits >= 10) or C.Fast.Lost then
+      Exit;
+  until False;
+  if Res = VK_ERROR_SURFACE_LOST_KHR then
+  begin
+    DropSurface;
+    Exit;
+  end;
+  if (Res <> VK_SUCCESS) and (Res <> VK_SUBOPTIMAL_KHR) then
+  begin
+    FChainStale := True;
+    Exit;
+  end;
+  // Suboptimal: made again for the next frame; not on Android (see TGpuVkPresenter.PresentPending).
+{$IFNDEF ANDROID}
+  if Res = VK_SUBOPTIMAL_KHR then
+    FChainStale := True;
+{$ENDIF}
+  FChainHeld := True;
+  // The next submission waits for the image; the old content goes, after that wait (its stage).
+  C.FAcquireWait := Sem;
+  S := FChainImages[FChainIndex];
+  C.ImageBarrier(S.FImage, StageColorOutput, 0, StageColorOutput, AccessColorRead or AccessColorWrite,
+    VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+  S.FUse := TGpuVkUse.ColorTarget;
+  Result := S;
+end;
+
+function TGpuVkWindow.DirectPresent: HResult;
+var
+  C: TGpuVkContext;
+  Info: TVkPresentInfoKHR;
+  Sem: TVkSemaphore;
+  Index: Cardinal;
+  Res: TVkResult;
+begin
+  Result := S_OK;
+  C := GpuVk;
+  Index := FChainIndex;
+  FChainImages[Index].Use(TGpuVkUse.Present);
+  Sem := FChainPresent[Index];
+  C.WaitFor(FFrameValues[FFrameIndex mod FramesInFlight]);
+  FFrameValues[FFrameIndex mod FramesInFlight] := C.Submit(VK_NULL_HANDLE, 0, Sem);
+  Inc(FFrameIndex);
+  FChainHeld := False;
+  if C.Fast.Lost then
+    Exit(DXGI_ERROR_DEVICE_REMOVED);
+  if GTimeTarget <> '' then
+    TimingFrame;
+  FillChar(Info, SizeOf(Info), 0);
+  Info.sType := VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
+  Info.waitSemaphoreCount := 1;
+  Info.pWaitSemaphores := @Sem;
+  Info.swapchainCount := 1;
+  Info.pSwapchains := @FChain;
+  Info.pImageIndices := @Index;
+  C.Fast.LockQueue;
+  try
+    Res := C.Fast.Track(C.Vk.QueuePresentKHR(C.Queue, @Info));
+  finally
+    C.Fast.UnlockQueue;
+  end;
+  if Res = VK_ERROR_SURFACE_LOST_KHR then
+    DropSurface
+  else if (Res <> VK_SUCCESS) {$IFDEF ANDROID}and (Res <> VK_SUBOPTIMAL_KHR){$ENDIF} then
+    FChainStale := True;
+  if C.Fast.Lost then
+    Result := DXGI_ERROR_DEVICE_REMOVED;
 end;
 
 function TGpuVkWindow.Present: HResult;
@@ -2712,9 +3136,21 @@ var
   Old: TGpuVkSurface;
 begin
   Result := S_OK;
+  if FDirect and FChainHeld then
+    Exit(DirectPresent);
   if FLayered or (FSurface = nil) then
     Exit;
   C := GpuVk;
+  if FDirect then
+  begin
+    // The frame went into the window's surface (no swap chain image now): not shown.
+    C.Submit;
+    FDrawn := True;
+    FLastShown := False;
+    if C.Fast.Lost then
+      Exit(DXGI_ERROR_DEVICE_REMOVED);
+    Exit;
+  end;
   if (FPresenter <> nil) and FPresenter.SurfaceLost then
     DropSurface;
   if (FVkSurface = VK_NULL_HANDLE) and not CreateVkSurface then
@@ -2784,7 +3220,9 @@ var
 begin
   // The frame shown last into the surface (FShown stays in TRANSFER_SRC_OPTIMAL for the presenting thread, which
   // only reads it too). The surface holds the frame drawn last itself when it was not shown (no swap chain now,
-  // transparent windows).
+  // transparent windows). Direct: the swap chain's images keep nothing.
+  if FDirect and FChainHeld then
+    Exit(False);
   if (FSurface <> nil) and not FDrawn and FLastShown and (FShown <> nil) and (FShown.Width = FSurface.Width) and
     (FShown.Height = FSurface.Height) then
   begin
@@ -2868,55 +3306,6 @@ begin
   end;
 end;
 
-/// <summary>The extent of a swap chain for frames of AWidth x AHeight; zero when the window has no size (minimized).
-/// </summary>
-function ChainExtent(const ACaps: TVkSurfaceCapabilitiesKHR; const AWidth, AHeight: Integer): TVkExtent2D;
-begin
-  Result := ACaps.currentExtent;
-{$IFDEF ANDROID}
-  // The extent there is the one of the display's natural orientation: the frame's size instead (the compositor
-  // rotates the images, preTransform in FillChainInfo).
-  Result.width := High(Cardinal);
-{$ENDIF}
-  if Result.width = High(Cardinal) then
-  begin
-    // The surface takes the swap chain's size: the frame's.
-    Result.width := EnsureRange(Cardinal(AWidth), ACaps.minImageExtent.width, ACaps.maxImageExtent.width);
-    Result.height := EnsureRange(Cardinal(AHeight), ACaps.minImageExtent.height, ACaps.maxImageExtent.height);
-  end;
-end;
-
-/// <summary>The fields of a swap chain's creation that do not depend on the present mode and size.</summary>
-procedure FillChainInfo(var AInfo: TVkSwapchainCreateInfoKHR; const ASurface: TVkSurfaceKHR;
-  const ACaps: TVkSurfaceCapabilitiesKHR; const AFormat: TVkSurfaceFormatKHR);
-begin
-  if (ACaps.supportedUsageFlags and Ord(VK_IMAGE_USAGE_TRANSFER_DST_BIT)) = 0 then
-    raise EFastDevice.Create('FastCanvas: the window''s swap chain cannot be copied into');
-  FillChar(AInfo, SizeOf(AInfo), 0);
-  AInfo.sType := VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR;
-  AInfo.surface := ASurface;
-  AInfo.minImageCount := Max(ACaps.minImageCount, SwapImages);
-  if ACaps.maxImageCount > 0 then
-    AInfo.minImageCount := Min(AInfo.minImageCount, ACaps.maxImageCount);
-  AInfo.imageFormat := AFormat.format;
-  AInfo.imageColorSpace := AFormat.colorSpace;
-  AInfo.imageArrayLayers := 1;
-  AInfo.imageUsage := Ord(VK_IMAGE_USAGE_TRANSFER_DST_BIT);
-  AInfo.imageSharingMode := VK_SHARING_MODE_EXCLUSIVE;
-  AInfo.preTransform := ACaps.currentTransform;
-{$IFDEF ANDROID}
-  // Unrotated images of the frame's size (ChainExtent): the compositor rotates them.
-  if (ACaps.supportedTransforms and Ord(VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR)) <> 0 then
-    AInfo.preTransform := VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
-{$ENDIF}
-  if (ACaps.supportedCompositeAlpha and Ord(VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR)) <> 0 then
-    AInfo.compositeAlpha := VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR
-  else if (ACaps.supportedCompositeAlpha and Ord(VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR)) <> 0 then
-    AInfo.compositeAlpha := VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR
-  else
-    AInfo.compositeAlpha := VK_COMPOSITE_ALPHA_PRE_MULTIPLIED_BIT_KHR;
-  AInfo.clipped := VK_TRUE;
-end;
 { TGpuVkPresenter }
 
 constructor TGpuVkPresenter.Create(const AWindow: TGpuVkWindow);
@@ -3110,16 +3499,7 @@ begin
   ReleaseChain(False);
   FillChainInfo(Info, FWindow.FVkSurface, Caps, FFormat);
   Info.imageExtent := Extent;
-  // FIFO_LATEST_READY shows the newest frame queued at a refresh and frees the ones before it. Android: vertical sync
-  // unless tearing is asked for (the window's frames keep the display's pace there, TGpuVkWindow.Present).
-  if FWindow.FTearingAsked and FWindow.HasMode(VK_PRESENT_MODE_IMMEDIATE_KHR) then
-    Info.presentMode := VK_PRESENT_MODE_IMMEDIATE_KHR
-  else if {$IFDEF ANDROID}FWindow.FTearingAsked and {$ENDIF}FWindow.HasMode(VK_PRESENT_MODE_MAILBOX_KHR) then
-    Info.presentMode := VK_PRESENT_MODE_MAILBOX_KHR
-  else if FFast.FifoLatestReady and FWindow.HasMode(VK_PRESENT_MODE_FIFO_LATEST_READY_KHR) then
-    Info.presentMode := VK_PRESENT_MODE_FIFO_LATEST_READY_KHR
-  else
-    Info.presentMode := VK_PRESENT_MODE_FIFO_KHR;
+  Info.presentMode := FWindow.PresentMode;
   Info.oldSwapchain := Old;
   Chain := VK_NULL_HANDLE;
   Res := FFast.Track(FVk.CreateSwapchainKHR(FDevice, @Info, nil, @Chain));
@@ -3384,14 +3764,16 @@ begin
   if C <> nil then
   begin
     // Submitted command buffers may still use them.
-    C.Retire(TGpuVkObject.Pipeline, FPipeBlend);
-    C.Retire(TGpuVkObject.Pipeline, FPipeCopy);
-    C.Retire(TGpuVkObject.Pipeline, FPipeDual);
-    for V := Low(TGpuVkVariant) to High(TGpuVkVariant) do
+    for I := 0 to 1 do
     begin
-      C.Retire(TGpuVkObject.Pipeline, FVariantPipes[V]);
-      C.Retire(TGpuVkObject.ShaderModule, FVariantPS[V]);
+      C.Retire(TGpuVkObject.Pipeline, FPipeBlend[I]);
+      C.Retire(TGpuVkObject.Pipeline, FPipeCopy[I]);
+      C.Retire(TGpuVkObject.Pipeline, FPipeDual[I]);
+      for V := Low(TGpuVkVariant) to High(TGpuVkVariant) do
+        C.Retire(TGpuVkObject.Pipeline, FVariantPipes[I, V]);
     end;
+    for V := Low(TGpuVkVariant) to High(TGpuVkVariant) do
+      C.Retire(TGpuVkObject.ShaderModule, FVariantPS[V]);
     C.Retire(TGpuVkObject.ShaderModule, FVSFlat);
     C.Retire(TGpuVkObject.PipelineLayout, FLayout);
     C.Retire(TGpuVkObject.SetLayout, FSetLayout);
@@ -3702,8 +4084,8 @@ begin
   C.Check(C.Vk.CreatePipelineLayout(C.Device, @LayoutInfo, nil, @FLayout), 'vkCreatePipelineLayout');
   FVS := NewModule(@FastCanvasVkVS[0], Length(FastCanvasVkVS));
   FPS := NewModule(@FastCanvasVkPS[0], Length(FastCanvasVkPS));
-  FPipeBlend := NewPipeline(VK_FORMAT_B8G8R8A8_UNORM, True, False);
-  FPipeCopy := NewPipeline(VK_FORMAT_B8G8R8A8_UNORM, False, False);
+  FPipeBlend[0] := NewPipeline(VK_FORMAT_B8G8R8A8_UNORM, True, False);
+  FPipeCopy[0] := NewPipeline(VK_FORMAT_B8G8R8A8_UNORM, False, False);
   // The variants: a phone (Mali-G57) shades large areas several times faster with them; a discrete GPU shades fast
   // enough anyway, and their vertex shader and splits only cost it (2026-10-14, RX 9070 XT: paragraph light 1950
   // against 1370 FPS).
@@ -3727,33 +4109,56 @@ begin
   CreateEdgeTable(GpuEdgesInitial);
 end;
 
-function TGpuVkRenderer.TargetPipeline: TVkPipeline;
+function TGpuVkRenderer.TargetSlot: Integer;
 begin
+  Result := Ord(TGpuVkSurface(FTarget).Format = VK_FORMAT_R8G8B8A8_UNORM);
+end;
+
+function TGpuVkRenderer.TargetPipeline: TVkPipeline;
+var
+  S: Integer;
+begin
+  S := TargetSlot;
   if FDual and not FCopy and GpuVk.Fast.DualSource then
   begin
     // ClearType text in the frame: everything blends with the second output (the same result for the rest).
-    if FPipeDual = VK_NULL_HANDLE then
+    if FPipeDual[S] = VK_NULL_HANDLE then
     begin
       if FPSDual = VK_NULL_HANDLE then
         FPSDual := NewModule(@FastCanvasVkPSDual[0], Length(FastCanvasVkPSDual));
-      FPipeDual := NewPipeline(VK_FORMAT_B8G8R8A8_UNORM, True, True);
+      FPipeDual[S] := NewPipeline(SlotFormats[S], True, True);
     end;
-    Exit(FPipeDual);
+    Exit(FPipeDual[S]);
   end;
   if FCopy then
-    Result := FPipeCopy
+  begin
+    if FPipeCopy[S] = VK_NULL_HANDLE then
+      FPipeCopy[S] := NewPipeline(SlotFormats[S], False, False);
+    Result := FPipeCopy[S];
+  end
   else
-    Result := FPipeBlend;
+  begin
+    if FPipeBlend[S] = VK_NULL_HANDLE then
+      FPipeBlend[S] := NewPipeline(SlotFormats[S], True, False);
+    Result := FPipeBlend[S];
+  end;
 end;
 
 function TGpuVkRenderer.VariantPipeline(const AVariant: TGpuVkVariant): TVkPipeline;
 var
   Code: Pointer;
-  Words: Integer;
+  Words, S: Integer;
 begin
-  Result := FVariantPipes[AVariant];
+  S := TargetSlot;
+  Result := FVariantPipes[S, AVariant];
   if Result <> VK_NULL_HANDLE then
     Exit;
+  if FVariantPS[AVariant] <> VK_NULL_HANDLE then
+  begin
+    Result := NewPipeline(SlotFormats[S], True, False, FVariantPS[AVariant], FVSFlat);
+    FVariantPipes[S, AVariant] := Result;
+    Exit;
+  end;
   case AVariant of
     TGpuVkVariant.Shapes:
       begin
@@ -3812,8 +4217,8 @@ begin
   if FVSFlat = VK_NULL_HANDLE then
     FVSFlat := NewModule(@FastCanvasVkVSFlat[0], Length(FastCanvasVkVSFlat));
   FVariantPS[AVariant] := NewModule(Code, Words);
-  Result := NewPipeline(VK_FORMAT_B8G8R8A8_UNORM, True, False, FVariantPS[AVariant], FVSFlat);
-  FVariantPipes[AVariant] := Result;
+  Result := NewPipeline(SlotFormats[S], True, False, FVariantPS[AVariant], FVSFlat);
+  FVariantPipes[S, AVariant] := Result;
 end;
 
 /// <summary>Greedy: an instance joins the run when the run's variant draws it, or when the variant that draws both
