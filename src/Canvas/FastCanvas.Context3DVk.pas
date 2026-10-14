@@ -60,6 +60,9 @@ type
     /// what the scene in progress has cleared so far.</summary>
     FKeep: Cardinal;
     FSceneCleared: Cardinal;
+    /// <summary>The scene in progress holds the canvas's chunk (FastChunkHold): its commands reach the render thread
+    /// together, so that its rendering instance can last to its end (EndsInPass).</summary>
+    FHolding: Boolean;
     /// <summary>A window (TForm3D): the window of the canvas back end that presents the frames, and the texture of its
     /// frame surface.</summary>
     FWindow: TObject;
@@ -2091,6 +2094,8 @@ end;
 
 destructor TFastContext3DVk.Destroy;
 begin
+  if FHolding then
+    Dec(FastChunkHold);
   if GContexts <> nil then
   begin
     GContexts.Remove(Self);
@@ -2264,6 +2269,11 @@ begin
     Exit;
   GScenes.Add(Self);
   FSceneCleared := 0;
+  if (FMSColor <> nil) or (FDepth <> nil) then
+  begin
+    Inc(FastChunkHold);
+    FHolding := True;
+  end;
   if FFrame <> nil then
   begin
     Px := TargetPixels;
@@ -2323,6 +2333,11 @@ begin
       T.Used := True;
       Keep(T);
     end;
+  end;
+  if FHolding then
+  begin
+    Dec(FastChunkHold);
+    FHolding := False;
   end;
   GScenes.Remove(Self);
   if GScenes.Count > 0 then

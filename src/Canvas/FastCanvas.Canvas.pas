@@ -178,6 +178,8 @@ type
 const
   /// <summary>A chunk this large goes to the render thread before the frame is recorded to the end.</summary>
   SubmitBytes = 256 * 1024;
+  /// <summary>The same while a 3D scene holds the chunk (FastChunkHold).</summary>
+  HeldSubmitBytes = 32 * 1024 * 1024;
   /// <summary>Pixels per em up to which text is drawn from the glyph atlas.</summary>
   MaxAtlasEm = 160;
   MaxRecordedPaths = 1024;
@@ -873,6 +875,12 @@ begin
   Result := GQueue;
 end;
 
+/// <summary>The open chunk goes to the render thread before the next command.</summary>
+function ChunkFull(const Q: TRenderQueue): Boolean; inline;
+begin
+  Result := (Q.Chunk.Size >= SubmitBytes) and ((FastChunkHold <= 0) or (Q.Chunk.Size >= HeldSubmitBytes));
+end;
+
 /// <summary>Appends a command and returns its payload (valid until the next allocation). Any command ends the open
 /// run of instances.</summary>
 function RecAlloc(const AOp: TCmd; const APayload: Integer; const ARef: IInterface = nil): Pointer;
@@ -885,7 +893,7 @@ begin
     FastFlushDeferred;
   Q := Queue;
   GRunOffset := -1;
-  if Q.Chunk.Size >= SubmitBytes then
+  if ChunkFull(Q) then
     Q.Submit;
   H := Q.Chunk.Alloc(SizeOf(TCmdHeader) + APayload);
   H.Op := AOp;
@@ -916,7 +924,7 @@ begin
     FastFlushDeferred;
   RecTarget(ACanvas);
   Q := GQueue;
-  if (GRunOffset < 0) or (GRunChunk <> Q.Chunk) or (Q.Chunk.Size >= SubmitBytes) then
+  if (GRunOffset < 0) or (GRunChunk <> Q.Chunk) or ChunkFull(Q) then
   begin
     PCmdInstances(RecAlloc(TCmd.Instances, SizeOf(TCmdInstances))).Count := 0;
     GRunChunk := Q.Chunk;

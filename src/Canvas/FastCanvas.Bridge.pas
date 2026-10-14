@@ -79,6 +79,10 @@ var
   FastBridge: TFastBridge;
   FastDeferredPending: Boolean;
   FastDeferredFlush: TFastFlushProc;
+  /// <summary>Recording thread: scenes of a 3D context in progress whose commands should stay in one chunk of the
+  /// stream (the Vulkan context ends a scene's rendering instance at the end of a chunk); while above 0 the canvas does
+  /// not hand a large chunk to the render thread before the frame is recorded (up to a limit).</summary>
+  FastChunkHold: Integer;
 
 /// <summary>Called by the canvas: hands pending deferred 3D work to the command stream.</summary>
 procedure FastFlushDeferred; inline;
