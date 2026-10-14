@@ -579,8 +579,10 @@ begin
     H := Max(MaxSize.Y - Padding.Top - Padding.Bottom, 0);
     D.LayoutWidth := W;
     D.LayoutHeight := H;
-    D.FEllipsis := Trimming <> TTextTrimming.None;
-    if D.FEllipsis and not WordWrap then
+    // Trimming: one line with an ellipsis without WordWrap; with it, an ellipsis only when the lines overflow the
+    // box (below: Skia's ellipsis without a line limit ends the paragraph at the first line that wraps).
+    D.FEllipsis := (Trimming <> TTextTrimming.None) and not WordWrap;
+    if D.FEllipsis then
       D.FMaxLines := 1;
     if WordWrap then
       D.FLayoutAt := W
@@ -595,7 +597,7 @@ begin
         D.FLayoutAt := W;
       D.Paragraph.Layout(D.FLayoutAt);
     end
-    else if D.FEllipsis and (D.Paragraph.Height > H + 0.5) then
+    else if (Trimming <> TTextTrimming.None) and (D.Paragraph.Height > H + 0.5) then
     begin
       // The lines that fit, the last one with the ellipsis.
       Lines := D.Paragraph.LineMetrics;
@@ -604,6 +606,7 @@ begin
         if Lines[I].Baseline + Lines[I].Descent <= H + 0.5 then
           Fit := I + 1;
       D.FMaxLines := Max(Fit, 1);
+      D.FEllipsis := True;
       D.FParagraph := D.MakeParagraph(TAlphaColors.Black, False);
     end;
     Shift := (W - D.FLayoutAt) * HAlign;

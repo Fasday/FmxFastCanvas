@@ -7,7 +7,8 @@ unit FastCanvas.DeviceVk;
   structures and ray query are enabled too where the device has them (the 3D context of a later stage needs them).
 
   FASTCANVAS_VK_DEBUG=<file>: the Khronos validation layer, whose warnings and errors a VK_EXT_debug_utils messenger
-  appends to that file (as FASTCANVAS_D3D12_DEBUG does for the Direct3D 12 debug layer).
+  appends to that file (as FASTCANVAS_D3D12_DEBUG does for the Direct3D 12 debug layer). FASTCANVAS_VK_API=1.1 or
+  1.2: an instance of that version, so any device is used the way of devices below Vulkan 1.3 (a test of that path).
 
   The loader is held until Destroy: the unit Vulkan frees its handle in its finalization, which runs before FMX frees
   the forms and the canvas shuts the device down (FastCanvas.Service). Thread use as with Direct3D 12: the device is
@@ -111,8 +112,12 @@ function FastVulkanVersionText(const AVersion: Cardinal): string;
 
 implementation
 
+uses
+  System.Math;
+
 const
   DebugVariable = 'FASTCANVAS_VK_DEBUG';
+  ApiVariable = 'FASTCANVAS_VK_API';
   ValidationLayer: AnsiString = 'VK_LAYER_KHRONOS_validation';
   /// <summary>Messages logged per process at most.</summary>
   MaxMessages = 2000;
@@ -272,6 +277,11 @@ begin
   FInstanceVersion := VK_API_VERSION_1_3;
   if (Version and $1FFFFFFF) < VK_API_VERSION_1_3 then
     FInstanceVersion := Version and $1FFFFFFF;
+  // FASTCANVAS_VK_API=1.1 or 1.2: an instance of that version, which takes any device the way of devices below 1.3.
+  if GetEnvironmentVariable(ApiVariable) = '1.1' then
+    FInstanceVersion := Min(FInstanceVersion, VK_API_VERSION_1_1)
+  else if GetEnvironmentVariable(ApiVariable) = '1.2' then
+    FInstanceVersion := Min(FInstanceVersion, VK_API_VERSION_1_2);
   Count := 0;
   vkEnumerateInstanceExtensionProperties(nil, @Count, nil);
   SetLength(Available, Count);
@@ -617,7 +627,8 @@ var
 begin
   Names := [PAnsiChar(VK_KHR_SWAPCHAIN_EXTENSION_NAME), PAnsiChar(VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME),
     PAnsiChar(VK_KHR_SYNCHRONIZATION_2_EXTENSION_NAME)];
-  if GetApiVersion < VK_API_VERSION_1_2 then
+  // The version in use: the device's, at most the instance's.
+  if Min(GetApiVersion, FInstanceVersion) < VK_API_VERSION_1_2 then
     Names := Names + [PAnsiChar(VK_KHR_TIMELINE_SEMAPHORE_EXTENSION_NAME),
       PAnsiChar(VK_KHR_DEPTH_STENCIL_RESOLVE_EXTENSION_NAME), PAnsiChar(VK_KHR_CREATE_RENDERPASS_2_EXTENSION_NAME)];
   FillChar(Timeline, SizeOf(Timeline), 0);
