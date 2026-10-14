@@ -81,7 +81,7 @@ type
   /// <summary>Kinds of Vulkan objects that Retire keeps until the GPU is done with them (Memory: a TFastVkAllocation).
   /// </summary>
   TGpuVkObject = (Image, ImageView, Memory, Buffer, BufferView, Pipeline, PipelineLayout, SetLayout, Sampler,
-    ShaderModule, Semaphore);
+    ShaderModule, Semaphore, AccelerationStructure, DescriptorPool);
   {$SCOPEDENUMS OFF}
 
   /// <summary>Part of a host-visible buffer, mapped for writing.</summary>
@@ -206,10 +206,12 @@ type
     function NewImage(const AFormat: TVkFormat; const AWidth, AHeight: Integer; const AUsage: TVkImageUsageFlags;
       out AMemory: TFastVkAllocation; out AView: TVkImageView; const AMips: Integer = 1; const ASamples: Integer = 1;
       const AAspect: TVkImageAspectFlags = Ord(VK_IMAGE_ASPECT_COLOR_BIT)): TVkImage;
-    /// <summary>A buffer and its memory (ARequired, APreferred: see TFastVulkan.MemoryType; host-visible memory is mapped:
-    /// AMemory.Cpu).</summary>
+    /// <summary>A buffer and its memory (ARequired, APreferred: see TFastVulkan.MemoryType; host-visible memory is
+    /// mapped: AMemory.Cpu).</summary>
     function NewBuffer(const ASize: UInt64; const AUsage: TVkBufferUsageFlags; const ARequired,
       APreferred: TVkMemoryPropertyFlags; out AMemory: TFastVkAllocation): TVkBuffer;
+    /// <summary>The device address of a buffer (buffer device address).</summary>
+    function BufferAddress(const ABuffer: TVkBuffer): UInt64;
     /// <summary>A descriptor set of ALayout for the open command buffer.</summary>
     function AllocSet(const ALayout: TVkDescriptorSetLayout): TVkDescriptorSet;
     /// <summary>Rendering into ATarget (begun if it is not the current one, after the barriers so far); AClear: the
@@ -657,6 +659,8 @@ begin
     TGpuVkObject.Sampler: FVk.DestroySampler(FDevice, AHandle, nil);
     TGpuVkObject.ShaderModule: FVk.DestroyShaderModule(FDevice, AHandle, nil);
     TGpuVkObject.Semaphore: FVk.DestroySemaphore(FDevice, AHandle, nil);
+    TGpuVkObject.AccelerationStructure: FVk.DestroyAccelerationStructureKHR(FDevice, AHandle, nil);
+    TGpuVkObject.DescriptorPool: FVk.DestroyDescriptorPool(FDevice, AHandle, nil);
   end;
 end;
 
@@ -1054,6 +1058,7 @@ end;
 function TGpuVkContext.TakePage(const ASize: NativeInt): TGpuVkPage;
 var
   I, Best: Integer;
+  Usage: TVkBufferUsageFlags;
 begin
   Collect;
   // The smallest free page that fits: a small request does not take the page a large one needs next.
@@ -1070,9 +1075,13 @@ begin
   Result := TGpuVkPage.Create;
   try
     Result.Size := Max(PageSize, AlignUp(ASize, 64 * 1024));
-    Result.Buffer := NewBuffer(Result.Size, Ord(VK_BUFFER_USAGE_TRANSFER_SRC_BIT) or
-      Ord(VK_BUFFER_USAGE_VERTEX_BUFFER_BIT) or Ord(VK_BUFFER_USAGE_INDEX_BUFFER_BIT) or
-      Ord(VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT), Ord(VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) or
+    Usage := Ord(VK_BUFFER_USAGE_TRANSFER_SRC_BIT) or Ord(VK_BUFFER_USAGE_VERTEX_BUFFER_BIT) or
+      Ord(VK_BUFFER_USAGE_INDEX_BUFFER_BIT) or Ord(VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT);
+    // Ray tracing builds its structures from the vertices and indices draws upload, and reads instance records.
+    if FFast.RayQuery then
+      Usage := Usage or Ord(VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT) or Ord(VK_BUFFER_USAGE_STORAGE_BUFFER_BIT) or
+        Ord(VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR);
+    Result.Buffer := NewBuffer(Result.Size, Usage, Ord(VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) or
       Ord(VK_MEMORY_PROPERTY_HOST_COHERENT_BIT), 0, Result.Memory);
     Result.Cpu := Result.Memory.Cpu;
   except
@@ -1270,6 +1279,16 @@ begin
     Result := VK_NULL_HANDLE;
     raise;
   end;
+end;
+
+function TGpuVkContext.BufferAddress(const ABuffer: TVkBuffer): UInt64;
+var
+  Info: TVkBufferDeviceAddressInfo;
+begin
+  FillChar(Info, SizeOf(Info), 0);
+  Info.sType := VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO;
+  Info.buffer := ABuffer;
+  Result := FVk.GetBufferDeviceAddress(FDevice, @Info);
 end;
 
 procedure TGpuVkContext.NextPool;

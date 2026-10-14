@@ -28,8 +28,9 @@ unit FastCanvas.Context3DVk;
   a resolve at the end of the scene. Mipmaps are made on the CPU when a texture is updated.
 
   Ray-traced effects (RayTracing, FastContext3DRayTracing: shadows, soft shadows, ambient occlusion, reflections) with
-  ray queries over the scene's acceleration structures (FastCanvas.Context3DVk.Ray.inc). Not on Vulkan: HDR targets
-  and output, DLSS, application ray passes (RayDispatch, RayDraw), DrawIntensity. }
+  ray queries over the scene's acceleration structures (FastCanvas.Context3DVk.Ray.inc), where the device has them
+  (RayTracingSupported; AMD's 32-bit driver has not: the scenes are drawn without). Not on Vulkan: HDR targets and
+  output, DLSS, application ray passes (RayDispatch, RayDraw), DrawIntensity. }
 
 interface
 
@@ -301,6 +302,71 @@ type
     Texture: Pointer;   // TTextureVk with Window
   end;
 
+  TRayTransform = array[0..2, 0..3] of Single;
+
+  PCmdRayObject = ^TCmdRayObject;
+  /// <summary>Before the draw of an opaque object of a scene with ray-traced effects: its triangles go into the
+  /// scene's acceleration structure; with reflections, its vertex layout and material too.</summary>
+  TCmdRayObject = packed record
+    Scene: Integer;
+    /// <summary>Byte offsets in a vertex: float3 position, float3 normal and float2 texture coordinates (-1: none).
+    /// </summary>
+    PositionOffset, NormalOffset, TexCoordOffset: Integer;
+    /// <summary>The key of the geometry (its arrays and contents).</summary>
+    Geometry: UInt64;
+    /// <summary>Object to world: three rows of a column-vector matrix (FMX's matrix transposed).</summary>
+    Transform: TRayTransform;
+    /// <summary>0: unknown (gray, lit), 1: TColorMaterial (Diffuse), 2: TTextureMaterial, 3: TLightMaterial; 255: no
+    /// reflections in this scene (the rest is not set).</summary>
+    Kind: Byte;
+    Textured: Boolean;
+    Pad: Word;
+    Diffuse, Ambient, Emission, Specular: array[0..3] of Single;
+    Shininess: Single;
+    Texture: Pointer;   // TTextureVk of texture0 (kept alive by the command), nil without one
+  end;
+
+const
+  // TCmdRay.Flags (FastRay.hlsl).
+  RayShadowsOn = 1;
+  RayReflect = 4;
+
+type
+  PCmdRay = ^TCmdRay;
+  /// <summary>The ray-traced passes over a finished scene (constants of FastRay.hlsl from InvViewProj on).</summary>
+  TCmdRay = packed record
+    Target, Depth: Pointer;   // TTextureVk, kept alive by the command
+    Scene: Integer;
+    Width, Height, Samples: Integer;
+    /// <summary>Clip to the offset from the camera (CameraPos).</summary>
+    InvViewProj: array[0..15] of Single;
+    CameraPos: array[0..3] of Single;
+    PixelToNdc: array[0..1] of Single;
+    Strength: Single;
+    LightCount: Cardinal;
+    LightPos, LightDir, LightWeight: array[0..7, 0..3] of Single;
+    Softness: Single;
+    ShadowSamples: Cardinal;
+    AORadius, AOStrength: Single;
+    AOSamples: Cardinal;
+    /// <summary>RayShadowsOn, RayReflect.</summary>
+    Flags: Cardinal;
+    ReflectStrength: Single;
+    Pad: Single;
+    LightColor: array[0..7, 0..3] of Single;
+    Background: array[0..3] of Single;
+  end;
+
+  /// <summary>Render thread: the geometry and material of an instance of a scene with reflections.</summary>
+  TRayMaterial = record
+    Blas: TObject;   // TBlasVk
+    Texture: IInterface;
+    Kind: Byte;
+    Textured: Boolean;
+    Diffuse, Ambient, Emission, Specular: array[0..3] of Single;
+    Shininess: Single;
+  end;
+
   /// <summary>Render-thread state of the 3D commands on the canvas's open command buffer.</summary>
   TReplay = record
     Ctx: Pointer;
@@ -325,7 +391,17 @@ type
     UnitIds: array[0..MaxUnits - 1] of Integer;
     Filters: Cardinal;
     UnitCount: Integer;
+    // Ray tracing: the objects of the scene in progress, and what lasts across scenes (TRayStateVk).
     Ray: TObject;
+    RayScene: Integer;
+    Instances: TArray<TVkAccelerationStructureInstanceKHR>;
+    InstanceCount: Integer;
+    /// <summary>The ray object command before the draw in progress (Pending), and per instance its geometry and
+    /// material (reflections).</summary>
+    RayObject: TCmdRayObject;
+    RayObjectTexture: IInterface;
+    RayObjectPending: Boolean;
+    Materials: TArray<TRayMaterial>;
   end;
 
 var
@@ -1097,6 +1173,22 @@ begin
   Result := G;
 end;
 
+/// <summary>Render thread: the blank texture holds its white pixel (before its first use).</summary>
+procedure EnsureBlank;
+var
+  White: Cardinal;
+  B: TTextureVk;
+begin
+  if G.BlankReady then
+    Exit;
+  B := G.Blank;
+  White := $FFFFFFFF;
+  B.Uncleared := False;
+  GpuVk.CopyToImage(B.Image, B.Use, 4, 0, 0, 1, 1, @White, 4);
+  B.UseAs(TGpuVkUse.ShaderRead);
+  G.BlankReady := True;
+end;
+
 {$I FastCanvas.Context3DVk.Ray.inc}
 
 { Replay (render thread, device lock held) }
@@ -1281,22 +1373,6 @@ begin
   end
   else
     EnsureRendering(C);
-end;
-
-/// <summary>The blank texture holds its white pixel (before its first use).</summary>
-procedure EnsureBlank;
-var
-  White: Cardinal;
-  B: TTextureVk;
-begin
-  if G.BlankReady then
-    Exit;
-  B := G.Blank;
-  White := $FFFFFFFF;
-  B.Uncleared := False;
-  GpuVk.CopyToImage(B.Image, B.Use, 4, 0, 0, 1, 1, @White, 4);
-  B.UseAs(TGpuVkUse.ShaderRead);
-  G.BlankReady := True;
 end;
 
 /// <summary>ABytes of constants (AData, ALen bytes recorded) into upload memory for the open command buffer, zeroed
@@ -1662,26 +1738,6 @@ var
   GSceneSerial: Integer;
 
 procedure RunPendingReset; forward;
-
-/// <summary>Identifies a geometry across frames: the arrays FMX passes (a mesh keeps them while it does not change),
-/// their sizes and a few positions (a mesh changed in place).</summary>
-function GeometryKey(const AVertices, AIndices: Pointer; const AVertexSize, AVertexCount, AIndexSize,
-  AIndexCount, APositionOffset: Integer): UInt64;
-var
-  I: Integer;
-  P: PByte;
-begin
-  Result := FastHashMix(UInt64(AVertices), UInt64(AIndices));
-  Result := FastHashMix(Result, (UInt64(Cardinal(AVertexSize)) shl 32) or Cardinal(AVertexCount));
-  Result := FastHashMix(Result, (UInt64(Cardinal(AIndexSize)) shl 32) or Cardinal(AIndexCount));
-  if AVertexCount > 0 then
-    for I := 0 to 7 do
-    begin
-      P := PByte(AVertices) + NativeInt(Int64(I) * (AVertexCount - 1) div 7) * AVertexSize + APositionOffset;
-      Result := FastHashMix(Result, PUInt64(P)^);
-      Result := FastHashMix(Result, PCardinal(P + 8)^);
-    end;
-end;
 
 { TFastContext3DVk }
 
@@ -2494,7 +2550,6 @@ var
   O: TObject;
   Live: TArray<TObject>;
 begin
-  RayDrop(AContext);
   R.Target := nil;
   R.Depth := nil;
   R.RenderDepth := nil;
@@ -2518,6 +2573,8 @@ begin
       AContext.DestroyObject(TGpuVkObject.ShaderModule, TShaderVk(O).Module);
       TShaderVk(O).Module := VK_NULL_HANDLE;
     end;
+  // After the textures: those that go with the ray-tracing state have nothing left to release.
+  RayDrop(AContext);
   if G <> nil then
   begin
     G.Release(AContext);

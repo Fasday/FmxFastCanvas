@@ -69,6 +69,7 @@ type
     FFifoLatestReady: Boolean;
     FPushDescriptor: Boolean;
     FDepthFormat: TVkFormat;
+    FScratchAlignment: Cardinal;
     procedure CreateInstance;
     procedure PickDevice(const APreferSoftware: Boolean);
     procedure CreateDevice;
@@ -128,7 +129,7 @@ type
     property Lost: Boolean read FLost;
     /// <summary>Dual-source blending (ClearType text).</summary>
     property DualSource: Boolean read FDualSource;
-    /// <summary>Features on for the 3D context of a later stage.</summary>
+    /// <summary>Features of the 3D context's ray-traced effects (RayQuery: with descriptor indexing).</summary>
     property BufferDeviceAddress: Boolean read FBufferDeviceAddress;
     property AccelerationStructure: Boolean read FAccelerationStructure;
     property RayQuery: Boolean read FRayQuery;
@@ -140,6 +141,8 @@ type
     /// <summary>The depth and stencil format of the 3D context: D32_SFLOAT_S8_UINT, else D24_UNORM_S8_UINT (as
     /// attachment and sampled); VK_FORMAT_UNDEFINED: none.</summary>
     property DepthFormat: TVkFormat read FDepthFormat;
+    /// <summary>Alignment of the scratch memory of acceleration structure builds.</summary>
+    property ScratchAlignment: Cardinal read FScratchAlignment;
   end;
 
 implementation
@@ -594,6 +597,8 @@ var
   FifoName: PAnsiChar;
   Depth: TVkFormat;
   Props: TVkFormatProperties;
+  AccelProps: TVkPhysicalDeviceAccelerationStructurePropertiesKHR;
+  Props2: TVkPhysicalDeviceProperties2;
 const
   DepthNeeds = Ord(VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT) or Ord(VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT);
 begin
@@ -638,8 +643,12 @@ begin
   FFifoLatestReady := (FifoName <> nil) and (FifoFeatures.presentModeFifoLatestReady <> VK_FALSE);
   FBufferDeviceAddress := F12.bufferDeviceAddress <> VK_FALSE;
   FAccelerationStructure := Ray and FBufferDeviceAddress and (AccelFeatures.accelerationStructure <> VK_FALSE);
+  // The ray-traced effects of the 3D context index arrays of buffers and textures in their shaders.
   FRayQuery := FAccelerationStructure and HasExtension(Exts, VK_KHR_RAY_QUERY_EXTENSION_NAME) and
-    (RayFeatures.rayQuery <> VK_FALSE);
+    (RayFeatures.rayQuery <> VK_FALSE) and (F12.runtimeDescriptorArray <> VK_FALSE) and
+    (F12.shaderStorageBufferArrayNonUniformIndexing <> VK_FALSE) and
+    (F12.shaderSampledImageArrayNonUniformIndexing <> VK_FALSE) and
+    (F12.descriptorBindingPartiallyBound <> VK_FALSE) and (F12.descriptorBindingVariableDescriptorCount <> VK_FALSE);
 
   // What is turned on.
   FillChar(RayFeatures, SizeOf(RayFeatures), 0);
@@ -655,6 +664,14 @@ begin
   F12.timelineSemaphore := VK_TRUE;
   if FBufferDeviceAddress then
     F12.bufferDeviceAddress := VK_TRUE;
+  if FRayQuery then
+  begin
+    F12.runtimeDescriptorArray := VK_TRUE;
+    F12.shaderStorageBufferArrayNonUniformIndexing := VK_TRUE;
+    F12.shaderSampledImageArrayNonUniformIndexing := VK_TRUE;
+    F12.descriptorBindingPartiallyBound := VK_TRUE;
+    F12.descriptorBindingVariableDescriptorCount := VK_TRUE;
+  end;
   if FAccelerationStructure then
   begin
     F12.pNext := @AccelFeatures;
@@ -705,6 +722,17 @@ begin
   LoadVulkanDeviceCommands(vkGetDeviceProcAddr, FDevice, Cmds);
   FVk := TVulkan.Create(Cmds);
   FVk.GetDeviceQueue(FDevice, FQueueFamily, 0, @FQueue);
+  FScratchAlignment := 256;
+  if FAccelerationStructure then
+  begin
+    FillChar(AccelProps, SizeOf(AccelProps), 0);
+    AccelProps.sType := VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_PROPERTIES_KHR;
+    FillChar(Props2, SizeOf(Props2), 0);
+    Props2.sType := VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+    Props2.pNext := @AccelProps;
+    FInstanceVk.GetPhysicalDeviceProperties2(FPhysical, @Props2);
+    FScratchAlignment := Max(AccelProps.minAccelerationStructureScratchOffsetAlignment, 1);
+  end;
   FDepthFormat := VK_FORMAT_UNDEFINED;
   for Depth in [VK_FORMAT_D32_SFLOAT_S8_UINT, VK_FORMAT_D24_UNORM_S8_UINT] do
   begin

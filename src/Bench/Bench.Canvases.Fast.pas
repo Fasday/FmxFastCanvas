@@ -243,6 +243,15 @@ begin
   RegisterFastCanvas('fcvk', 'FastCanvas on Vulkan (canvas and own 3D context)', 'Vulkan');
   RegisterFastCanvas('fcvksep', 'FastCanvas on Vulkan with the stock 3D context on its own device',
     'Vulkan,SeparateContext3D');
+  RegisterFastCanvas('fcvkrt', 'FastCanvas on Vulkan with ray-traced shadows in 3D scenes (ray queries)',
+    'Vulkan,RayShadows');
+  RegisterFastCanvas('fcvkao', 'FastCanvas on Vulkan with ray-traced shadows and ambient occlusion (8 rays)',
+    'Vulkan,RayShadows,RayAO');
+  RegisterFastCanvas('fcvksoft',
+    'FastCanvas on Vulkan with soft ray-traced shadows (8 rays per light) and ambient occlusion (8 rays)',
+    'Vulkan,RayShadows,RaySoft,RayAO');
+  RegisterFastCanvas('fcvkrefl', 'FastCanvas on Vulkan with ray-traced shadows and reflections',
+    'Vulkan,RayShadows,RayReflect');
   RegisterFastCanvas('fcst', 'FastCanvas without the render thread (commands executed on the main thread)',
     'MainThread');
   RegisterFastCanvas('fcheapsleep', 'FastCanvas with the memory manager sleeping on lock contention (RTL default)',
