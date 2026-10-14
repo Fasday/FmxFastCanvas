@@ -35,6 +35,8 @@ Machine: AMD Ryzen 5 7500F (6 cores), AMD Radeon RX 9070 XT (driver 32.0.31041.1
 | `fcdx12rt` / `ao` / `soft` / `refl` | `fcdx12` with ray-traced shadows / shadows and ambient occlusion / soft shadows / shadows and reflections |
 | `fcvk` | FastCanvas on Vulkan, with its 3D context (see "Vulkan" below) |
 | `fcvkrt` / `ao` / `soft` / `refl` | `fcvk` with the ray-traced effects of `fcdx12rt` / `ao` / `soft` / `refl` |
+| `fcvksep` | `fcvk` with FMX's stock 3D context on a device of its own |
+| `fcvkskia` | `fcvk` with the Skia geometry and text engines (those of Android and Linux) |
 
 ### Scenes
 
@@ -219,7 +221,17 @@ Ray-traced effects on Vulkan, `light` preset (the GPU is the bottleneck), one ru
 | `viewport3d` | 3671 / 4046 | 3020 / 4043 | 2329 / 3836 | 2289 / 3973 | 2429 / 3986 |
 
 With `medium` the effects cost `fcvk` nothing measurable (`shadows3d` and `mirror3d` 2750–2880 FPS with every
-variant, `viewport3d` 660–715). The images are identical to those of `fcdx12rt` / `ao` / `soft` / `refl`.
+variant, `viewport3d` 660–715). The images are those of `fcdx12rt` / `ao` / `soft` / `refl`: at most 0.04 % of the
+pixels differ, all by 1 of 255 but two or three pixels per image (checked 2026-10-14 at 1920 x 1080, `light`).
+
+`fcvkskia` against `fcvk`, measured 2026-10-13 at 1920 x 1080 (`medium`, throughput, two runs each; before windows
+presented from a thread of their own): the same speed but for `strokes`, about 19 % slower (Skia widens the dashed
+strokes of every frame more slowly than Direct2D): `strokes` 768 / 779 against 952 / 954 FPS, `paths` 1238 / 1157
+against 1195 / 1137, `text` 1979 / 1962 against 1941 / 1939, `paragraph` 547 / 538 against 534 / 518. Screenshots:
+`rects`, `ellipses`, `lines`, `gradients`, `bitmaps` and `clip` identical; `roundrects` 0.05 % of the pixels differ,
+`strokes` 2.7 % (dash phase along ellipses), `paths` 2.2 % (curve flattening), `text` 3.8 %, `textedge` 5.5 %,
+`paragraph` 25 % (Skia's line height is a fraction of a pixel larger, so lines drift and two lines break elsewhere),
+`controls` and `aa` 0.5 %, `rare` 1.6 %.
 
 ## Running the benchmark
 

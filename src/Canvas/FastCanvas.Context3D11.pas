@@ -83,8 +83,9 @@ type
 var
   /// <summary>TContextStyle.Fragile: FMX keeps a copy of texture pixels and recreates textures and shaders after a
   /// device loss (TContextLostMessage / TContextResetMessage). Costs a message subscription per TTexture. Read when
-  /// the context class is installed.</summary>
-  FastContext3DFragile: Boolean = True;
+  /// the context class is installed. The one of FastCanvas.Context3D, which the Vulkan 3D context takes too (also off
+  /// Windows).</summary>
+  FastContext3DFragile: Boolean absolute FastCanvas.Context3D.FastContext3DFragile;
 
 /// <summary>Makes TFastContext3D11 the default 3D context. Call before Application.Initialize, after the canvas
 /// (FastCanvas.Canvas.InstallFastCanvas).</summary>

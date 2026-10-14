@@ -1,7 +1,8 @@
 # How FastCanvas works
 
-FastCanvas replaces the canvas and the 3D context of FireMonkey on Windows. It is written from scratch on
-Direct3D 11, Direct3D 12 or Vulkan; FMX itself (forms, controls, styles, layout, animations) is unchanged.
+FastCanvas replaces the canvas and the 3D context of FireMonkey on Windows, and the canvas on Android (Linux: it
+compiles). It is written from scratch on Direct3D 11, Direct3D 12 or Vulkan (the only back end on Android and Linux);
+FMX itself (forms, controls, styles, layout, animations) is unchanged.
 
 ## Units
 
@@ -12,7 +13,10 @@ Direct3D 11, Direct3D 12 or Vulkan; FMX itself (forms, controls, styles, layout,
 | `FastCanvas.Gpu` | The renderer that does not depend on the graphics API: instanced runs of primitives, clip/paint/edge tables, gradient ramps, glyph atlas. |
 | `FastCanvas.Gpu11`, `FastCanvas.Gpu12` | The Direct3D 11 and Direct3D 12 back ends of the renderer: surfaces, swap chains, pipelines. |
 | `Shaders/FastCanvas.hlsl` → `FastCanvas.Shaders.inc` | The canvas shaders (vs_4_0 / ps_4_0, DXBC, used by both back ends). |
-| `FastCanvas.Text` | `TFastTextLayout` on DirectWrite: layouts analysed into glyph runs, the glyph atlas. |
+| `FastCanvas.Text` | The text that does not depend on the engine: `TFastTextLayout` and its data (glyph runs, overhang, decorations), the layout cache, the glyph atlas, the engine registry (`FastCanvasTextEngine`). |
+| `FastCanvas.TextDWrite`, `FastCanvas.TextSkia` | The text engines: DirectWrite (Windows) and Skia paragraphs (every platform; the only one on Android and Linux): layouts, glyph coverage, glyph outlines, layouts with color glyphs rasterized on the CPU. |
+| `FastCanvas.Geometry`, `FastCanvas.GeometryD2D`, `FastCanvas.GeometrySkia` | The CPU geometry (paths, their fill edges and stroke outlines, hit tests) and its engines: Direct2D (Windows) and Skia (`FastCanvasGeometryEngine`). |
+| `FastCanvas.Platform` | The window of a form for the back end on Windows (HWND), Android (`ANativeWindow`) and Linux (X11 window of the GTK drawing area), and its size in pixels. |
 | `FastCanvas.Device` | The device of the process (Direct3D 11 or 12), DXGI, Direct2D factory (CPU geometry), DirectWrite. |
 | `FastCanvas.Hdr`, `Shaders/FastOutput.hlsl` | HDR output: the setting, what the display of a window can show (DXGI outputs, SDR white level), the pass that turns a window's frame into scRGB. |
 | `FastCanvas.Service` | Installs the canvas class and the 3D context class into FMX (`IFMXCanvasService`, `IFMXContextService`). |
@@ -20,14 +24,53 @@ Direct3D 11, Direct3D 12 or Vulkan; FMX itself (forms, controls, styles, layout,
 | `FastCanvas.Context3D` | The part of the 3D contexts that does not depend on the API: shaders and their variables, pipeline state, vertex layouts, the settings of the ray-traced effects. |
 | `FastCanvas.Context3D11`, `FastCanvas.Context3D12`, `FastCanvas.Context3DVk` | The 3D contexts (`TContext3D`) for `TViewport3D`, `TForm3D` and the effects. |
 | `FastCanvas.Context3D12.Ray.inc`, `Shaders/FastRay.hlsl` → `FastCanvas.RayShaders.inc` | Ray-traced effects (DXR 1.1, shader model 6.5). |
-| `FastCanvas.DeviceVk` | The Vulkan device: instance, physical and logical device and their features, the memory suballocator, the queue lock. |
-| `FastCanvas.GpuVk` | The Vulkan back end of the renderer: the recording context, surfaces, windows and the threads that present them, pipelines. |
+| `FastCanvas.DeviceVk` | The Vulkan device (1.3, or 1.1/1.2 with the extensions of the same features): the loader and surface extension of the platform, instance, physical and logical device and their optional features, the memory suballocator, the queue lock. |
+| `FastCanvas.GpuVk` | The Vulkan back end of the renderer: the recording context, surfaces, windows (Win32, Android and Xlib surfaces) and the threads that present them, pipelines. |
 | `FastCanvas.VkShaders.inc`, `FastCanvas.VkRayShaders.inc`, `FastCanvas.VkFmxShaders.inc` | SPIR-V: `FastCanvas.hlsl`, `FastOutput.hlsl` and `FastRay.hlsl` (dxc), FMX's own shaders (from their GLSL, `tools/compile-fmx-shaders-vk.ps1`). |
 | `FastCanvas.Context3DVk.Ray.inc` | Ray-traced effects on Vulkan (ray queries). |
 | `FastCanvas.D2D1Ext`, `FastCanvas.DWriteExt`, `FastCanvas.DCompExt` | Headers of Direct2D 1.1+, DirectWrite 2 and DirectComposition that Delphi's RTL lacks. |
 
 The shaders are compiled offline by `tools/compile-shaders.ps1` (fxc and dxc from the Windows SDK; SPIR-V with dxc
 and glslangValidator from the Vulkan SDK) into Pascal byte arrays; building FastCanvas needs none of the compilers.
+
+## Platforms
+
+The canvas does not call Windows APIs outside `{$IFDEF MSWINDOWS}`: what it needs of a platform goes through three
+seams, so the same recording, player and renderer run on Android and Linux on the Vulkan back end.
+
+- **Geometry** (`TFastGeometryEngine`): paths from FMX points, rectangles, rounded rectangles, ellipses, lines;
+  `Flatten` and `Widen` (with a `TFastStroke`: width, caps, joins, dashes) into the canvas's edge sink, which flattens
+  curves to its tolerance; `Contains`. Direct2D on Windows by default, Skia (`SkPath`, `SkPaint.getFillPath`)
+  elsewhere. Glyph outlines come from the text engine as FMX path points and are filled through it too.
+- **Text** (`TFastTextEngine`): the layout class (`TFastTextLayout` descendants fill `TFastLayoutData`: glyph runs
+  with an engine font face that keys the glyph cache, ink overhang, underline and strikethrough rectangles), glyph
+  coverage for the atlas (DirectWrite's alpha textures; Skia: the unhinted outline filled, plain coverage that the
+  shader corrects for gamma and contrast alike), glyph outlines, and the CPU image of layouts with color glyphs. Skia
+  lays text out with SkParagraph (HarfBuzz, line breaking, bidi, the platform's font fallback); color fonts are told
+  by name or by a glyph without an outline (Android names its fallback fonts "91##fallback").
+- **Windows** (`FastCanvas.Platform`, `TGpuWindowHandle`): the native window and display a form presents to, whether
+  it can be drawn now, its pixel size. Android: the `ANativeWindow` of the form's surface holder, held while the
+  canvas lives (FMX makes the canvas again on `surfaceCreated`/`surfaceChanged`). Linux: the X11 window of the GTK
+  drawing area through GDK, loaded at run time.
+
+Off Windows the render queue waits on `TEvent`s, the device lock, the queue lock and the locks of the memory
+allocator, of the presenting threads and of the 3D context are monitors, thread ids come from `pthread_self`. The
+Vulkan back end takes devices below 1.3 through `VK_KHR_dynamic_rendering`, `VK_KHR_synchronization2` (and
+`VK_KHR_timeline_semaphore` below 1.2) with the KHR commands under the core names (`FASTCANVAS_VK_API=1.1` tests that
+path on any GPU); such a device gets push descriptors (the 3D context) and `FIFO_LATEST_READY` where it has them, but
+no ray tracing features (the ray-tracing shaders are built for Vulkan 1.2). Windows present from a thread of their own
+there too. On Android the swap chain is not rotated by the canvas and a suboptimal swap chain is kept (it stays
+suboptimal while the display is turned); the frame is blitted into the `R8G8B8A8` images. A lost surface (the app went
+to the background) ends the window's presenting thread, which drops its swap chain; the next frame of the window
+drops the surface and is not presented, and FMX makes the canvas again for the next native window. On Android the
+render thread waits until the presenting thread has taken the frame before (it presents with `FIFO`), so the frames
+keep the display's pace as when the render thread presented itself. The Vulkan 3D context builds there too (a
+`TForm3D` window would get its native window through `FastCanvas.Platform`) but is not used: FMX ships the Direct3D
+sources of its shaders, whose variables give the context the constant layout and the key of the SPIR-V, on Windows
+only.
+
+The PasVulkan header is patched for Delphi's 64-bit POSIX platforms, where `LongInt` and `LongWord` are 64-bit
+(`third_party\pasvulkan\PROVENANCE.md`).
 
 ## Recording and the render thread
 
@@ -179,7 +222,8 @@ own for each back end, on the canvas's device:
   replays them into the canvas's command list. Pipeline state objects are cached by shaders, vertex layout, state and
   target format. With `Hdr` the target of a viewport is RGBA16F (see "HDR output").
 - **Vulkan**: as Direct3D 12, replayed into the canvas's command buffer, with push descriptors (one set layout: the
-  constants of both stages, eight texture units). FMX ships its shaders as Direct3D bytecode and GLSL ES sources;
+  constants of both stages, eight texture units; without `VK_KHR_push_descriptor` a set of the recording context's
+  descriptor pools per change, bound). FMX ships its shaders as Direct3D bytecode and GLSL ES sources;
   `tools/compile-fmx-shaders-vk.ps1` rewrites the GLSL into Vulkan GLSL with the uniforms of a stage in one block at
   the byte offsets of the Direct3D variables (matrices transposed; the few shaders whose GLSL computes otherwise than
   their bytecode patched), so the constants `FastCanvas.Context3D` lays out are the same bytes on every back end. The

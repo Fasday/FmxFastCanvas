@@ -355,6 +355,10 @@ var
   FastContext3DRayTracing: TFastRayTracing = (Shadows: False; ShadowStrength: 0.7; ShadowSoftness: 0;
     ShadowSamples: 8; AmbientOcclusion: False; AORadius: 1; AOStrength: 0.6; AOSamples: 8; Reflections: False;
     ReflectionStrength: 1);
+  /// <summary>TContextStyle.Fragile: FMX keeps a copy of texture pixels and recreates textures and shaders after a
+  /// device loss (TContextLostMessage / TContextResetMessage). Costs a message subscription per TTexture. Read when
+  /// the context class is installed (FastCanvas.Context3D11 has it as well).</summary>
+  FastContext3DFragile: Boolean = True;
 
 /// <summary>Bytes of a block (compressed formats: 4 x 4 pixels) or pixel of a raw texture format.</summary>
 function FastTextureBlockBytes(const AFormat: TFastTextureFormat): Integer;

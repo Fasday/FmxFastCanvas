@@ -18,8 +18,9 @@ unit FastCanvas.Context3DVk;
   Shaders: FMX's own shaders as SPIR-V made from their GLSL sources (tools\compile-fmx-shaders-vk.ps1,
   FastCanvas.VkFmxShaders.inc), found by a hash of the GLSL source and of the Direct3D variables; their constants are
   laid out as for Direct3D (FastCanvas.Context3D), one uniform block per stage. A shader without SPIR-V there (an
-  application's own shader) raises EContext3DException: not supported. One descriptor set layout, pushed per draw:
-  binding 0 the vertex constants, 1 the pixel constants, 2..9 the texture units with their samplers. Clip space as
+  application's own shader) raises EContext3DException: not supported. One descriptor set layout, pushed per draw
+  (VK_KHR_push_descriptor; without it written into a set of the recording context's pools and bound): binding 0 the
+  vertex constants, 1 the pixel constants, 2..9 the texture units with their samplers. Clip space as
   with Direct3D: the viewport flips y (negative height), FMX's projection has Direct3D's depth range.
 
   Targets: TViewport3D and filters draw into textures (a bitmap of the canvas is used in place: DoBitmapToTexture,
@@ -38,7 +39,7 @@ interface
 
 uses
   System.Types, System.UITypes, System.SysUtils, System.Math, System.Math.Vectors, System.Generics.Collections,
-  FMX.Types, FMX.Types3D, FMX.Graphics, FastCanvas.Context3D;
+  FMX.Types, FMX.Types3D, FMX.Graphics, FastCanvas.Gpu, FastCanvas.Context3D;
 
 type
   TFastContext3DVk = class(TFastContext3D)
@@ -56,6 +57,8 @@ type
     /// <summary>A window (TForm3D): the window of the canvas back end that presents the frames, and the texture of its
     /// frame surface.</summary>
     FWindow: TObject;
+    /// <summary>The platform's window FWindow presents to (FastCanvas.Platform); held until FWindow goes.</summary>
+    FWindowHandle: TGpuWindowHandle;
     FFrame: IInterface;
     procedure CreateTargets;
     function TargetPixels: TSize;
@@ -102,20 +105,23 @@ type
 
 /// <summary>Makes TFastContext3DVk the default 3D context. Call before Application.Initialize, after the canvas
 /// (FastCanvas.Canvas.InstallFastCanvas) with FastCanvasBackend = Vulkan. FastContext3DFragile
-/// (FastCanvas.Context3D11) applies.</summary>
+/// (FastCanvas.Context3D) applies.</summary>
 procedure InstallFastContext3DVk;
 
 implementation
 
 uses
-  Winapi.Windows, System.Classes, FMX.Platform.Win, FMX.Forms3D, Vulkan, FastCanvas.Device, FastCanvas.DeviceVk,
-  FastCanvas.Gpu, FastCanvas.GpuVk, FastCanvas.Bridge, FastCanvas.Service, FastCanvas.Context3D11;
+  {$IFDEF MSWINDOWS}Winapi.Windows, {$ELSE}FastCanvas.RenderQueue, {$ENDIF}System.Classes, FMX.Forms3D, Vulkan,
+  FastCanvas.Device, FastCanvas.DeviceVk, FastCanvas.GpuVk, FastCanvas.Bridge, FastCanvas.Service,
+  FastCanvas.Platform;
 
 {$I FastCanvas.VkFmxShaders.inc}
 
+{$IFDEF MSWINDOWS}
 type
   // Winapi.Windows declares a TBitmap too.
   TBitmap = FMX.Graphics.TBitmap;
+{$ENDIF}
 
 const
   MaxUnits = 8;
@@ -211,6 +217,9 @@ type
     Vk: TVulkan;
     Device: TVkDevice;
     DepthFormat: TVkFormat;
+    /// <summary>The descriptors of a draw are pushed (VK_KHR_push_descriptor); else they are written into a set of
+    /// the recording context's descriptor pools, which is bound.</summary>
+    Push: Boolean;
     SetLayout: TVkDescriptorSetLayout;
     Layout: TVkPipelineLayout;
     /// <summary>Clamped samplers: bit 0 linear minification, bit 1 linear magnification and mip levels.</summary>
@@ -416,7 +425,11 @@ var
   /// <summary>Textures and shader modules that hold Vulkan objects (dropped when the recording context shuts down).
   /// </summary>
   GLive: TList<TObject>;
+{$IFDEF MSWINDOWS}
   GLiveLock: TRTLCriticalSection;
+{$ELSE}
+  GLiveLock: TObject;
+{$ENDIF}
   GNextTextureId: Integer;
   /// <summary>The shader whose TFastShader is being made (DoInitializeShader, main thread).</summary>
   GPendingShader: TContextShader;
@@ -448,21 +461,39 @@ begin
     FastBridge.KeepAlive(ARef);
 end;
 
+procedure LockLive; inline;
+begin
+{$IFDEF MSWINDOWS}
+  EnterCriticalSection(GLiveLock);
+{$ELSE}
+  TMonitor.Enter(GLiveLock);
+{$ENDIF}
+end;
+
+procedure UnlockLive; inline;
+begin
+{$IFDEF MSWINDOWS}
+  LeaveCriticalSection(GLiveLock);
+{$ELSE}
+  TMonitor.Exit(GLiveLock);
+{$ENDIF}
+end;
+
 procedure AddLive(const AObject: TObject);
 begin
-  EnterCriticalSection(GLiveLock);
+  LockLive;
   try
     if GLive = nil then
       GLive := TList<TObject>.Create;
     GLive.Add(AObject);
   finally
-    LeaveCriticalSection(GLiveLock);
+    UnlockLive;
   end;
 end;
 
 procedure RemoveLive(const AObject: TObject);
 begin
-  EnterCriticalSection(GLiveLock);
+  LockLive;
   try
     if GLive <> nil then
     begin
@@ -471,7 +502,7 @@ begin
         FreeAndNil(GLive);
     end;
   finally
-    LeaveCriticalSection(GLiveLock);
+    UnlockLive;
   end;
 end;
 
@@ -799,11 +830,12 @@ begin
   Fast := TFastDevice.Vulkan;
   if Fast = nil then
     raise EContext3DException.Create('FastContext3DVk: the canvas has no Vulkan device');
-  if not Fast.PushDescriptor or (Fast.DepthFormat = VK_FORMAT_UNDEFINED) then
-    raise EContext3DException.Create('FastContext3DVk: the Vulkan device has no push descriptors or depth format');
+  if Fast.DepthFormat = VK_FORMAT_UNDEFINED then
+    raise EContext3DException.Create('FastContext3DVk: the Vulkan device has no depth and stencil format');
   Vk := Fast.Vk;
   Device := Fast.Device;
   DepthFormat := Fast.DepthFormat;
+  Push := Fast.PushDescriptor;
   Pipes := TDictionary<UInt64, TVkPipeline>.Create;
   Layouts := TDictionary<UInt64, TFastVertexLayout>.Create;
   Offsets := TDictionary<UInt64, TLayoutOffsets>.Create;
@@ -854,7 +886,8 @@ begin
   end;
   FillChar(SetInfo, SizeOf(SetInfo), 0);
   SetInfo.sType := VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-  SetInfo.flags := Ord(VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR);
+  if Push then
+    SetInfo.flags := Ord(VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR);
   SetInfo.bindingCount := Length(Bindings);
   SetInfo.pBindings := @Bindings[0];
   Check(Vk.CreateDescriptorSetLayout(Device, @SetInfo, nil, @SetLayout), 'vkCreateDescriptorSetLayout');
@@ -1408,6 +1441,7 @@ var
   Buffers: array[0..1] of TVkDescriptorBufferInfo;
   Images: array[0..MaxUnits - 1] of TVkDescriptorImageInfo;
   Writes: array[0..2] of TVkWriteDescriptorSet;
+  DescSet: TVkDescriptorSet;
 begin
   C := AData;
   Ctx := Begin3D;
@@ -1538,7 +1572,17 @@ begin
     Writes[2].descriptorCount := MaxUnits;
     Writes[2].descriptorType := VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     Writes[2].pImageInfo := @Images[0];
-    Ctx.Vk.CmdPushDescriptorSetKHR(Cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, G.Layout, 0, Length(Writes), @Writes[0]);
+    if G.Push then
+      Ctx.Vk.CmdPushDescriptorSetKHR(Cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, G.Layout, 0, Length(Writes), @Writes[0])
+    else
+    begin
+      // Without push descriptors: a set of the open command buffer's pool (released with it), written and bound.
+      DescSet := Ctx.AllocSet(G.SetLayout);
+      for I := 0 to High(Writes) do
+        Writes[I].dstSet := DescSet;
+      Ctx.Vk.UpdateDescriptorSets(Ctx.Device, Length(Writes), @Writes[0], 0, nil);
+      Ctx.Vk.CmdBindDescriptorSets(Cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, G.Layout, 0, 1, @DescSet, 0, nil);
+    end;
     R.UnitCount := C.UnitCount;
     R.Filters := C.Filters;
     R.Pushed := True;
@@ -1770,13 +1814,21 @@ begin
 end;
 
 class function TFastContext3DVk.Valid: Boolean;
+{$IFDEF MSWINDOWS}
 var
   V: TFastVulkan;
 begin
   TFastDevice.Ensure;
   V := TFastDevice.Vulkan;
-  Result := (V <> nil) and V.PushDescriptor and (V.DepthFormat <> VK_FORMAT_UNDEFINED);
+  Result := (V <> nil) and (V.DepthFormat <> VK_FORMAT_UNDEFINED);
 end;
+{$ELSE}
+begin
+  // FMX ships the Direct3D sources of its shaders on Windows only, and the context takes their variables (the
+  // constant layout, the key of the SPIR-V): elsewhere every shader would be left out and nothing drawn.
+  Result := False;
+end;
+{$ENDIF}
 
 class function TFastContext3DVk.RayTracingSupported: Boolean;
 begin
@@ -1814,7 +1866,8 @@ begin
   begin
     // A window (TForm3D): frames are drawn into the frame surface of a window of the canvas back end, which presents
     // them on a thread of its own.
-    FWindow := TGpuVkWindow.Create(WindowHandleToPlatform(Parent).Wnd, False);
+    FWindowHandle := FastWindowOf(Parent);
+    FWindow := TGpuVkWindow.Create(FWindowHandle, False);
     T := TTextureVk.Create;
     T.Id := AtomicIncrement(GNextTextureId);
     T.Window := TGpuVkWindow(FWindow);
@@ -1873,6 +1926,8 @@ begin
   FMSColor := nil;
   FDepth := nil;
   FreeAndNil(FWindow);
+  // After the window: its surface is made from the native window.
+  FastReleaseWindow(FWindowHandle);
 end;
 
 function TFastContext3DVk.DrawTarget: TObject;
@@ -2555,7 +2610,7 @@ begin
   R.RenderDepth := nil;
   R.Ctx := nil;
   R.ListGen := -1;
-  EnterCriticalSection(GLiveLock);
+  LockLive;
   try
     if GLive <> nil then
     begin
@@ -2563,7 +2618,7 @@ begin
       GLive.Clear;
     end;
   finally
-    LeaveCriticalSection(GLiveLock);
+    UnlockLive;
   end;
   for O in Live do
     if O is TTextureVk then
@@ -2664,18 +2719,22 @@ begin
     FreeAndNil(GScenes);
     FreeAndNil(GOwnerTag);
     FreeAndNil(GSharedLock);
-    EnterCriticalSection(GLiveLock);
+    LockLive;
     try
       if (GLive <> nil) and (GLive.Count = 0) then
         FreeAndNil(GLive);
     finally
-      LeaveCriticalSection(GLiveLock);
+      UnlockLive;
     end;
   end;
 end;
 
 procedure InstallFastContext3DVk;
 begin
+{$IFNDEF MSWINDOWS}
+  // Not off Windows yet (see Valid): FMX's own 3D context stays.
+  Exit;
+{$ENDIF}
   if GContexts = nil then
   begin
     GContexts := TList<TFastContext3DVk>.Create;
@@ -2691,7 +2750,11 @@ begin
 end;
 
 initialization
+{$IFDEF MSWINDOWS}
   InitializeCriticalSection(GLiveLock);
+{$ELSE}
+  GLiveLock := TObject.Create;
+{$ENDIF}
 finalization
   // Not deleted: textures and shaders may be freed after the unit finalizations (FMX frees forms later).
 end.

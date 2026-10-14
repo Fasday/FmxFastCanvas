@@ -31,13 +31,21 @@ unit FastCanvas.GpuVk;
   wait for the refresh on the presenting thread only: frames come as fast as with Direct3D 12 presenting with sync
   interval 0. The swap chain is made again when the frame's size or the tearing changes, or when Vulkan reports it
   out of date or suboptimal. Vulkan windows present to the window itself (opaque, as Flip): no DirectComposition. No
-  HDR yet (CreateHdrSurface returns nil, windows are 8-bit). }
+  HDR yet (CreateHdrSurface returns nil, windows are 8-bit).
+
+  Android and Linux: the surface is made from the native window (ANativeWindow) or the X11 window of the handle, and
+  presented to by the window's thread as on Windows. A surface that is lost (Android takes the native window away
+  when the app goes to the background) ends the presenting thread and is dropped at the next frame, which is not
+  presented; FMX makes the canvas again for the next native window. On Android the swap chain takes the frame's size
+  unrotated (the compositor rotates it) and is not made again for being suboptimal, presents with FIFO unless tearing
+  is asked for, and Present waits until the thread has taken the frame before: the frames keep the display's pace, as
+  when the render thread presented (FMX paints as often as its timers ask). }
 
 interface
 
 uses
-  Winapi.Windows, System.SysUtils, System.Types, System.Math, System.Classes, System.SyncObjs,
-  System.Generics.Collections, Vulkan, FastCanvas.Device, FastCanvas.DeviceVk, FastCanvas.Gpu;
+  {$IFDEF MSWINDOWS}Winapi.Windows, {$ENDIF}System.SysUtils, System.Types, System.Math, System.Classes,
+  System.SyncObjs, System.Generics.Collections, Vulkan, FastCanvas.Device, FastCanvas.DeviceVk, FastCanvas.Gpu;
 
 const
   /// <summary>Window frames the GPU may have queued: Present waits for the frame this many before, as the presenting
@@ -290,14 +298,18 @@ type
     /// frame latency does for Direct3D 12).</summary>
     FFrameValues: array[0..FramesInFlight - 1] of UInt64;
     FFrameIndex: Cardinal;
-    /// <summary>The window's Vulkan surface and the present modes it offers.</summary>
-    procedure CreateVkSurface;
+    /// <summary>The Vulkan surface of the platform's window and the present modes it offers; False when the window
+    /// cannot have one now (Android: no native window).</summary>
+    function CreateVkSurface: Boolean;
+    /// <summary>The surface is lost: the presenting thread ends and the surface goes (made again at the next frame).
+    /// </summary>
+    procedure DropSurface;
     function HasMode(const AMode: TVkPresentModeKHR): Boolean;
     procedure StopPresenter;
     /// <summary>Destroys the Vulkan objects at once (the context shuts down).</summary>
     procedure Drop(const AContext: TGpuVkContext);
   public
-    constructor Create(const AWnd: HWND; const ALayered: Boolean); override;
+    constructor Create(const AHandle: TGpuWindowHandle; const ALayered: Boolean); override;
     destructor Destroy; override;
     function Prepare(const AWidth, AHeight: Integer; const ATearing: Boolean; const AOutput: TGpuOutput): TGpuSurface;
       override;
@@ -319,10 +331,21 @@ type
     FVk: TVulkan;
     FDevice: TVkDevice;
     FWake: TEvent;
-    /// <summary>Guards the hand-over: FShown (the window's), FShownGen, FPending, FStaleAsked.</summary>
+    /// <summary>Guards the hand-over: FShown (the window's), FShownGen, FPending, FStaleAsked, FSurfaceLost.
+    /// </summary>
+{$IFDEF MSWINDOWS}
     FLock: TRTLCriticalSection;
+{$ELSE}
+    FLock: TObject;
+{$ENDIF}
     FShownGen: Integer;
     FPending, FStaleAsked: Boolean;
+    /// <summary>Set when FPending goes from True to False (the frame was taken: its swap chain image acquired, or it
+    /// was dropped); reset under FLock by WaitTaken.</summary>
+    FTaken: TEvent;
+    /// <summary>The window's surface was lost (Android took the native window away): the swap chain is gone and
+    /// nothing is presented any more; the window drops the surface at its next frame.</summary>
+    FSurfaceLost: Boolean;
     // This thread (and Release once it has ended).
     FSwapchain: TVkSwapchainKHR;
     FFormat: TVkSurfaceFormatKHR;
@@ -342,10 +365,11 @@ type
     FValue: UInt64;
     FStale: Boolean;
     FCheckedW, FCheckedH: Integer;
-    function Ok(const ARes: TVkResult): Boolean;
     procedure WaitValue(const AValue: UInt64);
     procedure ReleaseChain(const ADestroyOld: Boolean);
     function CreateChain(const AWidth, AHeight: Integer): Boolean;
+    /// <summary>The surface is lost: the swap chain goes, FSurfaceLost is set.</summary>
+    procedure LoseSurface;
     procedure Record_(const AIndex: Integer; const AShown: TGpuVkSurface);
     /// <summary>Presents the pending frame; False when there was none or it could not be presented.</summary>
     function PresentPending: Boolean;
@@ -355,8 +379,16 @@ type
   public
     constructor Create(const AWindow: TGpuVkWindow);
     destructor Destroy; override;
+    /// <summary>The lock of the hand-over (FLock).</summary>
+    procedure Lock;
+    procedure Unlock;
     /// <summary>Render thread: FShown holds a new frame (submitted).</summary>
     procedure Post;
+    /// <summary>Render thread: waits at most ATimeoutMs until the frame posted last has been taken (with FIFO the
+    /// acquire waits for the display, so the frames keep its pace).</summary>
+    procedure WaitTaken(const ATimeoutMs: Cardinal);
+    /// <summary>The window's surface was lost (see FSurfaceLost).</summary>
+    function SurfaceLost: Boolean;
     /// <summary>The thread ends; its Vulkan objects go (the GPU is waited for).</summary>
     procedure Stop;
   end;
@@ -435,7 +467,7 @@ type
     class function CreateRenderer: TGpuRenderer; override;
     class function CreateSurface(const AWidth, AHeight: Integer; const AData: Pointer;
       const APitch: Integer): TGpuSurface; override;
-    class function CreateWindow(const AWnd: HWND; const ALayered: Boolean): TGpuWindow; override;
+    class function CreateWindow(const AHandle: TGpuWindowHandle; const ALayered: Boolean): TGpuWindow; override;
     class procedure Submit; override;
     class procedure WaitIdle; override;
     class procedure Shutdown; override;
@@ -458,8 +490,13 @@ var
 
 implementation
 
+{$IFDEF MSWINDOWS}
 uses
   Winapi.DxgiType;
+{$ELSE}
+const
+  DXGI_ERROR_DEVICE_REMOVED = FastDeviceRemoved;
+{$ENDIF}
 
 {$I FastCanvas.VkShaders.inc}
 
@@ -1293,12 +1330,13 @@ end;
 
 procedure TGpuVkContext.NextPool;
 const
-  Types: array[0..3] of TVkDescriptorType = (VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
-    VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER, VK_DESCRIPTOR_TYPE_SAMPLER);
-  // Per set of the canvas layout (a 3D context of a later stage brings its own needs).
-  PerSet: array[0..3] of Cardinal = (2, 16, 4, 4);
+  Types: array[0..4] of TVkDescriptorType = (VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
+    VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER, VK_DESCRIPTOR_TYPE_SAMPLER, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+  // Per set of the canvas layout; the 3D context's sets (two uniform buffers, eight combined image samplers) come
+  // from these pools too where it cannot push them (no VK_KHR_push_descriptor).
+  PerSet: array[0..4] of Cardinal = (2, 16, 4, 4, 8);
 var
-  Sizes: array[0..3] of TVkDescriptorPoolSize;
+  Sizes: array[0..4] of TVkDescriptorPoolSize;
   Info: TVkDescriptorPoolCreateInfo;
   I: Integer;
 begin
@@ -1322,6 +1360,8 @@ begin
     Info.sType := VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
     Info.maxSets := SetsPerPool;
     Info.poolSizeCount := Length(Sizes);
+    if FFast.PushDescriptor then
+      Info.poolSizeCount := Length(Sizes) - 1;
     Info.pPoolSizes := @Sizes[0];
     Check(FVk.CreateDescriptorPool(FDevice, @Info, nil, @FPool.Pool), 'vkCreateDescriptorPool');
   end;
@@ -1608,7 +1648,7 @@ end;
 
 { TGpuVkWindow }
 
-constructor TGpuVkWindow.Create(const AWnd: HWND; const ALayered: Boolean);
+constructor TGpuVkWindow.Create(const AHandle: TGpuWindowHandle; const ALayered: Boolean);
 begin
   inherited;
   TFastDevice.Lock;
@@ -1658,19 +1698,47 @@ begin
   FModes := nil;
 end;
 
-procedure TGpuVkWindow.CreateVkSurface;
+function TGpuVkWindow.CreateVkSurface: Boolean;
 var
   F: TFastVulkan;
+{$IF Defined(MSWINDOWS)}
   Info: TVkWin32SurfaceCreateInfoKHR;
+{$ELSEIF Defined(ANDROID)}
+  Info: TVkAndroidSurfaceCreateInfoKHR;
+{$ELSE}
+  Info: TVkXlibSurfaceCreateInfoKHR;
+{$ENDIF}
   Supported: TVkBool32;
   Count: Cardinal;
 begin
   F := GpuVk.Fast;
+{$IF Defined(MSWINDOWS)}
   FillChar(Info, SizeOf(Info), 0);
   Info.sType := VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR;
   Info.hinstance_ := TVkHINSTANCE(GetWindowLongPtr(FWnd, GWLP_HINSTANCE));
   Info.hwnd_ := FWnd;
   F.Check(F.InstanceVk.CreateWin32SurfaceKHR(F.Instance, @Info, nil, @FVkSurface), 'vkCreateWin32SurfaceKHR');
+{$ELSEIF Defined(ANDROID)}
+  // No native window: the app has no surface now (FMX makes the canvas again when it gets one).
+  if FHandle.Window = 0 then
+    Exit(False);
+  FillChar(Info, SizeOf(Info), 0);
+  Info.sType := VK_STRUCTURE_TYPE_ANDROID_SURFACE_CREATE_INFO_KHR;
+  Info.window := Pointer(FHandle.Window);
+  if F.Track(F.InstanceVk.CreateAndroidSurfaceKHR(F.Instance, @Info, nil, @FVkSurface)) <> VK_SUCCESS then
+  begin
+    FVkSurface := VK_NULL_HANDLE;
+    Exit(False);
+  end;
+{$ELSE}
+  if (FHandle.Window = 0) or (FHandle.Display = nil) then
+    Exit(False);
+  FillChar(Info, SizeOf(Info), 0);
+  Info.sType := VK_STRUCTURE_TYPE_XLIB_SURFACE_CREATE_INFO_KHR;
+  Info.dpy := FHandle.Display;
+  Info.window := FHandle.Window;
+  F.Check(F.InstanceVk.CreateXlibSurfaceKHR(F.Instance, @Info, nil, @FVkSurface), 'vkCreateXlibSurfaceKHR');
+{$ENDIF}
   Supported := VK_FALSE;
   F.InstanceVk.GetPhysicalDeviceSurfaceSupportKHR(F.Physical, F.QueueFamily, FVkSurface, @Supported);
   if Supported = VK_FALSE then
@@ -1680,6 +1748,17 @@ begin
   SetLength(FModes, Count);
   if Count > 0 then
     F.InstanceVk.GetPhysicalDeviceSurfacePresentModesKHR(F.Physical, FVkSurface, @Count, @FModes[0]);
+  Result := True;
+end;
+
+procedure TGpuVkWindow.DropSurface;
+begin
+  // The thread presenting to it ends first (its swap chain is gone already).
+  StopPresenter;
+  if FVkSurface <> VK_NULL_HANDLE then
+    GCtx.Fast.InstanceVk.DestroySurfaceKHR(GCtx.Fast.Instance, FVkSurface, nil);
+  FVkSurface := VK_NULL_HANDLE;
+  FModes := nil;
 end;
 
 function TGpuVkWindow.HasMode(const AMode: TVkPresentModeKHR): Boolean;
@@ -1817,16 +1896,25 @@ begin
   if FLayered or (FSurface = nil) then
     Exit;
   C := GpuVk;
-  if FVkSurface = VK_NULL_HANDLE then
-    CreateVkSurface;
+  if (FPresenter <> nil) and FPresenter.SurfaceLost then
+    DropSurface;
+  if (FVkSurface = VK_NULL_HANDLE) and not CreateVkSurface then
+  begin
+    // No surface now (Android: no native window): the frame stays in the window's surface, not shown.
+    C.Submit;
+    FDrawn := True;
+    if C.Fast.Lost then
+      Exit(DXGI_ERROR_DEVICE_REMOVED);
+    Exit;
+  end;
   if FPresenter = nil then
     FPresenter := TGpuVkPresenter.Create(Self);
   if FStale then
   begin
     FStale := False;
-    EnterCriticalSection(FPresenter.FLock);
+    FPresenter.Lock;
     FPresenter.FStaleAsked := True;
-    LeaveCriticalSection(FPresenter.FLock);
+    FPresenter.Unlock;
   end;
   if (FShown = nil) or (FShown.Width <> FSurface.Width) or (FShown.Height <> FSurface.Height) then
   begin
@@ -1834,11 +1922,11 @@ begin
     // holding the lock) and the GPU is done with that: the context's next submission is later on the queue, and the
     // command buffer it retires with is open (the new surface was cleared in it).
     S := TGpuVkSurface.Create(FSurface.Width, FSurface.Height, nil, 0);
-    EnterCriticalSection(FPresenter.FLock);
+    FPresenter.Lock;
     Old := FShown;
     FShown := S;
     Inc(FPresenter.FShownGen);
-    LeaveCriticalSection(FPresenter.FLock);
+    FPresenter.Unlock;
     Old.Free;
   end;
   // The newest frame into the copy, which rests in TRANSFER_SRC_OPTIMAL for the presenting thread (its reads of the
@@ -1860,6 +1948,11 @@ begin
   FDrawn := True;
   if C.Fast.Lost then
     Exit(DXGI_ERROR_DEVICE_REMOVED);
+{$IFDEF ANDROID}
+  // Phones: the frames keep the display's pace (FIFO), as when the render thread presented itself; the frame before
+  // has to be taken first (bounded: a frame that cannot be shown does not hold the render thread).
+  FPresenter.WaitTaken(100);
+{$ENDIF}
   FPresenter.Post;
 end;
 
@@ -1936,6 +2029,11 @@ end;
 function ChainExtent(const ACaps: TVkSurfaceCapabilitiesKHR; const AWidth, AHeight: Integer): TVkExtent2D;
 begin
   Result := ACaps.currentExtent;
+{$IFDEF ANDROID}
+  // The extent there is the one of the display's natural orientation: the frame's size instead (the compositor
+  // rotates the images, preTransform in FillChainInfo).
+  Result.width := High(Cardinal);
+{$ENDIF}
   if Result.width = High(Cardinal) then
   begin
     // The surface takes the swap chain's size: the frame's.
@@ -1962,6 +2060,11 @@ begin
   AInfo.imageUsage := Ord(VK_IMAGE_USAGE_TRANSFER_DST_BIT);
   AInfo.imageSharingMode := VK_SHARING_MODE_EXCLUSIVE;
   AInfo.preTransform := ACaps.currentTransform;
+{$IFDEF ANDROID}
+  // Unrotated images of the frame's size (ChainExtent): the compositor rotates them.
+  if (ACaps.supportedTransforms and Ord(VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR)) <> 0 then
+    AInfo.preTransform := VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
+{$ENDIF}
   if (ACaps.supportedCompositeAlpha and Ord(VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR)) <> 0 then
     AInfo.compositeAlpha := VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR
   else if (ACaps.supportedCompositeAlpha and Ord(VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR)) <> 0 then
@@ -1983,8 +2086,13 @@ begin
   FFast := GpuVk.Fast;
   FVk := FFast.Vk;
   FDevice := FFast.Device;
+{$IFDEF MSWINDOWS}
   InitializeCriticalSection(FLock);
+{$ELSE}
+  FLock := TObject.Create;
+{$ENDIF}
   FWake := TEvent.Create(nil, False, False, '');
+  FTaken := TEvent.Create(nil, True, False, '');
   FillChar(TypeInfo, SizeOf(TypeInfo), 0);
   TypeInfo.sType := VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO;
   TypeInfo.semaphoreType := VK_SEMAPHORE_TYPE_TIMELINE;
@@ -2008,15 +2116,69 @@ begin
   // Stop has ended the thread and released its objects.
   inherited;
   FWake.Free;
+  FTaken.Free;
+{$IFDEF MSWINDOWS}
   DeleteCriticalSection(FLock);
+{$ELSE}
+  FLock.Free;
+{$ENDIF}
+end;
+
+procedure TGpuVkPresenter.Lock;
+begin
+{$IFDEF MSWINDOWS}
+  EnterCriticalSection(FLock);
+{$ELSE}
+  TMonitor.Enter(FLock);
+{$ENDIF}
+end;
+
+procedure TGpuVkPresenter.Unlock;
+begin
+{$IFDEF MSWINDOWS}
+  LeaveCriticalSection(FLock);
+{$ELSE}
+  TMonitor.Exit(FLock);
+{$ENDIF}
 end;
 
 procedure TGpuVkPresenter.Post;
 begin
-  EnterCriticalSection(FLock);
+  Lock;
   FPending := True;
-  LeaveCriticalSection(FLock);
+  Unlock;
   FWake.SetEvent;
+end;
+
+procedure TGpuVkPresenter.WaitTaken(const ATimeoutMs: Cardinal);
+var
+  Pending: Boolean;
+begin
+  // Reset under the lock that clears FPending and sets the event: no wakeup is lost.
+  Lock;
+  Pending := FPending;
+  if Pending then
+    FTaken.ResetEvent;
+  Unlock;
+  if Pending then
+    FTaken.WaitFor(ATimeoutMs);
+end;
+
+function TGpuVkPresenter.SurfaceLost: Boolean;
+begin
+  Lock;
+  Result := FSurfaceLost;
+  Unlock;
+end;
+
+procedure TGpuVkPresenter.LoseSurface;
+begin
+  ReleaseChain(True);
+  Lock;
+  FSurfaceLost := True;
+  FPending := False;
+  FTaken.SetEvent;
+  Unlock;
 end;
 
 procedure TGpuVkPresenter.Stop;
@@ -2025,11 +2187,6 @@ begin
   FWake.SetEvent;
   WaitFor;
   Release;
-end;
-
-function TGpuVkPresenter.Ok(const ARes: TVkResult): Boolean;
-begin
-  Result := Ord(FFast.Track(ARes)) >= 0;
 end;
 
 procedure TGpuVkPresenter.WaitValue(const AValue: UInt64);
@@ -2102,9 +2259,17 @@ var
   Old, Chain: TVkSwapchainKHR;
   Count: Cardinal;
   K: Integer;
+  Res: TVkResult;
 begin
   Result := False;
-  if not Ok(FFast.InstanceVk.GetPhysicalDeviceSurfaceCapabilitiesKHR(FFast.Physical, FWindow.FVkSurface, @Caps)) then
+  Res := FFast.Track(FFast.InstanceVk.GetPhysicalDeviceSurfaceCapabilitiesKHR(FFast.Physical, FWindow.FVkSurface,
+    @Caps));
+  if Res = VK_ERROR_SURFACE_LOST_KHR then
+  begin
+    LoseSurface;
+    Exit;
+  end;
+  if Ord(Res) < 0 then
     Exit;
   Extent := ChainExtent(Caps, AWidth, AHeight);
   if (Extent.width = 0) or (Extent.height = 0) then
@@ -2117,10 +2282,11 @@ begin
   ReleaseChain(False);
   FillChainInfo(Info, FWindow.FVkSurface, Caps, FFormat);
   Info.imageExtent := Extent;
-  // FIFO_LATEST_READY shows the newest frame queued at a refresh and frees the ones before it.
+  // FIFO_LATEST_READY shows the newest frame queued at a refresh and frees the ones before it. Android: vertical sync
+  // unless tearing is asked for (the window's frames keep the display's pace there, TGpuVkWindow.Present).
   if FWindow.FTearingAsked and FWindow.HasMode(VK_PRESENT_MODE_IMMEDIATE_KHR) then
     Info.presentMode := VK_PRESENT_MODE_IMMEDIATE_KHR
-  else if FWindow.HasMode(VK_PRESENT_MODE_MAILBOX_KHR) then
+  else if {$IFDEF ANDROID}FWindow.FTearingAsked and {$ENDIF}FWindow.HasMode(VK_PRESENT_MODE_MAILBOX_KHR) then
     Info.presentMode := VK_PRESENT_MODE_MAILBOX_KHR
   else if FFast.FifoLatestReady and FWindow.HasMode(VK_PRESENT_MODE_FIFO_LATEST_READY_KHR) then
     Info.presentMode := VK_PRESENT_MODE_FIFO_LATEST_READY_KHR
@@ -2128,7 +2294,14 @@ begin
     Info.presentMode := VK_PRESENT_MODE_FIFO_KHR;
   Info.oldSwapchain := Old;
   Chain := VK_NULL_HANDLE;
-  FFast.Check(FVk.CreateSwapchainKHR(FDevice, @Info, nil, @Chain), 'vkCreateSwapchainKHR');
+  Res := FFast.Track(FVk.CreateSwapchainKHR(FDevice, @Info, nil, @Chain));
+  if (Res = VK_ERROR_SURFACE_LOST_KHR) or (Res = VK_ERROR_NATIVE_WINDOW_IN_USE_KHR) then
+  begin
+    // The old swap chain is retired all the same: it goes with the surface.
+    LoseSurface;
+    Exit;
+  end;
+  FFast.Check(Res, 'vkCreateSwapchainKHR');
   if Old <> VK_NULL_HANDLE then
     FVk.DestroySwapchainKHR(FDevice, Old, nil);
   FSwapchain := Chain;
@@ -2189,11 +2362,17 @@ var
   Sem: TVkSemaphore;
 begin
   Result := False;
-  EnterCriticalSection(FLock);
+  Lock;
   try
     Shown := FWindow.FShown;
     if not FPending or (Shown = nil) then
       Exit;
+    if FSurfaceLost then
+    begin
+      FPending := False;
+      FTaken.SetEvent;
+      Exit;
+    end;
     W := Shown.Width;
     H := Shown.Height;
     if FStaleAsked then
@@ -2202,7 +2381,7 @@ begin
       FStale := True;
     end;
   finally
-    LeaveCriticalSection(FLock);
+    Unlock;
   end;
   if FFast.Lost then
     Exit;
@@ -2212,10 +2391,11 @@ begin
     FCheckedH := H;
     if not CreateChain(W, H) then
     begin
-      // No size (minimized): nothing to show.
-      EnterCriticalSection(FLock);
+      // No size (minimized) or no surface: nothing to show.
+      Lock;
       FPending := False;
-      LeaveCriticalSection(FLock);
+      FTaken.SetEvent;
+      Unlock;
       Exit;
     end;
   end;
@@ -2237,13 +2417,22 @@ begin
     if Terminated or FFast.Lost then
       Exit;
   until False;
+  if Res = VK_ERROR_SURFACE_LOST_KHR then
+  begin
+    LoseSurface;
+    Exit;
+  end;
   if (Res <> VK_SUCCESS) and (Res <> VK_SUBOPTIMAL_KHR) then
   begin
     FStale := True;
     Exit;
   end;
+  // Suboptimal: made again for the next frame. Not on Android, where it stays suboptimal while the display is turned
+  // from its natural orientation (the images are unrotated, FillChainInfo).
+{$IFNDEF ANDROID}
   if Res = VK_SUBOPTIMAL_KHR then
     FStale := True;
+{$ENDIF}
   repeat
     Res := FFast.Track(FVk.WaitForFences(FDevice, 1, @FAcquired, VK_TRUE, 100000000));
   until (Res <> VK_TIMEOUT) or FFast.Lost;
@@ -2251,10 +2440,11 @@ begin
   if FFast.Lost then
     Exit;
   // The newest frame: the render thread may have posted another meanwhile, or a copy of another size.
-  EnterCriticalSection(FLock);
+  Lock;
   try
     Shown := FWindow.FShown;
     FPending := False;
+    FTaken.SetEvent;
     if FCmdGens[Index] <> FShownGen then
       Record_(Index, Shown);
     Inc(FValue);
@@ -2295,10 +2485,10 @@ begin
       FFast.UnlockQueue;
     end;
   finally
-    LeaveCriticalSection(FLock);
+    Unlock;
   end;
   FCmdValues[Index] := FValue;
-  if Res <> VK_SUCCESS then
+  if (Res <> VK_SUCCESS) {$IFDEF ANDROID}and (Res <> VK_SUBOPTIMAL_KHR){$ENDIF} then
     FStale := True;
   Result := not FFast.Lost;
 end;
@@ -2970,9 +3160,9 @@ begin
   Result := TGpuVkSurface.Create(AWidth, AHeight, AData, APitch);
 end;
 
-class function TGpuVkBackend.CreateWindow(const AWnd: HWND; const ALayered: Boolean): TGpuWindow;
+class function TGpuVkBackend.CreateWindow(const AHandle: TGpuWindowHandle; const ALayered: Boolean): TGpuWindow;
 begin
-  Result := TGpuVkWindow.Create(AWnd, ALayered);
+  Result := TGpuVkWindow.Create(AHandle, ALayered);
 end;
 
 class procedure TGpuVkBackend.Submit;

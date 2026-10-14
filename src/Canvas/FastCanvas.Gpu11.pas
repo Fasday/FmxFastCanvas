@@ -104,7 +104,7 @@ type
     class function CreateRenderer: TGpuRenderer; override;
     class function CreateSurface(const AWidth, AHeight: Integer; const AData: Pointer;
       const APitch: Integer): TGpuSurface; override;
-    class function CreateWindow(const AWnd: HWND; const ALayered: Boolean): TGpuWindow; override;
+    class function CreateWindow(const AHandle: TGpuWindowHandle; const ALayered: Boolean): TGpuWindow; override;
     class procedure WaitIdle; override;
   end;
 
@@ -860,9 +860,10 @@ begin
   Result := TGpu11Surface.Create(AWidth, AHeight, AData, APitch);
 end;
 
-class function TGpu11Backend.CreateWindow(const AWnd: HWND; const ALayered: Boolean): TGpuWindow;
+class function TGpu11Backend.CreateWindow(const AHandle: TGpuWindowHandle;
+  const ALayered: Boolean): TGpuWindow;
 begin
-  Result := TGpu11Window.Create(AWnd, ALayered);
+  Result := TGpu11Window.Create(AHandle, ALayered);
 end;
 
 class procedure TGpu11Backend.WaitIdle;

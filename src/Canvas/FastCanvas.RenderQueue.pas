@@ -20,12 +20,16 @@ unit FastCanvas.RenderQueue;
   takes the list of registered events under the same lock and signals them after leaving it (a waiter woken
   inside the lock would block on it at once), so no wakeup is lost. A late signal of a reused event only causes
   one more check. (Until 2026-10-07 all waiters shared one auto-reset event: a waiter could take the wakeup of
-  another, which then slept forever.) }
+  another, which then slept forever.)
+
+  Android and Linux: the waiters' events are TEvent objects, and a wait dispatches nothing (no window messages are
+  sent between threads there); the render thread does not initialize COM. }
 
 interface
 
 uses
-  Winapi.Windows, System.SysUtils, System.Classes, System.SyncObjs, System.Generics.Collections;
+  {$IFDEF MSWINDOWS}Winapi.Windows, {$ELSE}Posix.Pthread, {$ENDIF}System.SysUtils, System.Classes, System.SyncObjs,
+  System.Generics.Collections;
 
 type
   TRenderChunk = class
@@ -52,7 +56,9 @@ type
   end;
 
   TRenderExecute = procedure(const AData: PByte; const ASize: Integer);
-  TWaiterEvents = array[0..15] of THandle;
+  /// <summary>The event a waiting thread sleeps on: an auto-reset event.</summary>
+  TWaiterEvent = {$IFDEF MSWINDOWS}THandle{$ELSE}TEvent{$ENDIF};
+  TWaiterEvents = array[0..15] of TWaiterEvent;
 
   TRenderQueue = class
   private
@@ -63,8 +69,8 @@ type
     FWork: TEvent;
     FCurrent: TRenderChunk;
     // Events of the threads waiting now, and unused ones.
-    FWaiters: TList<THandle>;
-    FSpareEvents: TStack<THandle>;
+    FWaiters: TList<TWaiterEvent>;
+    FSpareEvents: TStack<TWaiterEvent>;
     FExecute: TRenderExecute;
     FSubmitted: Int64;
     FCompleted: Int64;
@@ -75,7 +81,7 @@ type
     FTerminated: Boolean;
     FThreaded: Boolean;
     /// <summary>Thread executing a chunk inline (Threaded = False), else 0.</summary>
-    FInlineThread: Cardinal;
+    FInlineThread: TThreadID;
     procedure StartThread;
     procedure ExecuteInline;
     procedure ThreadProc;
@@ -114,19 +120,77 @@ type
     procedure ClearError;
     /// <summary>True on the thread that executes commands now (the render thread, or the thread executing inline).</summary>
     function IsRenderThread: Boolean;
-    function ThreadId: Cardinal;
-    /// <summary>Time the render thread spent executing chunks, QueryPerformanceCounter ticks.</summary>
+    function ThreadId: TThreadID;
+    /// <summary>Time the render thread spent executing chunks, TStopwatch ticks (QueryPerformanceCounter on
+    /// Windows; TStopwatch.Frequency per second).</summary>
     property BusyTicks: Int64 read FBusyTicks;
   end;
+
+{$IFNDEF MSWINDOWS}
+/// <summary>The calling thread, as Winapi.Windows.GetCurrentThreadId (TThread.ThreadID is its pthread_t here).
+/// </summary>
+function GetCurrentThreadId: TThreadID;
+{$ENDIF}
 
 implementation
 
 uses
+{$IFDEF MSWINDOWS}
   Winapi.ActiveX, System.Math;
+{$ELSE}
+  System.Math, System.Diagnostics;
+{$ENDIF}
+
+{$IFNDEF MSWINDOWS}
+function GetCurrentThreadId: TThreadID;
+begin
+  Result := TThreadID(pthread_self);
+end;
+{$ENDIF}
 
 const
+{$IFDEF MSWINDOWS}
   // winuser.h: PM_QS_SENDMESSAGE = QS_SENDMESSAGE shl 16 (not in Winapi.Windows).
   PM_QS_SENDMESSAGE = QS_SENDMESSAGE shl 16;
+{$ENDIF}
+  NoWaiter = {$IFDEF MSWINDOWS}0{$ELSE}nil{$ENDIF};
+
+/// <summary>Now, in the ticks of BusyTicks.</summary>
+function Ticks: Int64; inline;
+begin
+{$IFDEF MSWINDOWS}
+  QueryPerformanceCounter(Result);
+{$ELSE}
+  Result := TStopwatch.GetTimeStamp;
+{$ENDIF}
+end;
+
+function NewWaiterEvent: TWaiterEvent; inline;
+begin
+{$IFDEF MSWINDOWS}
+  Result := CreateEvent(nil, False, False, nil);
+{$ELSE}
+  Result := TEvent.Create(nil, False, False, '');
+{$ENDIF}
+end;
+
+procedure SignalWaiter(const AEvent: TWaiterEvent); inline;
+begin
+{$IFDEF MSWINDOWS}
+  SetEvent(AEvent);
+{$ELSE}
+  AEvent.SetEvent;
+{$ENDIF}
+end;
+
+procedure FreeWaiterEvent(const AEvent: TWaiterEvent); inline;
+begin
+{$IFDEF MSWINDOWS}
+  CloseHandle(AEvent);
+{$ELSE}
+  AEvent.Free;
+{$ENDIF}
+end;
 
 type
   TRenderThread = class(TThread)
@@ -201,8 +265,8 @@ begin
   FPending := TQueue<TRenderChunk>.Create;
   FFree := TStack<TRenderChunk>.Create;
   FWork := TEvent.Create(nil, False, False, '');
-  FWaiters := TList<THandle>.Create;
-  FSpareEvents := TStack<THandle>.Create;
+  FWaiters := TList<TWaiterEvent>.Create;
+  FSpareEvents := TStack<TWaiterEvent>.Create;
   FCurrent := TRenderChunk.Create;
   FThreaded := AThreaded;
   if FThreaded then
@@ -248,7 +312,7 @@ begin
   end;
   if FCurrent = nil then
     FCurrent := TRenderChunk.Create;
-  QueryPerformanceCounter(T0);
+  T0 := Ticks;
   FInlineThread := GetCurrentThreadId;
   try
     try
@@ -261,7 +325,7 @@ begin
     FInlineThread := 0;
   end;
   C.Reset;
-  QueryPerformanceCounter(T1);
+  T1 := Ticks;
   FLock.Enter;
   try
     Inc(FBusyTicks, T1 - T0);
@@ -299,7 +363,7 @@ begin
   FFree.Free;
   FWork.Free;
   while FSpareEvents.Count > 0 do
-    CloseHandle(FSpareEvents.Pop);
+    FreeWaiterEvent(FSpareEvents.Pop);
   FSpareEvents.Free;
   FWaiters.Free;
   FLock.Free;
@@ -314,7 +378,9 @@ var
   Events: TWaiterEvents;
   N: Integer;
 begin
+{$IFDEF MSWINDOWS}
   CoInitializeEx(nil, COINIT_MULTITHREADED);
+{$ENDIF}
   try
     // Direct2D and Direct3D expect the arithmetic exceptions masked (FMX masks them around its calls).
     SetExceptionMask(exAllArithmeticExceptions);
@@ -333,7 +399,7 @@ begin
         end;
         if C = nil then
           Break;
-        QueryPerformanceCounter(T0);
+        T0 := Ticks;
         try
           FExecute(PByte(C.FData), C.FSize);
         except
@@ -342,7 +408,7 @@ begin
         end;
         // Last references of bitmaps and layouts may be released here, on the render thread.
         C.Reset;
-        QueryPerformanceCounter(T1);
+        T1 := Ticks;
         FLock.Enter;
         try
           Inc(FBusyTicks, T1 - T0);
@@ -356,7 +422,9 @@ begin
       until False;
     until Stop;
   finally
+{$IFDEF MSWINDOWS}
     CoUninitialize;
+{$ENDIF}
   end;
 end;
 
@@ -369,7 +437,7 @@ begin
   begin
     // More waiters than the buffer holds (never seen): signal them here.
     for I := 0 to FWaiters.Count - 1 do
-      SetEvent(FWaiters[I]);
+      SignalWaiter(FWaiters[I]);
     Exit;
   end;
   for I := 0 to FWaiters.Count - 1 do
@@ -382,16 +450,18 @@ var
   I: Integer;
 begin
   for I := 0 to ACount - 1 do
-    SetEvent(AEvents[I]);
+    SignalWaiter(AEvents[I]);
 end;
 
 procedure TRenderQueue.WaitUntil(const AFrames: Boolean; const ATarget: Int64);
 var
-  H: THandle;
+  H: TWaiterEvent;
+{$IFDEF MSWINDOWS}
   Msg: TMsg;
+{$ENDIF}
   Done, Registered: Boolean;
 begin
-  H := 0;
+  H := NoWaiter;
   Registered := False;
   try
     repeat
@@ -408,31 +478,35 @@ begin
           Done := FCompleted >= ATarget;
         if not Done then
         begin
-          if H = 0 then
+          if H = NoWaiter then
             if FSpareEvents.Count > 0 then
               H := FSpareEvents.Pop
             else
-              H := CreateEvent(nil, False, False, nil);
+              H := NewWaiterEvent;
           FWaiters.Add(H);
           Registered := True;
         end
-        else if H <> 0 then
+        else if H <> NoWaiter then
         begin
           FSpareEvents.Push(H);
-          H := 0;
+          H := NoWaiter;
         end;
       finally
         FLock.Leave;
       end;
       if Done then
         Break;
+{$IFDEF MSWINDOWS}
       if MsgWaitForMultipleObjects(1, H, False, INFINITE, QS_SENDMESSAGE) = WAIT_OBJECT_0 + 1 then
         // Dispatches the messages sent by other threads (DXGI may send to the window); leaves posted ones.
         PeekMessage(Msg, 0, 0, 0, PM_NOREMOVE or PM_QS_SENDMESSAGE);
+{$ELSE}
+      H.WaitFor(INFINITE);
+{$ENDIF}
     until False;
   except
     // A sent message raised: unregister before passing it on.
-    if H <> 0 then
+    if H <> NoWaiter then
     begin
       FLock.Enter;
       try
@@ -562,7 +636,7 @@ begin
   end;
 end;
 
-function TRenderQueue.ThreadId: Cardinal;
+function TRenderQueue.ThreadId: TThreadID;
 begin
   if FThreaded and (FThread <> nil) then
     Result := FThread.ThreadID

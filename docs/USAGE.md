@@ -5,14 +5,17 @@
 - Delphi 13 (RAD Studio 37.0) or later, FireMonkey, Win64 or Win32. Win64 is faster on the CPU side (Delphi's 32-bit
   code: about 1.4 to 1.9 times the frame time on scenes with many shapes, strings or controls, measured 2026-10-13);
   the GPU work is the same.
-- Windows 10 or 11.
+- Windows 10 or 11; Android 7.0 (API 24) or later on arm64 (Vulkan back end only, see "Android and Linux"); Linux
+  x64 under X11 (Vulkan back end; it compiles, it has not run yet).
 - Direct3D 11 back end: a GPU with feature level 10_0 or higher (WARP when there is none).
 - Direct3D 12 back end: a GPU with feature level 11_0 or higher.
-- Vulkan back end: Vulkan 1.3 with dynamic rendering, synchronization2 and timeline semaphores; its 3D context also
-  needs `VK_KHR_push_descriptor`. What it does not have is listed under "Vulkan back end".
+- Vulkan back end: Vulkan 1.3 with dynamic rendering, synchronization2 and timeline semaphores, or Vulkan 1.1 or 1.2
+  with the extensions of these (`VK_KHR_dynamic_rendering`, `VK_KHR_synchronization2`, below 1.2
+  `VK_KHR_timeline_semaphore`, `VK_KHR_depth_stencil_resolve`, `VK_KHR_create_renderpass2`), as on many phones.
+  What it does not have is listed under "Vulkan back end".
 - Ray-traced effects: a GPU with DirectX Raytracing tier 1.1 (NVIDIA RTX 20 and later, AMD RX 6000 and later,
-  Intel Arc); on Vulkan, ray queries (`VK_KHR_ray_query` with acceleration structures, buffer device addresses and
-  descriptor indexing; AMD's 32-bit driver has none). Without it they are simply not drawn.
+  Intel Arc); on Vulkan, a Vulkan 1.3 device with ray queries (`VK_KHR_ray_query` with acceleration structures, buffer
+  device addresses and descriptor indexing; AMD's 32-bit driver has none). Without it they are simply not drawn.
 
 ## Adding it to a project
 
@@ -84,16 +87,28 @@ All settings are global variables, set before `Application.Initialize` unless no
 | `FastCanvasNoHeapSleep` | `True` | `InstallFastCanvas` sets `System.NeverSleepOnMMThreadContention`: the RTL memory manager otherwise sleeps 10 ms when two threads contend for a block size, which showed as 10-25 ms frame spikes. |
 | `FastCanvasOptions` | `[]` | `AllowTearing`: present with `DXGI_PRESENT_ALLOW_TEARING` when the system supports it (for throughput measurements; never waits for vertical blank; windows take `Flip` then). `D2DText`: text through Direct2D instead of the glyph atlas (Direct3D 11 only, a measurement aid). `HdrLinearBlend`: HDR windows blend in linear light (a measurement aid, see "HDR output"). Read at every scene. |
 
+### `FastCanvas.Geometry`, `FastCanvas.Text`: the CPU engines
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `FastCanvasGeometryEngine` | `Native` (Windows), `Skia` | Paths, their fill edges and stroke outlines: `Native` is Direct2D, `Skia` is Skia (`FastCanvas.GeometrySkia`; the only one on Android and Linux). Read when the first canvas is made. |
+| `FastCanvasTextEngine` | `Native` (Windows), `Skia` | Text layout and glyphs: `Native` is DirectWrite, `Skia` is Skia's paragraphs (`FastCanvas.TextSkia`: HarfBuzz shaping, the platform's font fallback; the only one on Android and Linux). Read by `InstallFastCanvas`. |
+
+On Windows the Skia engines are linked only when the program uses their units (`FastCanvas.GeometrySkia`,
+`FastCanvas.TextSkia`), and then need `sk4d.dll` next to the executable. Skia's text differs from DirectWrite's by
+a fraction of a pixel in line height (paragraphs drift by a pixel every few lines), its glyphs are unhinted outlines
+(DirectWrite's grayscale is about as soft), and FMX fonts added through `TFontManager` are not known to it.
+
 Functions: `FastCanvasSync` (wait until the render thread has executed everything recorded), `FastCanvasRenderBusyMs`,
 `FastCanvasDrawCalls`, `FastCanvasDeviceResets` (diagnostics), `FastCanvasSystemTextAntialias` (what `System` text
 antialiasing stands for), `FastCanvasSimulateDeviceLoss` (testing: the next scene
 treats the device as lost and recreates everything).
 
-### `FastCanvas.Context3D11`
+### `FastCanvas.Context3D`
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `FastContext3DFragile` | `True` | Report `TContextStyle.Fragile`: FMX keeps a copy of texture pixels and recreates textures and shaders after a device loss. Read by `InstallFastContext3D11` / `InstallFastContext3D12`. |
+| `FastContext3DFragile` | `True` | Report `TContextStyle.Fragile`: FMX keeps a copy of texture pixels and recreates textures and shaders after a device loss. Read by `InstallFastContext3D11` / `InstallFastContext3D12` / `InstallFastContext3DVk`. Declared in `FastCanvas.Context3D` (every platform); `FastCanvas.Context3D11` keeps an alias. |
 
 ### `FastCanvas.Context3D12`: ray-traced effects
 
@@ -382,10 +397,11 @@ A program without FMX forms (a console test) shuts FastCanvas down as FMX's `Fin
 ## Vulkan back end
 
 With `FastCanvasBackend := TFastCanvasBackend.Vulkan` and `InstallFastContext3DVk` everything is drawn with Vulkan
-1.3 (headers from `third_party\pasvulkan`): the canvas, text (ClearType included), bitmaps, transparent forms, the
-effects, `TViewport3D`, `TForm3D` and the ray-traced effects, with device loss handled as on Direct3D. The benchmark's
-scenes draw as on Direct3D 12 (identical screenshots but for a few pixels of strokes), at about its speed
-(`BENCHMARKS.md`).
+(1.3, or 1.1/1.2 with the extensions listed under "Requirements"; headers from `third_party\pasvulkan`): the canvas,
+text (ClearType included), bitmaps, transparent forms, the effects, `TViewport3D`, `TForm3D` and the ray-traced
+effects, with device loss handled as on Direct3D. The benchmark's scenes draw as on Direct3D 12 (identical screenshots
+but for a few pixels of strokes), at about its speed (`BENCHMARKS.md`). It is the back end of Android and Linux too
+(see "Android and Linux").
 
 - **Windows** show their frames through a swap chain of the window itself (opaque, as `Flip`; `FastCanvasPresentation`
   is ignored), each from a thread of its own: the render thread copies a finished frame and goes on, the window's
@@ -396,15 +412,80 @@ scenes draw as on Direct3D 12 (identical screenshots but for a few pixels of str
 - **The 3D context** runs FMX's own shaders (materials, filters, effects, transitions) as SPIR-V made from the GLSL
   sources FMX ships, with the constants laid out as for Direct3D: `tools\compile-fmx-shaders-vk.ps1` writes
   `FastCanvas.VkFmxShaders.inc` (run it again, with the Vulkan SDK, when a Delphi update changes FMX's shaders). A
-  shader FMX does not ship (an application's `TContextShader` or material) raises `EContext3DException`.
+  shader FMX does not ship (an application's `TContextShader` or material) raises `EContext3DException`. The descriptors
+  of a draw are pushed (`VK_KHR_push_descriptor`), or written into a set of the canvas's descriptor pools where the
+  device lacks that extension (`FASTCANVAS_VK_NOPUSH=1` takes that path on any GPU). It runs on Windows only: FMX
+  ships the Direct3D sources of its shaders, whose variables give the context the constant layout and the key of the
+  SPIR-V, there only (`TFastContext3DVk.Valid` is `False` elsewhere).
 - **Memory**: textures and buffers share blocks of device memory (32 MB device-local, 8 MB host-visible; larger
   resources get memory of their own), so thousands of bitmaps take a few memory objects. `FASTCANVAS_VK_STATS=<file>`
   appends the peak numbers of memory objects and allocations when the device goes.
+- **Devices below Vulkan 1.3** (most phones): dynamic rendering, synchronization2 and timeline semaphores come from
+  their extensions; push descriptors and `FIFO_LATEST_READY` where the device has them; no ray-traced effects (their
+  shaders are built for Vulkan 1.2 with buffer device addresses). `FASTCANVAS_VK_API=1.1` takes any GPU this way.
 
 Not on Vulkan: HDR output (`FastCanvasHdr`, `Hdr`, `DrawIntensity`), DirectComposition, DLSS, the application ray
 passes (`RayScene`, `RayDispatch`, `RayDraw` and their types are Direct3D 12 only), application shaders in the 3D
 context, `D2DText`. Win32 programs run on Vulkan too, but AMD's 32-bit driver has no ray queries: their 3D scenes are
 drawn without the ray-traced effects.
+
+## Android and Linux
+
+There the canvas runs on its Vulkan back end, with Skia's geometry and text engines (Skia is part of Delphi's RTL:
+linked into the library on Android; on Linux `libsk4d.so` of `Redist\linux64` goes next to the program). The Vulkan 3D
+context builds there but does not run yet: FMX's shaders have no Direct3D sources off Windows, and the context takes
+their variables (`TFastContext3DVk.Valid` is `False`, `InstallFastContext3DVk` does nothing). The search path needs
+`src\Canvas` and `third_party\pasvulkan\src` only.
+
+```pascal
+begin
+  FastCanvasBackend := TFastCanvasBackend.Vulkan; // the only back end there
+  try
+    TFastDevice.Ensure;   // EFastDevice when there is no Vulkan device the canvas can use, with the reason
+    InstallFastCanvas;
+  except
+    // No install: FMX's own canvas (TCanvasGpu on Android) draws the forms.
+  end;
+  Application.Initialize;
+  ...
+```
+
+`src\Probe\PortProbe.dpr` does this, shows the device, its Vulkan version and limits, and remembers a start with
+FastCanvas that crashed or raised (the next start takes FMX's canvas and says why); on Windows it also draws a cube
+in a `TViewport3D` with the Vulkan 3D context. With FastCanvas off Windows, FMX's own 3D context would draw 3D
+controls; that has not been tried.
+
+Android:
+
+- The window is the `ANativeWindow` of the form's surface. FMX makes the form's canvas again when the surface is made
+  or changed; while the app is in the background there is no surface and nothing is drawn (a surface lost meanwhile
+  ends the window's presenting thread, and the frame that finds it lost is not presented). The swap chain has the
+  frame's size and is not rotated by the canvas (the compositor turns it), and frames are copied into it (blitted into
+  the `R8G8B8A8` images phones offer) by the window's own thread, as on Windows.
+- `InstallFastCanvas` enables FMX's software canvases (`TCanvasManager.EnableSoftwareCanvas`), which makes FMX take
+  `TFastCanvas` rather than `TCanvasGpu` (it prefers canvases that need a GPU surface otherwise; FMX.Skia does the
+  same).
+- Building the APK from the command line: `tools\make-deployproj.ps1 -Project <dproj>` writes the `.deployproj` the
+  IDE would write, `tools\build-android.ps1 -Project <dproj>` runs msbuild (Build, Deploy) into
+  `<project dir>\Android64\Release\<name>\bin\<name>.apk`, signed with a debug key of its own
+  (`dcu\android-debug.keystore`). The `.dproj` needs the Android64 platform with `BT_BuildType` `Debug` (an installable
+  development APK), `minSdkVersion` 24 or more, and the `EnabledSysJars` of a project the IDE made
+  (`src\Probe\PortProbe.dproj` has them). Installing: `adb install -r <apk>` with USB debugging on.
+- Without a phone: an Android 14 x86_64 emulator image (`system-images;android-34;google_apis;x86_64`) runs the
+  arm64 library through its ARM translation, with the host GPU's Vulkan (`emulator -avd <name> -gpu host`); PortProbe
+  was tested so.
+
+Linux (compiles with `tools\check-port.ps1`, has not run yet):
+
+- X11 only: FMX's Linux platform (FMUX) runs GTK 3; the canvas makes the form's drawing area a native window and
+  presents to its X11 window (`VK_KHR_xlib_surface`, the XID and the display through GDK, loaded at run time). In a
+  Wayland session the program has to run through XWayland (`GDK_BACKEND=x11`); Wayland surfaces are not supported.
+- Running it needs `libvulkan.so.1` and a Vulkan 1.1 driver with the extensions above (Mesa: radv, anv, nvk; lavapipe
+  on the CPU), GTK 3, and `libsk4d.so` next to the program.
+- Building a Linux program needs the Linux SDK in the IDE (Tools > Options > Deployment > SDK Manager, a Linux 64-bit
+  profile pulled from a Linux machine running PAServer: `LinuxPAServer37.0.tar.gz`, a download of Embarcadero's, not
+  part of this installation), and PAServer there to deploy and run. WSL2 with WSLg can be that machine (X11 through
+  XWayland; Vulkan through Mesa's `dzn` driver over Direct3D 12, or lavapipe).
 
 ## Threads
 
@@ -424,16 +505,23 @@ drawn without the ray-traced effects.
   the Vulkan SDK) and appends its warnings and errors to the file. `VK_KHRONOS_VALIDATION_VALIDATE_SYNC=1` adds the
   layer's synchronization validation. `FASTCANVAS_VK_STATS=<file>`: the peak numbers of Vulkan memory objects and
   allocations, appended when the device goes.
+- `FASTCANVAS_VK_API=1.1` or `1.2` (environment variable): the Vulkan instance of that version, so any device is used
+  the way of devices below Vulkan 1.3 (a test of that path on a desktop GPU; no ray-traced effects then).
+  `FASTCANVAS_VK_NOPUSH=1`: `VK_KHR_push_descriptor` stays off, so the Vulkan 3D context binds descriptor sets (the
+  path of devices without it).
 - `FastCanvasSimulateDeviceLoss`: the next scene treats the device as lost and recreates everything, as after a driver
   update or a GPU reset.
 - `FastCanvasCaptureWindow`: the frame a window presented last, as floats (checks of HDR output).
 - `ReportMemoryLeaksOnShutdown := True` in the program: FastCanvas frees everything it made at shutdown.
 - The benchmark runs on Vulkan with `--canvas=fcvk` (also `fcvkrt`, `fcvkao`, `fcvksoft`, `fcvkrefl` with ray-traced
-  effects, `fcvksep` with FMX's stock 3D context).
+  effects, `fcvksep` with FMX's stock 3D context, `fcvkskia` with the Skia geometry and text engines of Android and
+  Linux).
 
 ## Limitations
 
-- Windows only (Win64 and Win32).
+- Windows (Win64, Win32) and Android (arm64); Linux x64 compiles but has not run. On Android and Linux: the canvas on
+  Vulkan only, no 3D context of its own (see "Android and Linux"), no ClearType, no HDR output, no Direct2D
+  fallbacks (`D2DText`).
 - Printing (`TPrinter` canvases) is not supported.
 - Text is grayscale antialiased by default (as FMX's stock Direct2D canvas draws it); ClearType
   (`FastCanvasTextAntialias`) only in the frames of windows, not in bitmaps, transparent forms and `TForm3D`. No
