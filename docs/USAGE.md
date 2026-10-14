@@ -5,11 +5,14 @@
 - Delphi 13 (RAD Studio 37.0) or later, FireMonkey, Win64 or Win32. Win64 is faster on the CPU side (Delphi's 32-bit
   code: about 1.4 to 1.9 times the frame time on scenes with many shapes, strings or controls, measured 2026-10-13);
   the GPU work is the same.
-- Windows 10 or 11.
+- Windows 10 or 11; Android 7.0 (API 24) or later on arm64 (Vulkan back end only, see "Android and Linux"); Linux
+  x64 under X11 (Vulkan back end; it compiles, it has not run yet).
 - Direct3D 11 back end: a GPU with feature level 10_0 or higher (WARP when there is none).
 - Direct3D 12 back end: a GPU with feature level 11_0 or higher.
 - Vulkan back end (in progress: the 2D canvas works, no HDR output, partial frames or 3D context of its own yet):
-  Vulkan 1.3 with dynamic rendering, synchronization2 and timeline semaphores.
+  Vulkan 1.3 with dynamic rendering, synchronization2 and timeline semaphores, or Vulkan 1.1 or 1.2 with the
+  extensions of these (`VK_KHR_dynamic_rendering`, `VK_KHR_synchronization2`, below 1.2
+  `VK_KHR_timeline_semaphore`, `VK_KHR_depth_stencil_resolve`, `VK_KHR_create_renderpass2`), as on many phones.
 - Ray-traced effects: a GPU with DirectX Raytracing tier 1.1 (NVIDIA RTX 20 and later, AMD RX 6000 and later,
   Intel Arc). Without it they are simply not drawn.
 
@@ -81,6 +84,18 @@ All settings are global variables, set before `Application.Initialize` unless no
 | `FastCanvasKeepBitmapCopies` | `True` | Bitmaps the CPU wrote (loaded images, style bitmaps) keep a copy of their pixels and survive a device loss. |
 | `FastCanvasNoHeapSleep` | `True` | `InstallFastCanvas` sets `System.NeverSleepOnMMThreadContention`: the RTL memory manager otherwise sleeps 10 ms when two threads contend for a block size, which showed as 10-25 ms frame spikes. |
 | `FastCanvasOptions` | `[]` | `AllowTearing`: present with `DXGI_PRESENT_ALLOW_TEARING` when the system supports it (for throughput measurements; never waits for vertical blank; windows take `Flip` then). `D2DText`: text through Direct2D instead of the glyph atlas (Direct3D 11 only, a measurement aid). `HdrLinearBlend`: HDR windows blend in linear light (a measurement aid, see "HDR output"). Read at every scene. |
+
+### `FastCanvas.Geometry`, `FastCanvas.Text`: the CPU engines
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `FastCanvasGeometryEngine` | `Native` (Windows), `Skia` | Paths, their fill edges and stroke outlines: `Native` is Direct2D, `Skia` is Skia (`FastCanvas.GeometrySkia`; the only one on Android and Linux). Read when the first canvas is made. |
+| `FastCanvasTextEngine` | `Native` (Windows), `Skia` | Text layout and glyphs: `Native` is DirectWrite, `Skia` is Skia's paragraphs (`FastCanvas.TextSkia`: HarfBuzz shaping, the platform's font fallback; the only one on Android and Linux). Read by `InstallFastCanvas`. |
+
+On Windows the Skia engines are linked only when the program uses their units (`FastCanvas.GeometrySkia`,
+`FastCanvas.TextSkia`), and then need `sk4d.dll` next to the executable. Skia's text differs from DirectWrite's by
+a fraction of a pixel in line height (paragraphs drift by a pixel every few lines), its glyphs are unhinted outlines
+(DirectWrite's grayscale is about as soft), and FMX fonts added through `TFontManager` are not known to it.
 
 Functions: `FastCanvasSync` (wait until the render thread has executed everything recorded), `FastCanvasRenderBusyMs`,
 `FastCanvasDrawCalls`, `FastCanvasDeviceResets` (diagnostics), `FastCanvasSystemTextAntialias` (what `System` text
@@ -372,6 +387,59 @@ shaders, layout, state, topology and target format and kept.
 A program without FMX forms (a console test) shuts FastCanvas down as FMX's `FinalizeForms` does:
 `TContextManager.UnInitialize` and `TCanvasManager.UnInitialize` after its last context is freed.
 
+## Android and Linux
+
+There the canvas runs on its Vulkan back end, with Skia's geometry and text engines (Skia is part of Delphi's RTL:
+linked into the library on Android; on Linux `libsk4d.so` of `Redist\linux64` goes next to the program). The search
+path needs `src\Canvas` and `third_party\pasvulkan\src` only.
+
+```pascal
+begin
+  FastCanvasBackend := TFastCanvasBackend.Vulkan; // the only back end there
+  try
+    TFastDevice.Ensure;   // EFastDevice when there is no Vulkan device the canvas can use, with the reason
+    InstallFastCanvas;
+  except
+    // No install: FMX's own canvas (TCanvasGpu on Android) draws the forms.
+  end;
+  Application.Initialize;
+  ...
+```
+
+`src\Probe\PortProbe.dpr` does this, shows the device, its Vulkan version and limits, and remembers a start with
+FastCanvas that crashed or raised (the next start takes FMX's canvas and says why).
+
+Android:
+
+- The window is the `ANativeWindow` of the form's surface. FMX makes the form's canvas again when the surface is made
+  or changed; while the app is in the background there is no surface and nothing is drawn. The swap chain has the
+  frame's size and is not rotated by the canvas (the compositor turns it), presents with vertical sync (FIFO), and
+  frames are copied into it (blitted into the `R8G8B8A8` images phones offer).
+- `InstallFastCanvas` enables FMX's software canvases (`TCanvasManager.EnableSoftwareCanvas`), which makes FMX take
+  `TFastCanvas` rather than `TCanvasGpu` (it prefers canvases that need a GPU surface otherwise; FMX.Skia does the
+  same).
+- Building the APK from the command line: `tools\make-deployproj.ps1 -Project <dproj>` writes the `.deployproj` the
+  IDE would write, `tools\build-android.ps1 -Project <dproj>` runs msbuild (Build, Deploy) into
+  `<project dir>\Android64\Release\<name>\bin\<name>.apk`, signed with a debug key of its own
+  (`dcu\android-debug.keystore`). The `.dproj` needs the Android64 platform with `BT_BuildType` `Debug` (an installable
+  development APK), `minSdkVersion` 24 or more, and the `EnabledSysJars` of a project the IDE made
+  (`src\Probe\PortProbe.dproj` has them). Installing: `adb install -r <apk>` with USB debugging on.
+- Without a phone: an Android 14 x86_64 emulator image (`system-images;android-34;google_apis;x86_64`) runs the
+  arm64 library through its ARM translation, with the host GPU's Vulkan (`emulator -avd <name> -gpu host`); PortProbe
+  was tested so.
+
+Linux (compiles with `tools\check-port.ps1`, has not run yet):
+
+- X11 only: FMX's Linux platform (FMUX) runs GTK 3; the canvas makes the form's drawing area a native window and
+  presents to its X11 window (`VK_KHR_xlib_surface`, the XID and the display through GDK, loaded at run time). In a
+  Wayland session the program has to run through XWayland (`GDK_BACKEND=x11`); Wayland surfaces are not supported.
+- Running it needs `libvulkan.so.1` and a Vulkan 1.1 driver with the extensions above (Mesa: radv, anv, nvk; lavapipe
+  on the CPU), GTK 3, and `libsk4d.so` next to the program.
+- Building a Linux program needs the Linux SDK in the IDE (Tools > Options > Deployment > SDK Manager, a Linux 64-bit
+  profile pulled from a Linux machine running PAServer: `LinuxPAServer37.0.tar.gz`, a download of Embarcadero's, not
+  part of this installation), and PAServer there to deploy and run. WSL2 with WSLg can be that machine (X11 through XWayland; Vulkan through Mesa's
+  `dzn` driver over Direct3D 12, or lavapipe).
+
 ## Threads
 
 - Draw with a canvas only between `BeginScene` and `EndScene`, as FMX requires. `TBitmap.Canvas` can be used on any
@@ -389,6 +457,8 @@ A program without FMX forms (a console test) shuts FastCanvas down as FMX's `Fin
 - `FASTCANVAS_VK_DEBUG=<file>` (environment variable): the Vulkan back end enables `VK_LAYER_KHRONOS_validation` (of
   the Vulkan SDK) and appends its warnings and errors to the file. `VK_KHRONOS_VALIDATION_VALIDATE_SYNC=1` adds the
   layer's synchronization validation.
+- `FASTCANVAS_VK_API=1.1` or `1.2` (environment variable): the Vulkan instance of that version, so any device is used
+  the way of devices below Vulkan 1.3 (a test of that path on a desktop GPU).
 - `FastCanvasSimulateDeviceLoss`: the next scene treats the device as lost and recreates everything, as after a driver
   update or a GPU reset.
 - `FastCanvasCaptureWindow`: the frame a window presented last, as floats (checks of HDR output).
@@ -396,7 +466,8 @@ A program without FMX forms (a console test) shuts FastCanvas down as FMX's `Fin
 
 ## Limitations
 
-- Windows only (Win64 and Win32).
+- Windows (Win64, Win32) and Android (arm64); Linux x64 compiles but has not run. On Android and Linux: Vulkan only,
+  no 3D context of its own (FMX's stock one), no ClearType, no HDR output, no Direct2D fallbacks (`D2DText`).
 - Printing (`TPrinter` canvases) is not supported.
 - Text is grayscale antialiased by default (as FMX's stock Direct2D canvas draws it); ClearType
   (`FastCanvasTextAntialias`) only in the frames of windows, not in bitmaps, transparent forms and `TForm3D`. No
