@@ -12,7 +12,7 @@ FMX itself (forms, controls, styles, layout, animations) is unchanged.
 | `FastCanvas.RenderQueue` | The command stream (chunks) and the render thread. |
 | `FastCanvas.Gpu` | The renderer that does not depend on the graphics API: instanced runs of primitives, clip/paint/edge tables, gradient ramps, glyph atlas. |
 | `FastCanvas.Gpu11`, `FastCanvas.Gpu12` | The Direct3D 11 and Direct3D 12 back ends of the renderer: surfaces, swap chains, pipelines. |
-| `Shaders/FastCanvas.hlsl` → `FastCanvas.Shaders.inc` | The canvas shaders (vs_4_0 / ps_4_0, DXBC, used by both back ends). |
+| `Shaders/FastCanvas.hlsl` → `FastCanvas.Shaders.inc` | The canvas shaders (vs_4_0 / ps_4_0, DXBC, used by both back ends; for Vulkan also variants of the pixel shader, see "The Vulkan back end"). |
 | `FastCanvas.Text` | The text that does not depend on the engine: `TFastTextLayout` and its data (glyph runs, overhang, decorations), the layout cache, the glyph atlas, the engine registry (`FastCanvasTextEngine`). |
 | `FastCanvas.TextDWrite`, `FastCanvas.TextSkia` | The text engines: DirectWrite (Windows) and Skia paragraphs (every platform; the only one on Android and Linux): layouts, glyph coverage, glyph outlines, layouts with color glyphs rasterized on the CPU. |
 | `FastCanvas.Geometry`, `FastCanvas.GeometryD2D`, `FastCanvas.GeometrySkia` | The CPU geometry (paths, their fill edges and stroke outlines, hit tests) and its engines: Direct2D (Windows) and Skia (`FastCanvasGeometryEngine`). |
@@ -93,7 +93,7 @@ stream is executed on the recording thread at `EndScene`.
   84-byte instance record: the shape rectangle in local space, a 2x3 matrix, radii, texture coordinates, color, flags,
   clip index, paint index, stroke width. The main thread writes the records straight into the stream; the render
   thread copies runs of them into a vertex buffer and draws each run with one instanced draw call. A new run starts
-  only for a new render target or a ninth texture.
+  only for a new render target or a ninth texture (on Vulkan phones also for another variant of the pixel shader).
 - **Coverage is analytic.** The pixel shader computes the signed distance to the shape's edge in local space; the
   antialiasing width is the size of a pixel taken from the derivatives of the local position. Shapes are smooth at any
   rotation and scale, with no MSAA and no tessellation.
@@ -189,9 +189,28 @@ Modelled on the Direct3D 12 back end. One recording context per device: a primar
 submitted before `Present` and whenever the CPU needs results; every submission signals the next value of a timeline
 semaphore, and command pools, upload pages, descriptor pools and released objects are reused or destroyed once the
 timeline has passed the submission that used them. Image layouts are tracked per image and changed by batched
-synchronization2 barriers; draws run in dynamic rendering instances. The canvas pipeline has one descriptor set layout
-(the frame constants, eight textures, atlas, ramps, the tables as uniform texel buffers, immutable samplers) and
-three pipelines; the viewport flips y (negative height), so the shaders keep Direct3D's coordinates.
+synchronization2 barriers; draws run in dynamic rendering instances, and a clear of a whole target is the load
+operation of the target's next instance (a frame's clear and draws take one render pass: on a tiler the frame is
+written once, not cleared, stored, loaded and stored again). The canvas pipeline has one descriptor set layout (the
+frame constants, eight textures, atlas, ramps, the tables as uniform texel buffers, immutable samplers) and three
+pipelines; the viewport flips y (negative height), so the shaders keep Direct3D's coordinates.
+
+**Shader variants** (GPUs other than discrete ones, `FASTCANVAS_VK_VARIANTS`). The one pixel shader that draws every
+kind of primitive, clip and paint is too heavy for a phone GPU: on a Mali-G57 it takes 45 work registers (half the
+threads), and its loads from the clip and paint tables bound it (Mali Offline Compiler); every pixel of a frame pays
+for all of that. `FastCanvas.hlsl` has `WITH_` switches (shapes, dashes, images, glyphs, ClearType, paths, gradients,
+bitmap brushes, clips); a variant compiled with some of them off drops branches that its draws never take and computes
+the rest as the full shader, so it draws the same pixels. Ten variants (shapes with gradients, glyphs, images, the
+three together, shapes and paths; each with and without the clip test) are compiled with `FLAT_TABLES`: the vertex
+shader loads the instance's paint and clip entries and hands them on as flat varyings, the same values the pixels
+loaded. For a run of instances `TGpuRenderer.InstanceNeeds` tells what each needs (the clip test only where a pixel of
+its quad can be outside the clip's box); `TGpuVkRenderer.NextRun` cuts the run greedily into draws of the cheapest
+variant that fits, where the pixels saved (instance areas times the variants' cycles) pay for another draw, keeping the
+order. A large axis-aligned rectangle outline is drawn as the same instance in up to four scissors around its inside,
+whose pixels it leaves as they are; and path bands are at most two pixels tall (`BandPixels`), so a pixel goes through
+fewer edges (the ones it skips add nothing to its coverage). A discrete GPU keeps the full shader: its vertex shader
+and the splits only cost it (paragraph light on the RX 9070 XT: 1370 FPS with the variants, 1950 without). On the
+RX 9070 XT with `FASTCANVAS_VK_VARIANTS=1` the benchmark's scenes draw the same pixels as with the full shader.
 
 Each of the three features is optional (Vulkan 1.1 core path, as on many 2021-2024 phones):
 
@@ -217,14 +236,18 @@ ray-traced effect and `Form3DProbe` draw the same pixels that way, with no messa
   host-visible ones mapped), buffers and images in blocks of their own, suballocated first fit; resources larger than
   half a block get memory of their own. Thread-safe: the 3D context makes textures on the main thread while the render
   thread draws.
-- **Windows**: frames are drawn into a surface of the window, which keeps the frame for the next one (partial frames
-  start from it, as from the shown buffer on Direct3D 12). `Present` copies the frame into a second surface and
-  wakes the window's presenting thread, which acquires a swap chain image (waiting for a fence on the CPU: a semaphore
-  wait held up the whole queue), copies the newest frame into it with a recorded command buffer and presents; it takes
-  the queue lock only, never the device lock. The render thread waits for neither the display nor the driver's
-  acquire, and waits for the GPU only to stay three frames ahead. The present mode is `IMMEDIATE` when tearing is
-  allowed, else `MAILBOX`, `FIFO_LATEST_READY` (the AMD driver has no `MAILBOX`) or `FIFO`: frames come as fast as
-  with Direct3D 12 presenting with sync interval 0.
+- **Windows**: frames are drawn into a surface of the window. `Present` hands it to the window's presenting thread
+  and takes the surface it showed before for the next frame (a partial frame starts from a copy of the shown one, as
+  from the shown buffer on Direct3D 12); the thread acquires a swap chain image (waiting for a fence on the CPU: a
+  semaphore wait held up the whole queue), copies the newest frame into it with a recorded command buffer and
+  presents; it takes the queue lock only, never the device lock. The render thread waits for neither the display nor
+  the driver's acquire, and waits for the GPU only to stay three frames ahead. The present mode is `IMMEDIATE` when
+  tearing is allowed, else `MAILBOX`, `FIFO_LATEST_READY` (the AMD driver has no `MAILBOX`) or `FIFO`: frames come as
+  fast as with Direct3D 12 presenting with sync interval 0. **Direct** (`FASTCANVAS_VK_DIRECT=1`, a measurement aid):
+  the render thread draws the frame into an image of a swap chain of its own (pipelines for `R8G8B8A8` too), acquired
+  when the frame begins (the acquire's semaphore goes with the next submission; the image's old content is discarded
+  after that wait) and presented when it ends; no partial frames. It saves the copy but did not pay on the Mali-G57:
+  its render passes into the swap chain's images took 0.9 ms more per frame than the copy (0.7 ms) costs.
 
 ## The 3D contexts
 

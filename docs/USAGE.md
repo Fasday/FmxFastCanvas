@@ -406,11 +406,17 @@ but for a few pixels of strokes), at about its speed (`BENCHMARKS.md`). It is th
 (see "Android and Linux").
 
 - **Windows** show their frames through a swap chain of the window itself (opaque, as `Flip`; `FastCanvasPresentation`
-  is ignored), each from a thread of its own: the render thread copies a finished frame and goes on, the window's
-  thread acquires an image, copies the newest frame into it and presents. The present mode: `IMMEDIATE` with
-  `AllowTearing`, else the first the driver has of `MAILBOX`, `FIFO_LATEST_READY` and `FIFO`. The GPU is at most
-  three frames behind. Frames are drawn into a surface of the window that keeps them, so partial frames
-  (`FastCanvasPartialFrames`) work as on Direct3D 12.
+  is ignored), each from a thread of its own: the render thread hands a finished frame to it and goes on (the surface
+  of the frame shown before takes the next frame: nothing is copied), the window's thread acquires an image, copies
+  the newest frame into it and presents. The present mode: `IMMEDIATE` with `AllowTearing`, else the first the driver
+  has of `MAILBOX`, `FIFO_LATEST_READY` and `FIFO`. The GPU is at most three frames behind. A partial frame
+  (`FastCanvasPartialFrames`) starts from a copy of the frame shown last, as on Direct3D 12.
+- **Phones** (GPUs other than discrete ones): the canvas's pixel shader comes in variants that leave out what a draw
+  does not have (shapes with gradients, glyphs, images, the three together, paths; with and without the clip test),
+  and the renderer splits its runs of instances into draws of the cheapest variant where the pixels saved pay for a
+  draw; large rectangle outlines are drawn around their inside. They draw the same pixels as the full shader
+  (`FASTCANVAS_VK_VARIANTS=1` on a desktop GPU: the benchmark's scenes match pixel for pixel), several times faster
+  on a Mali GPU. A discrete GPU keeps the full shader (the variants would only cost it draws).
 - **The 3D context** runs FMX's own shaders (materials, filters, effects, transitions) as SPIR-V made from the GLSL
   sources FMX ships, with the constants laid out as for Direct3D: `tools\compile-fmx-shaders-vk.ps1` writes
   `FastCanvas.VkFmxShaders.inc` (run it again, with the Vulkan SDK, when a Delphi update changes FMX's shaders). A
@@ -487,13 +493,19 @@ Android:
   was tested so.
 - On a phone (2026-10-14): a TECNO KL7 (Helio G99, Mali-G57 MC2, driver r32p1, Vulkan 1.1.177, Android 14, 1080x2436
   at 120 Hz) runs PortProbe on the Vulkan 1.1 core path (render passes, Vulkan 1.0 barriers, timeline semaphores; with
-  fences too), through cold starts, the app in the background and back, and the screen off and on. It shows 55-59 FPS
-  where FMX's `TCanvasGpu` shows 97: it is GPU-bound, the canvas's render passes take about 16 ms of GPU time per
-  frame (an almost empty frame about 10 ms: the instanced shader is heavy for a two-core Mali), the copy into the
-  presented surface 0.85 ms, the blit into the swap chain 0.76 ms (GPU timestamps); the main thread records the scene
-  in 0.8 ms. PortProbe reads `options.txt` in the app's files directory (`adb shell run-as <package>`): options as on
-  its command line and `NAME=VALUE` environment variables such as `FASTCANVAS_VK_NOTIMELINE=1`; its status line (also
-  in the log, `adb logcat`) gives the frame rate, the recording and render-thread times per frame.
+  fences too), through cold starts, the app in the background and back, and the screen off and on. With the shader
+  variants ("Vulkan back end") it shows 115-118 FPS of the display's 120 with `--interval=1`, where FMX's `TCanvasGpu`
+  shows 107-119 (its main thread paints the scene in 2.3-4.9 ms, FastCanvas's records it in 0.7-1.5 ms); with
+  PortProbe's default 10 ms timer both show about 97. GPU time per frame (`FASTCANVAS_VK_GPUTIME=1`): one render pass
+  of 7.2 ms and the presenting thread's blit into the swap chain of 0.7 ms. Before the variants it showed 55-59 FPS,
+  GPU-bound: two render passes (the clear alone, then the draws) of 15.5 ms together (an almost empty frame about 10
+  ms: the one pixel shader for everything is heavy for a two-core Mali), the frame's copy for the presenting thread
+  0.85 ms, the blit 0.76 ms. Of the 7.2 ms, roughly: the controls and labels 2 ms, the scene's gradient background
+  2 ms, the wave (a widened path) 1.6 ms, the dashed star 1.3 ms. The pictures are the same pixels as before (paused
+  frames, `--time=3.7`, compared byte for byte). PortProbe reads `options.txt` in the app's files directory (`adb
+  shell run-as <package>`): options as on its command line and `NAME=VALUE` environment variables such as
+  `FASTCANVAS_VK_NOTIMELINE=1`; its status line (also in the log, `adb logcat`) gives the frame rate, the recording and
+  render-thread times per frame.
 
 Linux (compiles with `tools\check-port.ps1`, has not run yet):
 
@@ -525,6 +537,13 @@ Linux (compiles with `tools\check-port.ps1`, has not run yet):
   the Vulkan SDK) and appends its warnings and errors to the file. `VK_KHRONOS_VALIDATION_VALIDATE_SYNC=1` adds the
   layer's synchronization validation. `FASTCANVAS_VK_STATS=<file>`: the peak numbers of Vulkan memory objects and
   allocations, appended when the device goes.
+- `FASTCANVAS_VK_GPUTIME=1` (the platform's log: `adb logcat`, tag `FastCanvas`; `OutputDebugString` on Windows) or
+  `=<file>`: every two seconds the GPU time per window frame of the render passes, of the command buffers and of the
+  presented copies, from timestamps (a tile-based GPU cannot time its draws one by one: the render passes are the
+  unit).
+- `FASTCANVAS_VK_VARIANTS=1`: the shader variants of phones on any GPU (a test of their pixels on a desktop GPU), `0`:
+  the full shader everywhere. `FASTCANVAS_VK_DIRECT=1`: frames drawn straight into the images of a swap chain of the
+  render thread (no copy, no presenting thread, no partial frames; on the Mali-G57 slower than the copy it saves).
 - `FASTCANVAS_VK_API=1.1` or `1.2` (environment variable): the Vulkan instance of that version, so any device is used
   the way of devices below Vulkan 1.3 (a test of that path on a desktop GPU; no ray-traced effects then); `1.0`: no
   device qualifies (a test of the fallback). `FASTCANVAS_VK_NOPUSH=1`: `VK_KHR_push_descriptor` stays off, so the
