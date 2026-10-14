@@ -206,7 +206,7 @@ var
   /// <summary>Set by FastCanvas.Canvas: draws layout data on its canvas.</summary>
   FastDrawLayout: TFastDrawLayoutProc;
   /// <summary>The engine of the text: read by InstallFastCanvas, which registers its layout class for the canvas.
-  /// Android and Linux: Skia whatever it says.</summary>
+  /// Android and Linux: Skia whatever it says. Own is a geometry engine only (no text engine of that kind).</summary>
   FastCanvasTextEngine: TFastCanvasEngine =
     {$IFDEF MSWINDOWS}TFastCanvasEngine.Native{$ELSE}TFastCanvasEngine.Skia{$ENDIF};
 

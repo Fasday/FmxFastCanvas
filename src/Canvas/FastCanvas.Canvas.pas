@@ -160,8 +160,8 @@ uses
 {$ELSE}
   System.Generics.Collections, System.Math.Vectors, System.Messaging, System.Diagnostics, FMX.TextLayout,
   FMX.Types3D, FMX.Controls, FastCanvas.Device, FastCanvas.GpuVk, FastCanvas.Text, FastCanvas.RenderQueue,
-  FastCanvas.Service, FastCanvas.Bridge, FastCanvas.Geometry, FastCanvas.GeometrySkia, FastCanvas.TextSkia,
-  FastCanvas.Platform;
+  FastCanvas.Service, FastCanvas.Bridge, FastCanvas.Geometry, FastCanvas.GeometryOwn, FastCanvas.GeometrySkia,
+  FastCanvas.TextSkia, FastCanvas.Platform;
 {$ENDIF}
 
 type
