@@ -302,6 +302,10 @@ type
     procedure DoSetShaderVariable(const Name: string; const Matrix: TMatrix3D); overload; override;
     /// <summary>Device: the shader object for AShader.Code (AShader.Kind), stored in AShader.Native.</summary>
     class procedure CreateNativeShader(const AShader: TFastShader); virtual; abstract;
+    /// <summary>Device: the variables of a shader FMX ships no Direct3D source for (off Windows), as the Direct3D
+    /// source lays them out (constant offsets and sizes, texture units); False: the shader is not taken.</summary>
+    class function ShaderLayout(const Shader: TContextShader; out AVariables: TContextShaderVariables): Boolean;
+      virtual;
     /// <summary>Device: the texture object of a TTexture (from its Handle), or nil.</summary>
     class function TextureObject(const ATexture: TTexture): IInterface; virtual; abstract;
   public
@@ -889,20 +893,31 @@ begin
   FScissorDirty := True;
 end;
 
+class function TFastContext3D.ShaderLayout(const Shader: TContextShader;
+  out AVariables: TContextShaderVariables): Boolean;
+begin
+  AVariables := nil;
+  Result := False;
+end;
+
 class procedure TFastContext3D.DoInitializeShader(const Shader: TContextShader);
 var
   Src: TContextShaderSource;
+  Variables: TContextShaderVariables;
   S: TFastShader;
   V: TContextShaderVariable;
   I: Integer;
 begin
-  // A Direct3D 10+ device: DX11, then DX10, then DX11_level_9 (all FMX ships for Windows: DX11_level_9).
+  // A Direct3D 10+ device: DX11, then DX10, then DX11_level_9 (all FMX ships for Windows: DX11_level_9). Elsewhere
+  // the device may know the layout (ShaderLayout).
   Src := Shader.GetSourceByArch(TContextShaderArch.DX11);
   if not Src.IsDefined then
     Src := Shader.GetSourceByArch(TContextShaderArch.DX10);
   if not Src.IsDefined then
     Src := Shader.GetSourceByArch(TContextShaderArch.DX11_level_9);
-  if not Src.IsDefined then
+  if Src.IsDefined then
+    Variables := Src.Variables
+  else if not ShaderLayout(Shader, Variables) then
     Exit;
   S := TFastShader.Create;
   try
@@ -910,7 +925,7 @@ begin
     S.Id := FNextShaderId;
     S.Kind := Shader.Kind;
     S.Code := Copy(TBytes(Src.Code));
-    S.Variables := Copy(Src.Variables);
+    S.Variables := Copy(Variables);
     S.ConstantSize := 0;
     S.TextureUnits := 0;
     for I := 0 to High(S.Variables) do
