@@ -53,8 +53,26 @@ function UsageText: string;
 
 implementation
 
+{$IFDEF MSWINDOWS}
 uses
   Winapi.Windows;
+{$ENDIF}
+
+/// <summary>The command line as one string (off Windows: the arguments joined by spaces).</summary>
+function CommandLineText: string;
+{$IFDEF MSWINDOWS}
+begin
+  Result := string(GetCommandLine);
+end;
+{$ELSE}
+var
+  I: Integer;
+begin
+  Result := ParamStr(0);
+  for I := 1 to ParamCount do
+    Result := Result + ' ' + ParamStr(I);
+end;
+{$ENDIF}
 
 function ModeName(const AMode: TBenchMode): string;
 begin
@@ -170,7 +188,7 @@ begin
   Result.Quality := TCanvasQuality.SystemDefault;
   Result.Split := True;
   Result.VkFifo := TVkFifoOption.Auto;
-  Result.CommandLine := string(GetCommandLine);
+  Result.CommandLine := CommandLineText;
 
   for I := 1 to ParamCount do
   begin
