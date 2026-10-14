@@ -48,6 +48,14 @@
 #ifndef FLAT_TABLES
 #define FLAT_TABLES 0
 #endif
+// 1 (Vulkan, opaque interiors on phones; TGpuVkRenderer.DrawPending): the targets have a depth buffer, and every
+// instance a depth of its own, closer the later it is drawn (instance index of the draw plus a base pushed per draw).
+// The opaque interiors of shapes are drawn first (VSInterior, PSInterior: no blending, depth written), then every
+// instance as before with the depth test: its pixels under the interior of itself or of a later instance, which would
+// replace them, are not shaded (the GPU rejects them before the pixel shader).
+#ifndef WITH_DEPTH
+#define WITH_DEPTH 0
+#endif
 
 cbuffer Frame : register(b0)
 {
@@ -78,6 +86,22 @@ Buffer<float4> Edges : register(t12);   // path edges (x0, y0, x1, y1) in local 
 SamplerState LinearSampler : register(s0);
 SamplerState PointSampler : register(s1);
 SamplerState WrapSampler : register(s2);   // linear, repeating (bitmap brushes in tile mode)
+
+#if WITH_DEPTH
+// The depth number of the first instance of the draw's instance buffer, minus one (TGpuVkRenderer: counted from the
+// start of the target's render pass, whose depth buffer is cleared to 1).
+struct DepthConstants
+{
+    uint DepthBase;
+};
+[[vk::push_constant]] DepthConstants DepthPush;
+
+// Depth of the instance number n (1 .. 2^22 - 1): exact in float, and distinct in 24-bit depth buffers too.
+float InstanceDepth(uint index)
+{
+    return 1 - (float)(DepthPush.DepthBase + index + 1) * (1.0 / 4194304);
+}
+#endif
 
 #define KIND_FILL_RECT      0
 #define KIND_STROKE_RECT    1
@@ -151,7 +175,12 @@ float4 ClipEntry(Varyings i, uint index, uint k)
     return Clips.Load(index * 5 + k);
 #endif
 }
-Varyings VSMain(Instance inst, uint vid : SV_VertexID)
+Varyings VSMain(Instance inst, uint vid : SV_VertexID
+#if WITH_DEPTH
+    // Vulkan's instance index: firstInstance of the draw included (the instance's index in the buffer).
+    , uint iid : SV_InstanceID
+#endif
+    )
 {
     Varyings o;
     uint kind = inst.Data.y & 15;
@@ -196,6 +225,9 @@ Varyings VSMain(Instance inst, uint vid : SV_VertexID)
     float2 dev = float2(local.x * inst.M.x + local.y * inst.M.z + inst.TR.x,
                         local.x * inst.M.y + local.y * inst.M.w + inst.TR.y);
     o.Pos = float4(dev.x * ViewScale.x - 1, dev.y * ViewScale.y + 1, 0, 1);
+#if WITH_DEPTH
+    o.Pos.z = InstanceDepth(iid);
+#endif
     o.Data = inst.Data;
 #if FLAT_TABLES
     o.Paint0 = 0;
@@ -726,6 +758,77 @@ DualOutput PSMainDual(Varyings i)
     float3 weights;
     o.Color = Shade(i, weights);
     o.Weights = float4(weights, o.Color.a);
+    return o;
+}
+
+// Opaque interiors (Vulkan, WITH_DEPTH targets): triangles in target pixels with the depth of their instance and a
+// premultiplied opaque color per vertex (the same at every vertex for a solid color; a linear gradient's colors at
+// the corners of a rectangle it covers without clamping), written without blending: a phone GPU shades each pixel of
+// them once and drops the pixels they hide.
+struct InteriorVertex
+{
+    float3 Pos : POSITION;      // target pixels, depth
+    float4 Color : COLOR;
+};
+
+struct InteriorVaryings
+{
+    float4 Pos : SV_Position;
+    float4 Color : COLOR;
+};
+
+InteriorVaryings VSInterior(InteriorVertex v)
+{
+    InteriorVaryings o;
+    o.Pos = float4(v.Pos.x * ViewScale.x - 1, v.Pos.y * ViewScale.y + 1, v.Pos.z, 1);
+    o.Color = v.Color;
+    return o;
+}
+
+float4 PSInterior(InteriorVaryings i) : SV_Target
+{
+    return i.Color;
+}
+
+// Paths drawn as triangles of their bands instead of one quad (Vulkan, WITH_DEPTH targets): the same instance and
+// pixel shader, the local position from the vertex; the pieces may overlap (each writes the instance's depth, so a
+// pixel is shaded once) and leave out the parts of the bounds no edge comes near and the path does not cover.
+Varyings VSMesh(Instance inst, float2 pos : MESHPOS
+#if WITH_DEPTH
+    , uint iid : SV_InstanceID
+#endif
+    )
+{
+    Varyings o;
+    o.Shape = float4(inst.TR.zw, inst.Stroke * 0.5, 0);
+    o.Rect = inst.Rect;
+    o.Local = pos;
+    o.Uv = 0;
+    o.UvRect = inst.Uv;
+    float2 dev = float2(pos.x * inst.M.x + pos.y * inst.M.z + inst.TR.x, pos.x * inst.M.y + pos.y * inst.M.w + inst.TR.y);
+    o.Pos = float4(dev.x * ViewScale.x - 1, dev.y * ViewScale.y + 1, 0, 1);
+#if WITH_DEPTH
+    o.Pos.z = InstanceDepth(iid);
+#endif
+    o.Data = inst.Data;
+#if FLAT_TABLES
+    o.Paint0 = 0;
+    o.Paint1 = 0;
+    o.Paint2 = 0;
+    if (inst.Data.w != 0)
+    {
+        uint p = inst.Data.w - 1;
+        o.Paint0 = Paints.Load(p * 3);
+        o.Paint1 = Paints.Load(p * 3 + 1);
+        o.Paint2 = Paints.Load(p * 3 + 2);
+    }
+    uint c = inst.Data.z * 5;
+    o.Clip0 = Clips.Load(c);
+    o.Clip1 = Clips.Load(c + 1);
+    o.Clip2 = Clips.Load(c + 2);
+    o.Clip3 = Clips.Load(c + 3);
+    o.Clip4 = Clips.Load(c + 4);
+#endif
     return o;
 }
 

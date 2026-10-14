@@ -101,7 +101,8 @@ try {
   # the sRGB curves select per component with the ternary operator. The clip-space y is flipped by the viewport.
   # The variants of PSMain for blending draws (TGpuVkVariant in FastCanvas.GpuVk): only the WITH_ switches listed are
   # on; they and the ...Flat shaders are compiled with FLAT_TABLES (the vertex shader hands the instance's paint and
-  # clip table entries to the pixel shader), the others without.
+  # clip table entries to the pixel shader), the others without. ...Z vertex shaders: WITH_DEPTH (targets with a depth
+  # buffer for opaque interiors); VSMesh: paths drawn as triangles; VSInterior, PSInterior: the opaque interiors.
   $vkSdk = [Environment]::GetEnvironmentVariable('VULKAN_SDK', 'Machine')
   if (-not $DxcSpirv -and $vkSdk) { $DxcSpirv = Join-Path $vkSdk 'Bin\dxc.exe' }
   if (-not $SpirvVal -and $vkSdk) { $SpirvVal = Join-Path $vkSdk 'Bin\spirv-val.exe' }
@@ -143,6 +144,12 @@ try {
       @{ Name = 'FastCanvasVkPSPaths'; Entry = 'PSMain'; Profile = 'ps_6_0'; Src = $src; Defines = (Variant $paths) },
       @{ Name = 'FastCanvasVkPSPathsClip'; Entry = 'PSMain'; Profile = 'ps_6_0'; Src = $src;
         Defines = (Variant ($paths + 'WITH_CLIPS')) },
+      @{ Name = 'FastCanvasVkVSFlatZ'; Entry = 'VSMain'; Profile = 'vs_6_0'; Src = $src;
+        Defines = @('-D', 'FLAT_TABLES=1', '-D', 'WITH_DEPTH=1') },
+      @{ Name = 'FastCanvasVkVSMeshZ'; Entry = 'VSMesh'; Profile = 'vs_6_0'; Src = $src;
+        Defines = @('-D', 'FLAT_TABLES=1', '-D', 'WITH_DEPTH=1') },
+      @{ Name = 'FastCanvasVkVSInterior'; Entry = 'VSInterior'; Profile = 'vs_6_0'; Src = $src; Defines = @() },
+      @{ Name = 'FastCanvasVkPSInterior'; Entry = 'PSInterior'; Profile = 'ps_6_0'; Src = $src; Defines = @() },
       @{ Name = 'FastCanvasVkPSLinear'; Entry = 'PSMainLinear'; Profile = 'ps_6_0'; Src = $src; Defines = @() },
       @{ Name = 'FastCanvasVkPSDual'; Entry = 'PSMainDual'; Profile = 'ps_6_0'; Src = $src; Defines = @() },
       @{ Name = 'FastOutputVkVS'; Entry = 'VSOutput'; Profile = 'vs_6_0'; Src = $outputSrc; Defines = @() },

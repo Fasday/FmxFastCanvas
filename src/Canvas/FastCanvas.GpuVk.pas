@@ -176,6 +176,18 @@ type
     Count: Integer;
   end;
 
+  /// <summary>A depth buffer of the canvas's targets of one size (opaque interiors, TGpuVkSurface.WantDepth): cleared
+  /// when a rendering instance begins and never stored, so targets of the same size share it.</summary>
+  TGpuVkDepth = record
+    Width, Height: Integer;
+    Image: TVkImage;
+    Memory: TFastVkAllocation;
+    View: TVkImageView;
+    Use: TGpuVkUse;
+    /// <summary>The command buffer that used it last (ListGen), for dropping the oldest of several sizes.</summary>
+    Gen: Integer;
+  end;
+
   /// <summary>The views and size a framebuffer is made for (devices without dynamic rendering).</summary>
   TGpuVkFramebufferKey = packed record
     Pass: TVkRenderPass;
@@ -235,6 +247,13 @@ type
     FWindows: TList<TGpuVkWindow>;
     FUniformAlign: Integer;
     FOwner: TObject;
+    /// <summary>Opaque interiors: the depth buffers by size; the active rendering instance has one (its draws number
+    /// their instances from DepthCount on).</summary>
+    FDepths: TArray<TGpuVkDepth>;
+    FRenderingDepth: Boolean;
+    FDepthCount: Cardinal;
+    /// <summary>The depth buffer of a target of this size (made on first use; at most a few sizes are kept).</summary>
+    function TargetDepth(const AWidth, AHeight: Integer): Integer;
     procedure Open;
     function Completed: UInt64;
     function TakePage(const ASize: NativeInt): TGpuVkPage;
@@ -312,7 +331,7 @@ type
     /// <summary>A device-local image with a view of all of it (of AAspect).</summary>
     function NewImage(const AFormat: TVkFormat; const AWidth, AHeight: Integer; const AUsage: TVkImageUsageFlags;
       out AMemory: TFastVkAllocation; out AView: TVkImageView; const AMips: Integer = 1; const ASamples: Integer = 1;
-      const AAspect: TVkImageAspectFlags = Ord(VK_IMAGE_ASPECT_COLOR_BIT)): TVkImage;
+      const AAspect: TVkImageAspectFlags = Ord(VK_IMAGE_ASPECT_COLOR_BIT); const ALazy: Boolean = False): TVkImage;
     /// <summary>A buffer and its memory (ARequired, APreferred: see TFastVulkan.MemoryType; host-visible memory is
     /// mapped: AMemory.Cpu).</summary>
     function NewBuffer(const ASize: UInt64; const AUsage: TVkBufferUsageFlags; const ARequired,
@@ -334,6 +353,15 @@ type
     /// <summary>What the active rendering instance draws into (a canvas surface, another renderer's object), nil
     /// outside rendering.</summary>
     property Rendering: TObject read FRendering;
+    /// <summary>The active rendering instance of a canvas surface has a depth buffer (cleared to 1 at its start).
+    /// </summary>
+    property RenderingDepth: Boolean read FRenderingDepth;
+    /// <summary>Instances numbered for their depth in the active rendering instance so far (the renderer counts on).
+    /// </summary>
+    property DepthCount: Cardinal read FDepthCount write FDepthCount;
+    /// <summary>Clears the depth buffer of the active rendering instance (when the instance numbers run out).
+    /// </summary>
+    procedure ClearDepth;
     property Fast: TFastVulkan read FFast;
     property Vk: TVulkan read FVk;
     property Device: TVkDevice read FDevice;
@@ -361,6 +389,9 @@ type
     FReadbackData: PByte;
     /// <summary>The read-back copy holds the current content (no GPU write since it was taken).</summary>
     FReadbackValid: Boolean;
+    /// <summary>Its rendering instances have a depth buffer (opaque interiors; set by the renderer before the first).
+    /// </summary>
+    FWantDepth: Boolean;
     /// <summary>Destroys the Vulkan objects at once: the context shuts down (the GPU is idle) while the surface
     /// lives on (a bitmap freed after the canvas).</summary>
     procedure Drop(const AContext: TGpuVkContext);
@@ -382,6 +413,7 @@ type
     property Format: TVkFormat read FFormat;
     /// <summary>The use the image is in (render thread).</summary>
     property State: TGpuVkUse read FUse;
+    property WantDepth: Boolean read FWantDepth write FWantDepth;
   end;
 
   TGpuVkPresenter = class;
@@ -559,7 +591,18 @@ type
   /// shapes with gradients, glyphs, images, all three (controls), shapes and paths with gradients, each with and
   /// without the clip test, and the full shader.</summary>
   TGpuVkVariant = (Shapes, ShapesClip, Glyphs, GlyphsClip, Images, ImagesClip, Ui, UiClip, Paths, PathsClip, Full);
+  /// <summary>What a pipeline draws: a quad per instance (the canvas's draws), opaque interiors (triangles in pixels
+  /// with a color per vertex), paths as triangles of local positions with their instance.</summary>
+  TGpuVkGeometry = (Quads, Interiors, Meshes);
   {$SCOPEDENUMS OFF}
+
+  /// <summary>A vertex of an opaque interior (shader VSInterior): target pixels and depth, a premultiplied color.
+  /// </summary>
+  TGpuVkInteriorVertex = packed record
+    X, Y, Z: Single;
+    R, G, B, A: Single;
+  end;
+  PGpuVkInteriorVertex = ^TGpuVkInteriorVertex;
 
   TGpuVkRenderer = class(TGpuRenderer)
   private
@@ -568,9 +611,23 @@ type
     FLayout: TVkPipelineLayout;
     FVS, FPS, FPSDual: TVkShaderModule;
     /// <summary>The pipelines by the format of the target (TargetSlot: 0 B8G8R8A8, the canvas's surfaces; 1 R8G8B8A8,
-    /// swap chain images frames are drawn into, TGpuVkWindow with Direct), made on first use but slot 0's blend and
-    /// copy. Dual: dual-source blending (ClearType text), none without the feature.</summary>
-    FPipeBlend, FPipeCopy, FPipeDual: array[0..1] of TVkPipeline;
+    /// swap chain images frames are drawn into, TGpuVkWindow with Direct; 2 and 3 the same with a depth buffer, for
+    /// opaque interiors), made on first use but slot 0's blend and copy. Dual: dual-source blending (ClearType text),
+    /// none without the feature.</summary>
+    FPipeBlend, FPipeCopy, FPipeDual: array[0..3] of TVkPipeline;
+    /// <summary>Opaque interiors (FASTCANVAS_VK_INTERIORS, on where the variants are): large targets get a depth buffer
+    /// (TGpuVkSurface.WantDepth); the opaque interiors of filled rectangles with a solid color or a linear gradient
+    /// are drawn first, front to back without blending (FInteriorPipes, per format), and every instance after them
+    /// with the depth test (the variants' pipelines of slots 2 and 3, vertex shader FVSFlatZ), so that a pixel under
+    /// an opaque interior of its own instance or a later one is not shaded.</summary>
+    FInteriors: Boolean;
+    FVSFlatZ, FVSInterior, FPSInterior: TVkShaderModule;
+    FInteriorPipes: array[0..1] of TVkPipeline;
+    FInteriorData: TArray<TGpuVkInteriorVertex>;
+    /// <summary>Ramp rows as uploaded (straight RGBA), and whether a row is opaque and linear over its length within
+    /// a level (a linear gradient of it is interpolated per vertex in an interior).</summary>
+    FRampTexels: array of array[0..GpuRampWidth - 1] of Cardinal;
+    FRampLinear: array of Boolean;
     /// <summary>Blending draws in runs of the cheapest variant that fits, with the vertex shader that hands the table
     /// entries to the pixel shader (FVSFlat; the full shader of these runs is FastCanvasVkPSFlat): on GPUs other than
     /// discrete ones, with FASTCANVAS_VK_VARIANTS=1 on any, with 0 on none (the full shader, FPipeBlend). Modules and
@@ -578,7 +635,7 @@ type
     FVariants: Boolean;
     FVSFlat: TVkShaderModule;
     FVariantPS: array[TGpuVkVariant] of TVkShaderModule;
-    FVariantPipes: array[0..1, TGpuVkVariant] of TVkPipeline;
+    FVariantPipes: array[0..3, TGpuVkVariant] of TVkPipeline;
     /// <summary>A run is split when that saves more than this of pixels times variant cost (see DrawPending).
     /// </summary>
     FSplitCost: Single;
@@ -602,11 +659,20 @@ type
     FSetConst: UInt64;
     procedure CreatePipeline;
     function NewModule(const ACode: Pointer; const AWords: Integer): TVkShaderModule;
-    /// <summary>APixel: the pixel shader module (entry PSMain); VK_NULL_HANDLE: FPS, or FPSDual when ADual. AVertex:
-    /// the vertex shader module; VK_NULL_HANDLE: FVS.</summary>
+    /// <summary>APixel: the pixel shader module (entry PSMain, PSInterior for interiors); VK_NULL_HANDLE: FPS, or FPSDual
+    /// when ADual. AVertex: the vertex shader module; VK_NULL_HANDLE: FVS. ADepth: 0 no depth buffer, 1 one without the
+    /// test, 2 the test (less), 3 the test and writes.</summary>
     function NewPipeline(const AFormat: TVkFormat; const ABlend, ADual: Boolean;
-      const APixel: TVkShaderModule = VK_NULL_HANDLE; const AVertex: TVkShaderModule = VK_NULL_HANDLE): TVkPipeline;
+      const APixel: TVkShaderModule = VK_NULL_HANDLE; const AVertex: TVkShaderModule = VK_NULL_HANDLE;
+      const ADepth: Integer = 0; const AGeometry: TGpuVkGeometry = TGpuVkGeometry.Quads): TVkPipeline;
     function TargetSlot: Integer;
+    /// <summary>The opaque interior of a pending instance as two triangles (6 vertices at AOut) with the depth AZ:
+    /// filled rectangles (rounded ones inside their corners) with an opaque solid color or a linear gradient whose ramp
+    /// is linear and that covers the interior without clamping, and no clip test. False for others.</summary>
+    function InteriorOf(const AInstance: PGpuInstance; const AZ: Single; const AOut: PGpuVkInteriorVertex): Boolean;
+    /// <summary>Pass one of a draw on a depth target: the opaque interiors of the pending instances, front to back.
+    /// </summary>
+    procedure DrawInteriors(const ABase: Cardinal);
     function TargetPipeline: TVkPipeline;
     function VariantPipeline(const AVariant: TGpuVkVariant): TVkPipeline;
     /// <summary>The pending instance is a rectangle outline with an inside large enough to leave out of its draw
@@ -720,8 +786,14 @@ const
   VariantCost: array[TGpuVkVariant] of Single = (3, 4.5, 1, 2.5, 2.5, 4, 4, 6, 4.5, 6, 12);
   VariantVariable = 'FASTCANVAS_VK_VARIANTS';
   DirectVariable = 'FASTCANVAS_VK_DIRECT';
-  /// <summary>The formats of TGpuVkRenderer.TargetSlot.</summary>
-  SlotFormats: array[0..1] of TVkFormat = (VK_FORMAT_B8G8R8A8_UNORM, VK_FORMAT_R8G8B8A8_UNORM);
+  /// <summary>The formats of TGpuVkRenderer.TargetSlot (slots 2 and 3 with a depth buffer).</summary>
+  SlotFormats: array[0..3] of TVkFormat = (VK_FORMAT_B8G8R8A8_UNORM, VK_FORMAT_R8G8B8A8_UNORM,
+    VK_FORMAT_B8G8R8A8_UNORM, VK_FORMAT_R8G8B8A8_UNORM);
+  InteriorVariable = 'FASTCANVAS_VK_INTERIORS';
+  /// <summary>Depth numbers of a rendering instance (shader InstanceDepth: 1 - n / 2^22).</summary>
+  DepthNumbers = 4194304;
+  /// <summary>Targets with at least this many pixels get a depth buffer for opaque interiors.</summary>
+  DepthMinPixels = 256 * 256;
 
   /// <summary>GPU timing: 1 for the platform's log (Android: logcat, tag FastCanvas; Windows: OutputDebugString), else
   /// a file the report lines are appended to.</summary>
@@ -1179,6 +1251,7 @@ var
   W: TGpuVkWindow;
   S: TGpuVkSurface;
   Fb: TVkFramebuffer;
+  I: Integer;
 begin
   WaitIdle;
   // The 3D context lets go of what it made on the device (textures FMX still holds, pipelines).
@@ -1220,6 +1293,13 @@ begin
   while FCommands.Count > 0 do
     FVk.DestroyCommandPool(FDevice, FCommands.Dequeue.Pool, nil);
   FreeAndNil(FTimeline);
+  for I := 0 to High(FDepths) do
+  begin
+    DestroyObject(TGpuVkObject.ImageView, FDepths[I].View);
+    DestroyObject(TGpuVkObject.Image, FDepths[I].Image);
+    DestroyObject(TGpuVkObject.Memory, MemoryHandle(FDepths[I].Memory));
+  end;
+  FDepths := nil;
   for Fb in FFramebuffers.Values do
     FVk.DestroyFramebuffer(FDevice, Fb, nil);
   FFramebuffers.Free;
@@ -1912,7 +1992,7 @@ end;
 
 function TGpuVkContext.NewImage(const AFormat: TVkFormat; const AWidth, AHeight: Integer;
   const AUsage: TVkImageUsageFlags; out AMemory: TFastVkAllocation; out AView: TVkImageView; const AMips: Integer;
-  const ASamples: Integer; const AAspect: TVkImageAspectFlags): TVkImage;
+  const ASamples: Integer; const AAspect: TVkImageAspectFlags; const ALazy: Boolean): TVkImage;
 var
   Info: TVkImageCreateInfo;
   ViewInfo: TVkImageViewCreateInfo;
@@ -1942,7 +2022,9 @@ begin
   try
     FVk.GetImageMemoryRequirements(FDevice, Result, @Req);
     try
-      AMemory := FFast.Allocate(Req, Ord(VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT), 0, False);
+      // ALazy: transient attachments, in lazily allocated memory where the device has it.
+      AMemory := FFast.Allocate(Req, Ord(VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT),
+        IfThen(ALazy, Ord(VK_MEMORY_PROPERTY_LAZILY_ALLOCATED_BIT), 0), False);
     except
       on E: EFastVulkan do
         raise EFastDevice.Create(E.Message);
@@ -2142,10 +2224,68 @@ begin
   MemoryBarrier(StageColorOutput, AccessColorWrite, StageColorOutput, AccessColorRead or AccessColorWrite);
 end;
 
+function TGpuVkContext.TargetDepth(const AWidth, AHeight: Integer): Integer;
+var
+  I, Oldest: Integer;
+  D: TGpuVkDepth;
+begin
+  for I := 0 to High(FDepths) do
+    if (FDepths[I].Width = AWidth) and (FDepths[I].Height = AHeight) then
+    begin
+      FDepths[I].Gen := FListGen;
+      Exit(I);
+    end;
+  // A few sizes (a window, its client-sized bitmaps); the one used longest ago goes for another.
+  if Length(FDepths) >= 4 then
+  begin
+    Oldest := 0;
+    for I := 1 to High(FDepths) do
+      if FDepths[I].Gen < FDepths[Oldest].Gen then
+        Oldest := I;
+    Retire(TGpuVkObject.ImageView, FDepths[Oldest].View);
+    Retire(TGpuVkObject.Image, FDepths[Oldest].Image);
+    Retire(TGpuVkObject.Memory, MemoryHandle(FDepths[Oldest].Memory));
+    Delete(FDepths, Oldest, 1);
+  end;
+  D := Default(TGpuVkDepth);
+  D.Width := AWidth;
+  D.Height := AHeight;
+  // Transient: a tiler keeps it in tile memory (cleared at the start, never stored), lazily allocated memory where
+  // the device has it.
+  D.Image := NewImage(FFast.DepthFormat, AWidth, AHeight, Ord(VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT) or
+    Ord(VK_IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT), D.Memory, D.View, 1, 1, Ord(VK_IMAGE_ASPECT_DEPTH_BIT) or
+    Ord(VK_IMAGE_ASPECT_STENCIL_BIT), True);
+  D.Gen := FListGen;
+  FDepths := FDepths + [D];
+  Result := High(FDepths);
+end;
+
+procedure TGpuVkContext.ClearDepth;
+var
+  Attachment: TVkClearAttachment;
+  Rect: TVkClearRect;
+  S: TGpuVkSurface;
+begin
+  if not FRenderingDepth or not (FRendering is TGpuVkSurface) then
+    Exit;
+  S := TGpuVkSurface(FRendering);
+  FillChar(Attachment, SizeOf(Attachment), 0);
+  Attachment.aspectMask := Ord(VK_IMAGE_ASPECT_DEPTH_BIT);
+  Attachment.clearValue.depthStencil.depth := 1;
+  FillChar(Rect, SizeOf(Rect), 0);
+  Rect.rect.extent.width := Max(S.Width, 1);
+  Rect.rect.extent.height := Max(S.Height, 1);
+  Rect.layerCount := 1;
+  FVk.CmdClearAttachments(FCmd.Buffer, 1, @Attachment, 1, @Rect);
+  FDepthCount := 0;
+end;
+
 procedure TGpuVkContext.StartTarget(const ATarget: TGpuVkSurface; const AClear: PVkClearColorValue);
 var
-  Attachment: TVkRenderingAttachmentInfo;
+  Attachment, Depth, Stencil: TVkRenderingAttachmentInfo;
   Info: TVkRenderingInfo;
+  D: Integer;
+  Range: TVkImageSubresourceRange;
 begin
   EndRendering;
   if ATarget.FUse = TGpuVkUse.ColorTarget then
@@ -2154,6 +2294,21 @@ begin
   else
     // A clear replaces everything.
     Transition(ATarget.FImage, ATarget.FUse, TGpuVkUse.ColorTarget, AClear <> nil);
+  D := -1;
+  if ATarget.FWantDepth and (FFast.DepthFormat <> VK_FORMAT_UNDEFINED) then
+  begin
+    D := TargetDepth(Max(ATarget.Width, 1), Max(ATarget.Height, 1));
+    if FDepths[D].Use = TGpuVkUse.DepthTarget then
+      // The tests and writes of its last rendering instance come before this one's clear.
+      MemoryBarrier(StageLateTests, AccessDepthWrite, StageEarlyTests or StageLateTests,
+        AccessDepthRead or AccessDepthWrite)
+    else
+    begin
+      Range := ColorRange;
+      Range.aspectMask := Ord(VK_IMAGE_ASPECT_DEPTH_BIT) or Ord(VK_IMAGE_ASPECT_STENCIL_BIT);
+      Transition(FDepths[D].Image, FDepths[D].Use, TGpuVkUse.DepthTarget, True, @Range);
+    end;
+  end;
   FlushBarriers;
   FillChar(Attachment, SizeOf(Attachment), 0);
   Attachment.sType := VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
@@ -2175,8 +2330,25 @@ begin
   Info.layerCount := 1;
   Info.colorAttachmentCount := 1;
   Info.pColorAttachments := @Attachment;
+  if D >= 0 then
+  begin
+    FillChar(Depth, SizeOf(Depth), 0);
+    Depth.sType := VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+    Depth.imageView := FDepths[D].View;
+    Depth.imageLayout := VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+    Depth.resolveMode := VK_RESOLVE_MODE_NONE;
+    Depth.loadOp := VK_ATTACHMENT_LOAD_OP_CLEAR;
+    Depth.storeOp := VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    Depth.clearValue.depthStencil.depth := 1;
+    Stencil := Depth;
+    Stencil.loadOp := VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    Info.pDepthAttachment := @Depth;
+    Info.pStencilAttachment := @Stencil;
+  end;
   StartRendering(Info, ATarget.FFormat, 1);
   FRendering := ATarget;
+  FRenderingDepth := D >= 0;
+  FDepthCount := 0;
 end;
 
 procedure TGpuVkContext.BeginRenderingInfo(const AOwner: TObject; const AInfo: TVkRenderingInfo;
@@ -2331,6 +2503,7 @@ begin
   if FRendering = nil then
     Exit;
   FRendering := nil;
+  FRenderingDepth := False;
   if FFast.DynamicRendering then
     FVk.CmdEndRendering(FCmd.Buffer)
   else
@@ -3764,7 +3937,7 @@ begin
   if C <> nil then
   begin
     // Submitted command buffers may still use them.
-    for I := 0 to 1 do
+    for I := 0 to 3 do
     begin
       C.Retire(TGpuVkObject.Pipeline, FPipeBlend[I]);
       C.Retire(TGpuVkObject.Pipeline, FPipeCopy[I]);
@@ -3772,6 +3945,11 @@ begin
       for V := Low(TGpuVkVariant) to High(TGpuVkVariant) do
         C.Retire(TGpuVkObject.Pipeline, FVariantPipes[I, V]);
     end;
+    for I := 0 to 1 do
+      C.Retire(TGpuVkObject.Pipeline, FInteriorPipes[I]);
+    C.Retire(TGpuVkObject.ShaderModule, FVSFlatZ);
+    C.Retire(TGpuVkObject.ShaderModule, FVSInterior);
+    C.Retire(TGpuVkObject.ShaderModule, FPSInterior);
     for V := Low(TGpuVkVariant) to High(TGpuVkVariant) do
       C.Retire(TGpuVkObject.ShaderModule, FVariantPS[V]);
     C.Retire(TGpuVkObject.ShaderModule, FVSFlat);
@@ -3847,16 +4025,20 @@ begin
 end;
 
 function TGpuVkRenderer.NewPipeline(const AFormat: TVkFormat; const ABlend, ADual: Boolean;
-  const APixel, AVertex: TVkShaderModule): TVkPipeline;
+  const APixel, AVertex: TVkShaderModule; const ADepth: Integer; const AGeometry: TGpuVkGeometry): TVkPipeline;
 const
   MainVS: PAnsiChar = 'VSMain';
   MainPS: PAnsiChar = 'PSMain';
   MainDual: PAnsiChar = 'PSMainDual';
+  InteriorVS: PAnsiChar = 'VSInterior';
+  InteriorPS: PAnsiChar = 'PSInterior';
+  MeshVS: PAnsiChar = 'VSMesh';
 var
   C: TGpuVkContext;
   Stages: array[0..1] of TVkPipelineShaderStageCreateInfo;
-  Binding: TVkVertexInputBindingDescription;
-  Attributes: array[0..5] of TVkVertexInputAttributeDescription;
+  Bindings: array[0..1] of TVkVertexInputBindingDescription;
+  Attributes: array[0..6] of TVkVertexInputAttributeDescription;
+  DepthState: TVkPipelineDepthStencilStateCreateInfo;
   VertexInput: TVkPipelineVertexInputStateCreateInfo;
   Assembly: TVkPipelineInputAssemblyStateCreateInfo;
   ViewportState: TVkPipelineViewportStateCreateInfo;
@@ -3870,10 +4052,11 @@ var
   Rendering: TVkPipelineRenderingCreateInfo;
   Info: TVkGraphicsPipelineCreateInfo;
 
-  procedure Attribute(const AIndex: Integer; const AFormat: TVkFormat; const AOffset: Cardinal);
+  procedure Attribute(const AIndex: Integer; const AFormat: TVkFormat; const AOffset: Cardinal;
+    const ABinding: Cardinal = 0);
   begin
     Attributes[AIndex].location := AIndex;
-    Attributes[AIndex].binding := 0;
+    Attributes[AIndex].binding := ABinding;
     Attributes[AIndex].format := AFormat;
     Attributes[AIndex].offset := AOffset;
   end;
@@ -3886,13 +4069,21 @@ begin
   Stages[0].module := FVS;
   if AVertex <> VK_NULL_HANDLE then
     Stages[0].module := AVertex;
-  Stages[0].pName := MainVS;
+  case AGeometry of
+    TGpuVkGeometry.Interiors: Stages[0].pName := InteriorVS;
+    TGpuVkGeometry.Meshes: Stages[0].pName := MeshVS;
+  else
+    Stages[0].pName := MainVS;
+  end;
   Stages[1].sType := VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
   Stages[1].stage := VK_SHADER_STAGE_FRAGMENT_BIT;
   if APixel <> VK_NULL_HANDLE then
   begin
     Stages[1].module := APixel;
-    Stages[1].pName := MainPS;
+    if AGeometry = TGpuVkGeometry.Interiors then
+      Stages[1].pName := InteriorPS
+    else
+      Stages[1].pName := MainPS;
   end
   else if ADual then
   begin
@@ -3904,25 +4095,53 @@ begin
     Stages[1].module := FPS;
     Stages[1].pName := MainPS;
   end;
-  // One instance per primitive (a strip of four vertices); the first 84 bytes of TGpuInstance.
-  Binding.binding := 0;
-  Binding.stride := GpuInstanceStride;
-  Binding.inputRate := VK_VERTEX_INPUT_RATE_INSTANCE;
-  Attribute(0, VK_FORMAT_R32G32B32A32_SFLOAT, 0);
-  Attribute(1, VK_FORMAT_R32G32B32A32_SFLOAT, 16);
-  Attribute(2, VK_FORMAT_R32G32B32A32_SFLOAT, 32);
-  Attribute(3, VK_FORMAT_R32G32B32A32_SFLOAT, 48);
-  Attribute(4, VK_FORMAT_R32G32B32A32_UINT, 64);
-  Attribute(5, VK_FORMAT_R32_SFLOAT, 80);
+  FillChar(Bindings, SizeOf(Bindings), 0);
+  FillChar(Attributes, SizeOf(Attributes), 0);
   FillChar(VertexInput, SizeOf(VertexInput), 0);
   VertexInput.sType := VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
   VertexInput.vertexBindingDescriptionCount := 1;
-  VertexInput.pVertexBindingDescriptions := @Binding;
-  VertexInput.vertexAttributeDescriptionCount := Length(Attributes);
+  VertexInput.vertexAttributeDescriptionCount := 6;
+  if AGeometry = TGpuVkGeometry.Interiors then
+  begin
+    // Triangles of TGpuVkInteriorVertex.
+    Bindings[0].binding := 0;
+    Bindings[0].stride := SizeOf(TGpuVkInteriorVertex);
+    Bindings[0].inputRate := VK_VERTEX_INPUT_RATE_VERTEX;
+    Attribute(0, VK_FORMAT_R32G32B32_SFLOAT, 0);
+    Attribute(1, VK_FORMAT_R32G32B32A32_SFLOAT, 12);
+    VertexInput.vertexAttributeDescriptionCount := 2;
+  end
+  else
+  begin
+    // One instance per primitive (a strip of four vertices); the first 84 bytes of TGpuInstance.
+    Bindings[0].binding := 0;
+    Bindings[0].stride := GpuInstanceStride;
+    Bindings[0].inputRate := VK_VERTEX_INPUT_RATE_INSTANCE;
+    Attribute(0, VK_FORMAT_R32G32B32A32_SFLOAT, 0);
+    Attribute(1, VK_FORMAT_R32G32B32A32_SFLOAT, 16);
+    Attribute(2, VK_FORMAT_R32G32B32A32_SFLOAT, 32);
+    Attribute(3, VK_FORMAT_R32G32B32A32_SFLOAT, 48);
+    Attribute(4, VK_FORMAT_R32G32B32A32_UINT, 64);
+    Attribute(5, VK_FORMAT_R32_SFLOAT, 80);
+    if AGeometry = TGpuVkGeometry.Meshes then
+    begin
+      // And the local positions of the triangles (two floats a vertex).
+      Bindings[1].binding := 1;
+      Bindings[1].stride := 8;
+      Bindings[1].inputRate := VK_VERTEX_INPUT_RATE_VERTEX;
+      Attribute(6, VK_FORMAT_R32G32_SFLOAT, 0, 1);
+      VertexInput.vertexBindingDescriptionCount := 2;
+      VertexInput.vertexAttributeDescriptionCount := 7;
+    end;
+  end;
+  VertexInput.pVertexBindingDescriptions := @Bindings[0];
   VertexInput.pVertexAttributeDescriptions := @Attributes[0];
   FillChar(Assembly, SizeOf(Assembly), 0);
   Assembly.sType := VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
-  Assembly.topology := VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP;
+  if AGeometry = TGpuVkGeometry.Quads then
+    Assembly.topology := VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP
+  else
+    Assembly.topology := VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
   FillChar(ViewportState, SizeOf(ViewportState), 0);
   ViewportState.sType := VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
   ViewportState.viewportCount := 1;
@@ -3968,6 +4187,18 @@ begin
   Rendering.sType := VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
   Rendering.colorAttachmentCount := 1;
   Rendering.pColorAttachmentFormats := @Format;
+  FillChar(DepthState, SizeOf(DepthState), 0);
+  DepthState.sType := VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+  if ADepth > 0 then
+  begin
+    // The depth buffer of opaque interiors (its stencil aspect unused): later instances are closer.
+    Rendering.depthAttachmentFormat := C.Fast.DepthFormat;
+    Rendering.stencilAttachmentFormat := C.Fast.DepthFormat;
+    DepthState.depthTestEnable := Ord(ADepth >= 2);
+    DepthState.depthWriteEnable := Ord(ADepth >= 3);
+    DepthState.depthCompareOp := VK_COMPARE_OP_LESS;
+    DepthState.maxDepthBounds := 1;
+  end;
   FillChar(Info, SizeOf(Info), 0);
   Info.sType := VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
   try
@@ -3976,6 +4207,8 @@ begin
     on E: EFastVulkan do
       raise EFastDevice.Create(E.Message);
   end;
+  if ADepth > 0 then
+    Info.pDepthStencilState := @DepthState;
   Info.stageCount := Length(Stages);
   Info.pStages := @Stages[0];
   Info.pVertexInputState := @VertexInput;
@@ -4012,6 +4245,7 @@ var
   Bindings: array[0..16] of TVkDescriptorSetLayoutBinding;
   SetInfo: TVkDescriptorSetLayoutCreateInfo;
   LayoutInfo: TVkPipelineLayoutCreateInfo;
+  Push: TVkPushConstantRange;
   I, N: Integer;
 
   procedure Bind(const ABinding: Cardinal; const AType: TVkDescriptorType; const ASampler: PVkSampler = nil);
@@ -4081,6 +4315,12 @@ begin
   LayoutInfo.sType := VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
   LayoutInfo.setLayoutCount := 1;
   LayoutInfo.pSetLayouts := @FSetLayout;
+  // The depth number base of a draw (shader DepthConstants; vertex shaders of targets with a depth buffer).
+  Push.stageFlags := Ord(VK_SHADER_STAGE_VERTEX_BIT);
+  Push.offset := 0;
+  Push.size := SizeOf(Cardinal);
+  LayoutInfo.pushConstantRangeCount := 1;
+  LayoutInfo.pPushConstantRanges := @Push;
   C.Check(C.Vk.CreatePipelineLayout(C.Device, @LayoutInfo, nil, @FLayout), 'vkCreatePipelineLayout');
   FVS := NewModule(@FastCanvasVkVS[0], Length(FastCanvasVkVS));
   FPS := NewModule(@FastCanvasVkPS[0], Length(FastCanvasVkPS));
@@ -4099,6 +4339,11 @@ begin
   FSplitCost := 16384;
   if FVariants then
     FBandPixels := 2;
+  // Opaque interiors where the variants are (they draw through them), unless turned off.
+  FInteriors := FVariants and (C.Fast.DepthFormat <> VK_FORMAT_UNDEFINED) and
+    (GetEnvironmentVariable(InteriorVariable) <> '0');
+  SetLength(FRampTexels, GpuRampRows);
+  SetLength(FRampLinear, GpuRampRows);
 
   FAtlas := NewTexture(VK_FORMAT_R8_UNORM, GpuAtlasSize, GpuAtlasSize);
   FRamps := NewTexture(VK_FORMAT_R8G8B8A8_UNORM, GpuRampWidth, GpuRampRows);
@@ -4112,6 +4357,9 @@ end;
 function TGpuVkRenderer.TargetSlot: Integer;
 begin
   Result := Ord(TGpuVkSurface(FTarget).Format = VK_FORMAT_R8G8B8A8_UNORM);
+  // The rendering instance the draw goes into has the depth buffer (TGpuVkContext.StartTarget: the target wants one).
+  if GpuVk.RenderingDepth then
+    Inc(Result, 2);
 end;
 
 function TGpuVkRenderer.TargetPipeline: TVkPipeline;
@@ -4126,20 +4374,21 @@ begin
     begin
       if FPSDual = VK_NULL_HANDLE then
         FPSDual := NewModule(@FastCanvasVkPSDual[0], Length(FastCanvasVkPSDual));
-      FPipeDual[S] := NewPipeline(SlotFormats[S], True, True);
+      FPipeDual[S] := NewPipeline(SlotFormats[S], True, True, VK_NULL_HANDLE, VK_NULL_HANDLE, Ord(S >= 2));
     end;
     Exit(FPipeDual[S]);
   end;
+  // With the depth buffer: no test (these draws come after everything before them).
   if FCopy then
   begin
     if FPipeCopy[S] = VK_NULL_HANDLE then
-      FPipeCopy[S] := NewPipeline(SlotFormats[S], False, False);
+      FPipeCopy[S] := NewPipeline(SlotFormats[S], False, False, VK_NULL_HANDLE, VK_NULL_HANDLE, Ord(S >= 2));
     Result := FPipeCopy[S];
   end
   else
   begin
     if FPipeBlend[S] = VK_NULL_HANDLE then
-      FPipeBlend[S] := NewPipeline(SlotFormats[S], True, False);
+      FPipeBlend[S] := NewPipeline(SlotFormats[S], True, False, VK_NULL_HANDLE, VK_NULL_HANDLE, Ord(S >= 2));
     Result := FPipeBlend[S];
   end;
 end;
@@ -4153,9 +4402,15 @@ begin
   Result := FVariantPipes[S, AVariant];
   if Result <> VK_NULL_HANDLE then
     Exit;
+  // Targets with the depth buffer: the vertex shader with the instances' depth, the depth test.
+  if (S >= 2) and (FVSFlatZ = VK_NULL_HANDLE) then
+    FVSFlatZ := NewModule(@FastCanvasVkVSFlatZ[0], Length(FastCanvasVkVSFlatZ));
   if FVariantPS[AVariant] <> VK_NULL_HANDLE then
   begin
-    Result := NewPipeline(SlotFormats[S], True, False, FVariantPS[AVariant], FVSFlat);
+    if S >= 2 then
+      Result := NewPipeline(SlotFormats[S], True, False, FVariantPS[AVariant], FVSFlatZ, 2)
+    else
+      Result := NewPipeline(SlotFormats[S], True, False, FVariantPS[AVariant], FVSFlat);
     FVariantPipes[S, AVariant] := Result;
     Exit;
   end;
@@ -4217,7 +4472,10 @@ begin
   if FVSFlat = VK_NULL_HANDLE then
     FVSFlat := NewModule(@FastCanvasVkVSFlat[0], Length(FastCanvasVkVSFlat));
   FVariantPS[AVariant] := NewModule(Code, Words);
-  Result := NewPipeline(SlotFormats[S], True, False, FVariantPS[AVariant], FVSFlat);
+  if S >= 2 then
+    Result := NewPipeline(SlotFormats[S], True, False, FVariantPS[AVariant], FVSFlatZ, 2)
+  else
+    Result := NewPipeline(SlotFormats[S], True, False, FVariantPS[AVariant], FVSFlat);
   FVariantPipes[S, AVariant] := Result;
 end;
 
@@ -4272,6 +4530,173 @@ begin
   Result := I - AFirst;
 end;
 
+function TGpuVkRenderer.InteriorOf(const AInstance: PGpuInstance; const AZ: Single;
+  const AOut: PGpuVkInteriorVertex): Boolean;
+const
+  // Margins in pixels (local units of one pixel, see the shader's w): half a pixel, so that the coverage is 1 at
+  // every pixel center inside, and a little more for rounding.
+  HalfPixel = 0.52;
+var
+  P: PGpuInstance;
+  Area: Single;
+  Det, W, Mx, My, X0, Y0, X1, Y1, Sx, Sy, Ex, Ey, L2: Single;
+  G: ^TGpuPaint;
+  Row, I, K: Integer;
+  Xs, Ys, T: array[0..3] of Single;
+  Colors: array[0..3, 0..3] of Single;
+  Needs: Cardinal;
+  V: PGpuVkInteriorVertex;
+  U, F: Single;
+  C0, C1: Cardinal;
+
+  procedure Put(const AIndex: Integer);
+  begin
+    V.X := Xs[AIndex] * P.M11 + Ys[AIndex] * P.M21 + P.Dx;
+    V.Y := Xs[AIndex] * P.M12 + Ys[AIndex] * P.M22 + P.Dy;
+    V.Z := AZ;
+    V.R := Colors[AIndex, 0];
+    V.G := Colors[AIndex, 1];
+    V.B := Colors[AIndex, 2];
+    V.A := 1;
+    Inc(V);
+  end;
+
+begin
+  Result := False;
+  P := AInstance;
+  if ((P.Flags and 15) <> GpuKindFillRect) or ((P.Color shr 24) <> 255) then
+    Exit;
+  Needs := InstanceNeeds(P, Area);
+  if (Needs and (GpuNeedClips or GpuNeedBrushes)) <> 0 then
+    Exit;
+  // Too small for the triangles to pay.
+  if Area < 256 then
+    Exit;
+  Det := P.M11 * P.M22 - P.M12 * P.M21;
+  if not (Abs(Det) > 1E-12) then
+    Exit;
+  // The size of a pixel in local units as the shader takes it from the derivatives of the local position.
+  W := Sqrt(0.5 * (Sqr(P.M11) + Sqr(P.M12) + Sqr(P.M21) + Sqr(P.M22))) / Abs(Det);
+  Mx := HalfPixel * W;
+  My := Mx;
+  // Rounded corners: inside them on both axes.
+  if (((P.Flags shr GpuCornerShift) and 15) <> 0) and (P.Rx > 0) and (P.Ry > 0) then
+  begin
+    Mx := Mx + Abs(P.Rx);
+    My := My + Abs(P.Ry);
+  end;
+  X0 := Min(P.X0, P.X1) + Mx;
+  X1 := Max(P.X0, P.X1) - Mx;
+  Y0 := Min(P.Y0, P.Y1) + My;
+  Y1 := Max(P.Y0, P.Y1) - My;
+  if not ((X1 - X0) * (Y1 - Y0) * Abs(Det) >= 64) or not (Abs(X0) + Abs(X1) + Abs(Y0) + Abs(Y1) < 1E7) then
+    Exit;
+  Xs[0] := X0;
+  Ys[0] := Y0;
+  Xs[1] := X1;
+  Ys[1] := Y0;
+  Xs[2] := X0;
+  Ys[2] := Y1;
+  Xs[3] := X1;
+  Ys[3] := Y1;
+  if P.Paint = 0 then
+  begin
+    // The color the shader unpacks.
+    for I := 0 to 3 do
+    begin
+      Colors[I, 0] := ((P.Color shr 16) and 255) / 255;
+      Colors[I, 1] := ((P.Color shr 8) and 255) / 255;
+      Colors[I, 2] := (P.Color and 255) / 255;
+    end;
+  end
+  else
+  begin
+    // A linear gradient over a ramp that is opaque and linear, without clamping inside: the colors at the corners.
+    if P.Paint > Cardinal(Length(FPaintData)) then
+      Exit;
+    G := @FPaintData[P.Paint - 1];
+    if G.Data[11] >= 1.5 then
+      Exit;
+    Row := Trunc(G.Data[10] * GpuRampRows);
+    if (Row < 0) or (Row >= Length(FRampLinear)) or not FRampLinear[Row] then
+      Exit;
+    Sx := G.Data[0];
+    Sy := G.Data[1];
+    Ex := G.Data[2] - Sx;
+    Ey := G.Data[3] - Sy;
+    L2 := Ex * Ex + Ey * Ey;
+    if not (L2 > 1E-12) then
+      Exit;
+    for I := 0 to 3 do
+    begin
+      T[I] := ((Xs[I] - Sx) * Ex + (Ys[I] - Sy) * Ey) / L2;
+      if not ((T[I] >= 0) and (T[I] <= 1)) then
+        Exit;
+      // The ramp as the sampler reads it: texel centers at t * 255.
+      U := T[I] * (GpuRampWidth - 1);
+      K := Min(Trunc(U), GpuRampWidth - 2);
+      F := U - K;
+      C0 := FRampTexels[Row][K];
+      C1 := FRampTexels[Row][K + 1];
+      Colors[I, 0] := ((C0 and 255) * (1 - F) + (C1 and 255) * F) / 255;
+      Colors[I, 1] := (((C0 shr 8) and 255) * (1 - F) + ((C1 shr 8) and 255) * F) / 255;
+      Colors[I, 2] := (((C0 shr 16) and 255) * (1 - F) + ((C1 shr 16) and 255) * F) / 255;
+    end;
+  end;
+  V := AOut;
+  Put(0);
+  Put(1);
+  Put(2);
+  Put(1);
+  Put(3);
+  Put(2);
+  Result := True;
+end;
+
+procedure TGpuVkRenderer.DrawInteriors(const ABase: Cardinal);
+var
+  C: TGpuVkContext;
+  I, N, S: Integer;
+  Z: Single;
+  P: PByte;
+  Buffer: TVkBuffer;
+  Offset: UInt64;
+begin
+  N := 0;
+  if Length(FInteriorData) < 6 * FPendingCount then
+    SetLength(FInteriorData, Max(6 * FPendingCount, 2 * Length(FInteriorData)));
+  // Front to back: the later an instance, the closer (the GPU drops what an earlier one would shade under it).
+  for I := FPendingCount - 1 downto 0 do
+  begin
+    Z := 1 - (ABase + Cardinal(I) + 1) * (1 / DepthNumbers);
+    if InteriorOf(@FPending[I], Z, @FInteriorData[N]) then
+      Inc(N, 6);
+  end;
+  if N = 0 then
+    Exit;
+  C := GpuVk;
+  P := C.Upload(N * SizeOf(TGpuVkInteriorVertex), 16, Buffer, Offset);
+  Move(FInteriorData[0], P^, N * SizeOf(TGpuVkInteriorVertex));
+  S := TargetSlot and 1;
+  if FInteriorPipes[S] = VK_NULL_HANDLE then
+  begin
+    if FVSInterior = VK_NULL_HANDLE then
+      FVSInterior := NewModule(@FastCanvasVkVSInterior[0], Length(FastCanvasVkVSInterior));
+    if FPSInterior = VK_NULL_HANDLE then
+      FPSInterior := NewModule(@FastCanvasVkPSInterior[0], Length(FastCanvasVkPSInterior));
+    FInteriorPipes[S] := NewPipeline(SlotFormats[S], False, False, FPSInterior, FVSInterior, 3,
+      TGpuVkGeometry.Interiors);
+  end;
+  if FBoundPipe <> FInteriorPipes[S] then
+  begin
+    C.Vk.CmdBindPipeline(C.Cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, FInteriorPipes[S]);
+    FBoundPipe := FInteriorPipes[S];
+  end;
+  C.Vk.CmdBindVertexBuffers(C.Cmd, 0, 1, @Buffer, @Offset);
+  C.Vk.CmdDraw(C.Cmd, N, 1, 0, 0);
+  Inc(FDrawCalls);
+end;
+
 procedure TGpuVkRenderer.CreateEdgeTable(const ACapacity: Integer);
 begin
   if FEdges.Buffer <> VK_NULL_HANDLE then
@@ -4296,6 +4721,9 @@ begin
   inherited;
   // The scissor depends on the target's size.
   FBoundW := -1;
+  // Opaque interiors on large targets (windows, client-sized bitmaps): before their first rendering instance.
+  if FInteriors and (ATarget <> nil) and (ATarget.Width * ATarget.Height >= DepthMinPixels) then
+    TGpuVkSurface(ATarget).WantDepth := True;
 end;
 
 procedure TGpuVkRenderer.UploadTables;
@@ -4424,6 +4852,7 @@ var
   Variants: Boolean;
   Bands: TGpuBands;
   Area: Single;
+  Base: Cardinal;
 begin
   if (FPendingCount = 0) or (FTarget = nil) or (TGpuVkSurface(FTarget).Image = VK_NULL_HANDLE) then
   begin
@@ -4486,8 +4915,19 @@ begin
     FBoundH := FHeight;
   end;
   C.Vk.CmdBindDescriptorSets(Cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, FLayout, 0, 1, @Set_, 0, nil);
-  C.Vk.CmdBindVertexBuffers(Cmd, 0, 1, @Buffer, @Offset);
   Variants := FVariants and not FCopy and not (FDual and C.Fast.DualSource);
+  if Variants and C.RenderingDepth then
+  begin
+    // A depth number per instance, from where the rendering instance's numbers are (the depth buffer is cleared
+    // when they run out), then the opaque interiors (pass one); the draws below test against them (pass two).
+    if C.DepthCount + Cardinal(FPendingCount) >= DepthNumbers - 1 then
+      C.ClearDepth;
+    Base := C.DepthCount;
+    C.DepthCount := Base + Cardinal(FPendingCount);
+    C.Vk.CmdPushConstants(Cmd, FLayout, Ord(VK_SHADER_STAGE_VERTEX_BIT), 0, SizeOf(Base), @Base);
+    DrawInteriors(Base);
+  end;
+  C.Vk.CmdBindVertexBuffers(Cmd, 0, 1, @Buffer, @Offset);
   First := 0;
   while First < FPendingCount do
   begin
@@ -4595,8 +5035,38 @@ begin
 end;
 
 procedure TGpuVkRenderer.UploadRamp(const ARow: Integer; const AData: Pointer);
+var
+  P: PCardinal;
+  I, K: Integer;
+  Linear: Boolean;
+  A, B, V: Integer;
 begin
   GpuVk.CopyToImage(FRamps.Image, FRamps.Use, 4, 0, ARow, GpuRampWidth, 1, AData, GpuRampWidth * 4);
+  if not FInteriors or (ARow < 0) or (ARow >= Length(FRampTexels)) then
+    Exit;
+  Move(AData^, FRampTexels[ARow][0], GpuRampWidth * 4);
+  // Opaque, and every channel within a level of the line from the first texel to the last.
+  P := @FRampTexels[ARow][0];
+  Linear := True;
+  for I := 0 to GpuRampWidth - 1 do
+  begin
+    if (FRampTexels[ARow][I] shr 24) <> 255 then
+    begin
+      Linear := False;
+      Break;
+    end;
+    for K := 0 to 2 do
+    begin
+      A := (P^ shr (8 * K)) and 255;
+      B := (FRampTexels[ARow][GpuRampWidth - 1] shr (8 * K)) and 255;
+      V := (FRampTexels[ARow][I] shr (8 * K)) and 255;
+      if Abs(V - (A + (B - A) * I / (GpuRampWidth - 1))) > 1 then
+        Linear := False;
+    end;
+    if not Linear then
+      Break;
+  end;
+  FRampLinear[ARow] := Linear;
 end;
 
 procedure TGpuVkRenderer.UploadGlyph(const X, Y, W, H: Integer; const AData: Pointer; const APitch: Integer);
