@@ -19,11 +19,12 @@ type
   /// <summary>Where the canvas takes its CPU geometry (FastCanvasGeometryEngine) or its text (FastCanvasTextEngine)
   /// from.</summary>
   TFastCanvasEngine = (
-    /// <summary>The platform's own: Direct2D and DirectWrite (Windows only).</summary>
+    /// <summary>The platform's own: Direct2D and DirectWrite on Windows; on Linux the text of Pango and FreeType
+    /// (FastCanvas.TextPango; the geometry there is Own).</summary>
     Native,
     /// <summary>Skia (System.Skia; sk4d.dll next to the program on Windows, libsk4d.so on Linux, linked into the
-    /// program on Android). On Windows add the units FastCanvas.GeometrySkia and FastCanvas.TextSkia to the program.
-    /// </summary>
+    /// program on Android). On Windows and Linux add the units FastCanvas.GeometrySkia and FastCanvas.TextSkia to the
+    /// program.</summary>
     Skia,
     /// <summary>FastCanvas's own (FastCanvas.GeometryOwn): geometry only, every platform. On Windows add the unit
     /// FastCanvas.GeometryOwn to the program.</summary>

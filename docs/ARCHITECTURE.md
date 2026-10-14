@@ -13,7 +13,7 @@ FMX itself (forms, controls, styles, layout, animations) is unchanged.
 | `FastCanvas.Gpu11`, `FastCanvas.Gpu12` | The Direct3D 11 and Direct3D 12 back ends of the renderer: surfaces, swap chains, pipelines. |
 | `Shaders/FastCanvas.hlsl` → `FastCanvas.Shaders.inc` | The canvas shaders (vs_4_0 / ps_4_0, DXBC, used by both back ends; for Vulkan also variants of the pixel shader, see "The Vulkan back end"). |
 | `FastCanvas.Text` | The text that does not depend on the engine: `TFastTextLayout` and its data (glyph runs, overhang, decorations), the layout cache, the glyph atlas, the engine registry (`FastCanvasTextEngine`). |
-| `FastCanvas.TextDWrite`, `FastCanvas.TextSkia` | The text engines: DirectWrite (Windows) and Skia paragraphs (every platform; the only one on Android and Linux): layouts, glyph coverage, glyph outlines, layouts with color glyphs rasterized on the CPU. |
+| `FastCanvas.TextDWrite`, `FastCanvas.TextPango`, `FastCanvas.TextSkia` | The text engines: DirectWrite (Windows), Pango with FreeType (Linux, the default there) and Skia paragraphs (every platform; the only one on Android): layouts, glyph coverage, glyph outlines, layouts with color glyphs rasterized on the CPU. |
 | `FastCanvas.Geometry`, `FastCanvas.GeometryD2D`, `FastCanvas.GeometryOwn`, `FastCanvas.GeometrySkia` | The CPU geometry (paths, their fill edges and stroke outlines, hit tests) and its engines: Direct2D (Windows), FastCanvas's own (Android, Linux) and Skia (`FastCanvasGeometryEngine`). |
 | `FastCanvas.Platform` | The window of a form for the back end on Windows (HWND), Android (`ANativeWindow`) and Linux (X11 window of the GTK drawing area), and its size in pixels. |
 | `FastCanvas.Device` | The device of the process (Direct3D 11 or 12), DXGI, Direct2D factory (CPU geometry), DirectWrite. |
@@ -48,7 +48,8 @@ seams, so the same recording, player and renderer run on Android and Linux on th
   coverage for the atlas (DirectWrite's alpha textures; Skia: the unhinted outline filled, plain coverage that the
   shader corrects for gamma and contrast alike), glyph outlines, and the CPU image of layouts with color glyphs. Skia
   lays text out with SkParagraph (HarfBuzz, line breaking, bidi, the platform's font fallback); color fonts are told
-  by name or by a glyph without an outline (Android names its fallback fonts "91##fallback").
+  by name or by a glyph without an outline (Android names its fallback fonts "91##fallback"). On Linux the Pango
+  engine takes the system's libraries instead (see "Text on Linux"), so that a Linux program needs no Skia.
 - **Windows** (`FastCanvas.Platform`, `TGpuWindowHandle`): the native window and display a form presents to, whether
   it can be drawn now, its pixel size. Android: the `ANativeWindow` of the form's surface holder, held while the
   canvas lives (FMX makes the canvas again on `surfaceCreated`/`surfaceChanged`). Linux: the X11 window of the GTK
@@ -78,7 +79,8 @@ finds the shader by its GLSL source.
 
 Linux programs are linked on Windows against a copy of a distribution's libraries (`tools\make-linux-sdk.ps1`, from
 WSL) with dcclinux64 and LLVM's lld (`tools\build-linux.ps1`); no PAServer is needed (`USAGE.md`, "Android and
-Linux").
+Linux"). On Linux the canvas links neither Skia engine: its text is Pango's, its geometry its own, and Skia's
+engines come in only with their units (then `libsk4d.so` goes next to the program).
 
 The PasVulkan header is patched for Delphi's 64-bit POSIX platforms, where `LongInt` and `LongWord` are 64-bit
 (`third_party\pasvulkan\PROVENANCE.md`).
@@ -165,6 +167,46 @@ that Android and Linux draw what the stock Direct2D canvas draws on Windows:
   differ by 1910 pixels of area in total (Skia's engine: 17561); a pixel more than 0.3 apart in 17 cases, most of
   them Direct2D's bevels next to segments of no length (it joins there as if the segment had a direction) and dash
   ends on curves. Its `Widen` takes 1.15 times Direct2D's CPU time over the cases (Skia's 4.4 times).
+
+## Text on Linux
+
+`FastCanvas.TextPango` lays text out with Pango and makes its glyphs with FreeType, all loaded with `dlopen` at the
+first layout (Pango, PangoFT2, GObject, GLib, HarfBuzz, fontconfig, FreeType; GTK 3, which FMX needs on Linux, has
+them installed). Only Pango's documented structures are read (glyph strings, items, layout lines and runs; FreeType's
+face, glyph slot and bitmap), their layouts checked with `offsetof` against Pango 1.57 and FreeType 2.14 and
+asserted by size at compile time.
+
+- **Layout**: one PangoFT2 font map for the process (fontconfig's fonts and fallback; when FMX's `TFontManager` has
+  added fonts, which FMUX adds to fontconfig's configuration, the map is told that the configuration changed) and a
+  context per base direction (FMX's `RightToLeft`; the direction is not guessed from the text), glyph positions not
+  rounded. A layout is
+  a `PangoLayout` with the text in UTF-8 (byte offsets mapped to UTF-16 indices both ways), a font description of
+  `TFont` with an absolute size (FMX's sizes are pixels), attributes for the ranges of other fonts, decorations and
+  colors (a color only makes Pango end a run; the canvas draws runs in their colors), and the box's width with
+  `PANGO_WRAP_WORD_CHAR` for `WordWrap`. Without `WordWrap` lines are as long as they are (width -1) and the layout is
+  moved by the alignment; trimming ellipsizes at the end (`PANGO_ELLIPSIZE_END`), every paragraph's one line without
+  `WordWrap`, the lines that fit the box's height with it (Pango ellipsizes only a paragraph that does not fit: when
+  whole paragraphs are left out below the box, the text is laid out again ending in "…" after the last line that
+  fits). Word trimming looks for the ellipsis runs Pango made
+  (`PANGO_ANALYSIS_FLAG_IS_ELLIPSIS`: their items are the text left out), goes back to the last line break opportunity
+  of the line (Pango's log attributes) and lays out the shortened text with "…" in place again, keeping a map of its
+  indices to the layout's; Pango widens an ellipsis to the box's edge, which the text's width leaves out (the
+  glyph's own advance from HarfBuzz). The vertical alignment moves the layout in the box.
+- **Runs**: the layout iterator's runs, in visual order, become the glyph runs at once (origin: the run's logical x
+  and the line's baseline; glyph x from the advances and offsets, y offsets downwards), with the underline and
+  strikeout rectangles from the font's metrics and the ink of the layout as the overhang. The PangoLayout is released
+  then and made again for hit testing (`pango_layout_xy_to_index`, `pango_layout_index_to_pos` for carets,
+  `pango_layout_line_get_x_ranges` and the lines' y ranges for regions).
+- **Faces**: the fontconfig pattern of a run's PangoFont (`pango_fc_font_get_pattern`) names its file and face index,
+  synthetic emboldening and the slant matrix; each such face is one object (the glyph cache's key) with an `FT_Face`
+  of the engine's own `FT_Library`, used under a lock of its own (glyphs are made on the render thread). The em size of
+  a run is the scale of Pango's HarfBuzz font (for bitmap fonts the requested size, not the strike's).
+- **Glyphs**: `FT_Load_Glyph` at the em size, translated by the subpixel position with `FT_Set_Transform` (after the
+  hinting), unhinted or lightly hinted, `FT_Render_Glyph` into 8-bit coverage (1-bit for aliased text); outlines by
+  `FT_Outline_Decompose` (quadratic segments as the cubics of the same curves). Layouts with color glyphs (fonts with
+  color tables or that fontconfig marks as color) are drawn on the CPU into the image the canvas keeps: coverage
+  blended in the text's colors, color bitmaps (CBDT, sbix; `FT_LOAD_COLOR` at the largest strike) scaled with a box
+  filter, decorations, clipped to the layout box when ink lies outside it.
 
 ## Windows and present
 

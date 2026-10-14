@@ -17,6 +17,7 @@ __recovery/
 bin/
 bin-dev/
 bin-base/
+bin-noskia/
 dcu/
 Win32/
 Win64/

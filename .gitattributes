@@ -16,9 +16,10 @@
 *.cmd     text eol=crlf
 
 *.md      text eol=lf
+# Shell scripts run in WSL from the Windows checkout
+*.sh      text eol=lf
 *.csv     text eol=lf
 *.json    text eol=lf
-*.sh      text eol=lf
 
 *.res     binary
 *.png     binary

@@ -3,8 +3,9 @@ unit FastCanvas.Text;
 { Text of FastCanvas: what the canvas needs of a text layout, whatever lays it out.
 
   TFastTextLayout implements the FMX TTextLayout contract (FMX.TextLayout.pas:48-177) for the canvas; a text engine
-  lays the text out and makes its glyphs: DirectWrite (FastCanvas.TextDWrite, Windows, the default there) or Skia
-  (FastCanvas.TextSkia, every platform, the only one on Android and Linux); FastCanvasTextEngine chooses one. A layout
+  lays the text out and makes its glyphs: DirectWrite (FastCanvas.TextDWrite, Windows, the default there), Pango with
+  FreeType (FastCanvas.TextPango, Linux, the default there) or Skia (FastCanvas.TextSkia, every platform, the only one
+  on Android); FastCanvasTextEngine chooses one. A layout
   is analysed once into glyph runs (TFastLayoutData, shared through a cache by all layouts with the same text and
   parameters); the canvas draws the runs as GPU quads that sample glyph bitmaps from an atlas texture.
   TFastGlyphCache owns the atlas: the engine rasterizes glyphs (grayscale, ClearType or aliased coverage) on demand,
@@ -206,14 +207,15 @@ var
   /// <summary>Set by FastCanvas.Canvas: draws layout data on its canvas.</summary>
   FastDrawLayout: TFastDrawLayoutProc;
   /// <summary>The engine of the text: read by InstallFastCanvas, which registers its layout class for the canvas.
-  /// Android and Linux: Skia whatever it says. Own is a geometry engine only (no text engine of that kind).</summary>
+  /// Native: DirectWrite on Windows, Pango and FreeType on Linux. Android: Skia whatever it says. Own is a geometry
+  /// engine only (no text engine of that kind; on Linux it stands for Native).</summary>
   FastCanvasTextEngine: TFastCanvasEngine =
-    {$IFDEF MSWINDOWS}TFastCanvasEngine.Native{$ELSE}TFastCanvasEngine.Skia{$ENDIF};
+    {$IFDEF ANDROID}TFastCanvasEngine.Skia{$ELSE}TFastCanvasEngine.Native{$ENDIF};
 
 /// <summary>Called by the engine units (initialization).</summary>
 procedure FastRegisterTextEngine(const AKind: TFastCanvasEngine; const AClass: TFastTextEngineClass);
-/// <summary>The class of the engine FastCanvasTextEngine chooses (Skia on Android and Linux). Raises when the unit of
-/// that engine is not in the program.</summary>
+/// <summary>The class of the engine FastCanvasTextEngine chooses (Skia on Android). Raises when the unit of that
+/// engine is not in the program.</summary>
 function FastTextEngineClass: TFastTextEngineClass;
 /// <summary>The key of a layout's parameters and text in the layout cache.</summary>
 function FastLayoutCacheKey(const ALayout: TTextLayout): string;
@@ -243,17 +245,25 @@ begin
 end;
 
 function FastTextEngineClass: TFastTextEngineClass;
+const
+  Units: array[TFastCanvasEngine] of string = (
+    {$IFDEF LINUX}'FastCanvas.TextPango'{$ELSE}'FastCanvas.TextDWrite'{$ENDIF}, 'FastCanvas.TextSkia',
+    'FastCanvas.TextSkia');
 var
   Kind: TFastCanvasEngine;
 begin
-{$IFDEF MSWINDOWS}
+{$IF Defined(MSWINDOWS)}
   Kind := FastCanvasTextEngine;
+{$ELSEIF Defined(LINUX)}
+  Kind := FastCanvasTextEngine;
+  if Kind = TFastCanvasEngine.Own then
+    Kind := TFastCanvasEngine.Native;
 {$ELSE}
   Kind := TFastCanvasEngine.Skia;
 {$ENDIF}
   Result := GEngines[Kind];
   if Result = nil then
-    raise Exception.Create('FastCanvas: the text engine is not in the program (add FastCanvas.TextSkia)');
+    raise Exception.CreateFmt('FastCanvas: the text engine is not in the program (add %s)', [Units[Kind]]);
 end;
 
 { TFastTextEngine }

@@ -2,7 +2,8 @@
 .SYNOPSIS
   Does a Linux program of FastCanvas (PortProbe), linked against the default SDK (Ubuntu 22.04, glibc 2.35), run on
   other distributions? Without a screen and without touching the desktop:
-  1. The glibc symbol versions the program and libsk4d.so need (objdump -T in WSL) must be at most -MaxGlibc.
+  1. The glibc symbol versions the program and libsk4d.so (when it is next to the program: built with the Skia
+     engines) need (objdump -T in WSL) must be at most -MaxGlibc.
   2. In a Docker container of each image, and in the WSL distribution -Distro: a private Xvfb, PortProbe on it for a
      few seconds (FMX's Linux platform: libfmux, GTK 3, X11; FastCanvas on Vulkan, Mesa's lavapipe), the frame
      FastCanvas presented last saved as a PNG (look at it: the top says what the canvas runs on).
@@ -44,7 +45,7 @@ function Check([string] $Name, [bool] $Ok) {
 }
 
 # 1. The newest GLIBC_x.y symbol version each file needs.
-foreach ($f in $exe, (Join-Path $binDir 'libsk4d.so')) {
+foreach ($f in @($exe, (Join-Path $binDir 'libsk4d.so')) | Where-Object { Test-Path $_ }) {
   $newest = wsl -d $Distro -u root --exec objdump -T (WslPath $f) |
     Select-String -Pattern 'GLIBC_([0-9.]+)' -AllMatches | ForEach-Object { $_.Matches } |
     ForEach-Object { [version]($_.Groups[1].Value + '.0') } | Sort-Object -Unique | Select-Object -Last 1
