@@ -1,7 +1,6 @@
 # How FastCanvas works
 
-FastCanvas replaces the canvas and the 3D context of FireMonkey on Windows, and the canvas on Android (Linux: it
-compiles). It is written from scratch on Direct3D 11, Direct3D 12 or Vulkan (the only back end on Android and Linux);
+FastCanvas replaces the canvas and the 3D context of FireMonkey on Windows, Android and Linux. It is written from scratch on Direct3D 11, Direct3D 12 or Vulkan (the only back end on Android and Linux);
 FMX itself (forms, controls, styles, layout, animations) is unchanged.
 
 ## Units
@@ -15,7 +14,7 @@ FMX itself (forms, controls, styles, layout, animations) is unchanged.
 | `Shaders/FastCanvas.hlsl` → `FastCanvas.Shaders.inc` | The canvas shaders (vs_4_0 / ps_4_0, DXBC, used by both back ends). |
 | `FastCanvas.Text` | The text that does not depend on the engine: `TFastTextLayout` and its data (glyph runs, overhang, decorations), the layout cache, the glyph atlas, the engine registry (`FastCanvasTextEngine`). |
 | `FastCanvas.TextDWrite`, `FastCanvas.TextSkia` | The text engines: DirectWrite (Windows) and Skia paragraphs (every platform; the only one on Android and Linux): layouts, glyph coverage, glyph outlines, layouts with color glyphs rasterized on the CPU. |
-| `FastCanvas.Geometry`, `FastCanvas.GeometryD2D`, `FastCanvas.GeometrySkia` | The CPU geometry (paths, their fill edges and stroke outlines, hit tests) and its engines: Direct2D (Windows) and Skia (`FastCanvasGeometryEngine`). |
+| `FastCanvas.Geometry`, `FastCanvas.GeometryD2D`, `FastCanvas.GeometryOwn`, `FastCanvas.GeometrySkia` | The CPU geometry (paths, their fill edges and stroke outlines, hit tests) and its engines: Direct2D (Windows), FastCanvas's own (Android, Linux) and Skia (`FastCanvasGeometryEngine`). |
 | `FastCanvas.Platform` | The window of a form for the back end on Windows (HWND), Android (`ANativeWindow`) and Linux (X11 window of the GTK drawing area), and its size in pixels. |
 | `FastCanvas.Device` | The device of the process (Direct3D 11 or 12), DXGI, Direct2D factory (CPU geometry), DirectWrite. |
 | `FastCanvas.Hdr`, `Shaders/FastOutput.hlsl` | HDR output: the setting, what the display of a window can show (DXGI outputs, SDR white level), the pass that turns a window's frame into scRGB. |
@@ -40,8 +39,9 @@ seams, so the same recording, player and renderer run on Android and Linux on th
 
 - **Geometry** (`TFastGeometryEngine`): paths from FMX points, rectangles, rounded rectangles, ellipses, lines;
   `Flatten` and `Widen` (with a `TFastStroke`: width, caps, joins, dashes) into the canvas's edge sink, which flattens
-  curves to its tolerance; `Contains`. Direct2D on Windows by default, Skia (`SkPath`, `SkPaint.getFillPath`)
-  elsewhere. Glyph outlines come from the text engine as FMX path points and are filled through it too.
+  curves to its tolerance; `Contains`. Direct2D on Windows by default, FastCanvas's own engine on Android and Linux (see
+  "The own geometry engine"), Skia (`SkPath`, `SkPaint.getFillPath`) where chosen. Glyph outlines come from the text
+  engine as FMX path points and are filled through it too.
 - **Text** (`TFastTextEngine`): the layout class (`TFastTextLayout` descendants fill `TFastLayoutData`: glyph runs
   with an engine font face that keys the glyph cache, ink overhang, underline and strikethrough rectangles), glyph
   coverage for the atlas (DirectWrite's alpha textures; Skia: the unhinted outline filled, plain coverage that the
@@ -64,10 +64,15 @@ suboptimal while the display is turned); the frame is blitted into the `R8G8B8A8
 to the background) ends the window's presenting thread, which drops its swap chain; the next frame of the window
 drops the surface and is not presented, and FMX makes the canvas again for the next native window. On Android the
 render thread waits until the presenting thread has taken the frame before (it presents with `FIFO`), so the frames
-keep the display's pace as when the render thread presented itself. The Vulkan 3D context builds there too (a
-`TForm3D` window would get its native window through `FastCanvas.Platform`) but is not used: FMX ships the Direct3D
-sources of its shaders, whose variables give the context the constant layout and the key of the SPIR-V, on Windows
-only.
+keep the display's pace as when the render thread presented itself. The Vulkan 3D context runs there too (a
+`TForm3D` window gets its native window through `FastCanvas.Platform`): FMX ships the Direct3D sources of its
+shaders, whose variables lay the constants out, on Windows only, so the generated include keeps those variables with
+each shader's SPIR-V, and off Windows `FastCanvas.Context3D` asks the device context for them (`ShaderLayout`), which
+finds the shader by its GLSL source.
+
+Linux programs are linked on Windows against a copy of a distribution's libraries (`tools\make-linux-sdk.ps1`, from
+WSL) with dcclinux64 and LLVM's lld (`tools\build-linux.ps1`); no PAServer is needed (`USAGE.md`, "Android and
+Linux").
 
 The PasVulkan header is patched for Delphi's 64-bit POSIX platforms, where `LongInt` and `LongWord` are 64-bit
 (`third_party\pasvulkan\PROVENANCE.md`).
@@ -100,8 +105,9 @@ stream is executed on the recording thread at `EndScene`.
   inverse kind for `ExcludeClipRect`); instances carry its index and the shader tests the pixel center.
 - **Paints** (a table too): linear and radial gradients (256-texel ramps in a shared texture), bitmap brushes (sampled
   in the shader, tile modes included), dash patterns.
-- **Paths** are polygons: the render thread flattens a path once with the Direct2D factory (`Simplify` for fills,
-  `Widen` for strokes, so joins, caps and dashes are exactly Direct2D's), splits the edges into horizontal bands and
+- **Paths** are polygons: the render thread flattens a path once with the geometry engine (on Windows the Direct2D
+  factory: `Simplify` for fills, `Widen` for strokes, so joins, caps and dashes are exactly Direct2D's; on Android and
+  Linux the own engine, which strokes as Direct2D does), splits the edges into horizontal bands and
   stores them in an edge table; the shader computes the exact area of the pixel square inside the polygon from the
   edges of its band (even-odd for FMX fills, non-zero for strokes). Results are cached by path and scale; shapes that
   move keep their edges (the offset goes into the instance matrix). The table keeps a persistent part and a per-frame
@@ -114,6 +120,45 @@ stream is executed on the recording thread at `EndScene`.
   output (dual-source blending), switched on at the first ClearType glyph of a window frame. Color fonts
   (emoji) are rasterized once into images; rotated and very large text is drawn from glyph outlines.
 - **No Direct2D drawing.** Direct2D only serves the CPU geometry; everything is drawn by the shaders above.
+
+## The own geometry engine
+
+`FastCanvas.GeometryOwn` makes the polygons of fills and stroke outlines without a library, as Direct2D makes them, so
+that Android and Linux draw what the stock Direct2D canvas draws on Windows:
+
+- **Geometries** are FMX path points; rectangles, rounded rectangles (corners as cubic quarter arcs) and ellipses
+  start where Direct2D's start and run the same way round (clockwise on screen from the top left corner, the top of
+  the left side, the leftmost point), so dash patterns start in the same places. Fills go into the edge sink with the
+  path's rule, curves flattened with the edge sink's formula at 0.6 of the tolerance: as densely as Direct2D
+  flattens (measured), which matches its fills best.
+- **Strokes**: every figure is flattened (curves also finer where the stroke is wide: a turn of `a` per segment puts
+  the outer side `w/2 * a^2 / 8` inside the true offset), points of curves remembered as such. Dashes (Direct2D's
+  patterns in stroke widths, an odd custom pattern taken twice, the offset moving the pattern towards the start) are
+  cut along the flattened figure, started again at every figure; on a closed figure the last dash goes on into the
+  first, as Direct2D does. Each dash or open figure becomes one polygon, a ribbon: side A forward, the end cap, side B
+  backwards, the start cap; a closed figure two loops (side A forward, side B backwards). At a vertex of the path
+  the outer side gets the join (miter up to 10 half widths from the vertex, clipped there; round; bevel; within the
+  tolerance of each other the miter point) and the inner side goes through the vertex itself, so the ribbon overlaps
+  itself there, as Direct2D's outlines do. At a point of a flattened curve, and where one curve goes on into another,
+  both sides take the offset points along the normal (the bisector of the segments), unless the stroke is wider than
+  the segments allow (the inner offset lines would cross before the next point: then round outside, through the
+  point inside). Round caps and joins are cubic quarter arcs flattened with the sink's formula at the tolerance, as
+  Direct2D's are; caps are square to the curve's tangent at the end (the segment's direction turned by half the
+  curve's turn per segment), not to the last segment. A figure of no length draws a dot (a square along the path or
+  a circle), a lone MoveTo nothing; the corners of a rectangle are outlined exactly (Direct2D outlines rectangles
+  without overlaps).
+- **Why it is correct at any width**: every polygon runs the same way round (negative area in y-down coordinates),
+  and each is the boundary of an orientation-keeping map of the stroke's pieces (segments as quadrilaterals, joins as
+  sectors), so its winding number at a point is the number of pieces covering the point: never 0 inside the stroke,
+  never negative. The canvas fills outlines with the non-zero rule, which covers the union; where pieces overlap near
+  the inner side of a sharp vertex the coverage of a pixel saturates, as with Direct2D's outlines.
+- **Contains** flattens the figures at 0.25 (Direct2D's default flattening tolerance) and counts crossings (even-odd)
+  or the winding number (non-zero).
+- `src\Probe\GeometryProbe.dpr` compares it with Direct2D on the CPU, with the shader's exact coverage per pixel: 245
+  cases (joins, caps, dash styles and offsets, curves with cusps and loops, widths from 0.3 to 90, degenerate figures)
+  differ by 1910 pixels of area in total (Skia's engine: 17561); a pixel more than 0.3 apart in 17 cases, most of
+  them Direct2D's bevels next to segments of no length (it joins there as if the segment had a direction) and dash
+  ends on curves. Its `Widen` takes 1.15 times Direct2D's CPU time over the cases (Skia's 4.4 times).
 
 ## Windows and present
 
@@ -227,8 +272,10 @@ own for each back end, on the canvas's device:
   `tools/compile-fmx-shaders-vk.ps1` rewrites the GLSL into Vulkan GLSL with the uniforms of a stage in one block at
   the byte offsets of the Direct3D variables (matrices transposed; the few shaders whose GLSL computes otherwise than
   their bytecode patched), so the constants `FastCanvas.Context3D` lays out are the same bytes on every back end. The
-  context finds a shader's SPIR-V by a hash of its GLSL and of its Direct3D variables. A `TForm3D` draws into the frame
-  surface of a canvas window, presented as the canvas's windows are.
+  context finds a shader's SPIR-V by a hash of its GLSL and of its Direct3D variables; the include keeps those
+  variables too, for the platforms without Direct3D sources (found by the GLSL alone there; the script checks that a
+  source and stage has one layout). The SPIR-V targets Vulkan 1.1. A `TForm3D` draws into the frame surface of a
+  canvas window, presented as the canvas's windows are.
 - Bitmaps of the canvas are used in place as textures and render targets: a `TViewport3D` renders and copies its image
   into the form's bitmap on the GPU (the stock contexts read it back through the CPU), and the effects filter canvas
   bitmaps without leaving the GPU.

@@ -6,7 +6,7 @@
   code: about 1.4 to 1.9 times the frame time on scenes with many shapes, strings or controls, measured 2026-10-13);
   the GPU work is the same.
 - Windows 10 or 11; Android 7.0 (API 24) or later on arm64 (Vulkan back end only, see "Android and Linux"); Linux
-  x64 under X11 (Vulkan back end; it compiles, it has not run yet).
+  x64 with GTK 3 on X11 (Vulkan back end; tested on Ubuntu 26.04 in WSL2 with WSLg, on Mesa's lavapipe).
 - Direct3D 11 back end: a GPU with feature level 10_0 or higher (WARP when there is none).
 - Direct3D 12 back end: a GPU with feature level 11_0 or higher.
 - Vulkan back end: Vulkan 1.3 with dynamic rendering, synchronization2 and timeline semaphores, or Vulkan 1.1 or 1.2
@@ -91,13 +91,18 @@ All settings are global variables, set before `Application.Initialize` unless no
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `FastCanvasGeometryEngine` | `Native` (Windows), `Skia` | Paths, their fill edges and stroke outlines: `Native` is Direct2D, `Skia` is Skia (`FastCanvas.GeometrySkia`; the only one on Android and Linux). Read when the first canvas is made. |
-| `FastCanvasTextEngine` | `Native` (Windows), `Skia` | Text layout and glyphs: `Native` is DirectWrite, `Skia` is Skia's paragraphs (`FastCanvas.TextSkia`: HarfBuzz shaping, the platform's font fallback; the only one on Android and Linux). Read by `InstallFastCanvas`. |
+| `FastCanvasGeometryEngine` | `Native` (Windows), `Own` | Paths, their fill edges and stroke outlines: `Native` is Direct2D (Windows only; elsewhere it stands for `Own`), `Own` is FastCanvas's own engine (`FastCanvas.GeometryOwn`: no library; the default on Android and Linux), `Skia` is Skia (`FastCanvas.GeometrySkia`). Read when the first canvas is made. |
+| `FastCanvasTextEngine` | `Native` (Windows), `Skia` | Text layout and glyphs: `Native` is DirectWrite, `Skia` is Skia's paragraphs (`FastCanvas.TextSkia`: HarfBuzz shaping, the platform's font fallback; the only one on Android and Linux). `Own` is no text engine. Read by `InstallFastCanvas`. |
 
-On Windows the Skia engines are linked only when the program uses their units (`FastCanvas.GeometrySkia`,
-`FastCanvas.TextSkia`), and then need `sk4d.dll` next to the executable. Skia's text differs from DirectWrite's by
-a fraction of a pixel in line height (paragraphs drift by a pixel every few lines), its glyphs are unhinted outlines
-(DirectWrite's grayscale is about as soft), and FMX fonts added through `TFontManager` are not known to it.
+On Windows the other engines are linked only when the program uses their units (`FastCanvas.GeometryOwn`,
+`FastCanvas.GeometrySkia`, `FastCanvas.TextSkia`); the Skia ones then need `sk4d.dll` next to the executable. The own
+geometry engine strokes as Direct2D does (joins, the miter limit, caps, dash patterns and their places, curves
+flattened as densely): on the benchmark's scenes its screenshots differ from Direct2D's in 0.35 % of the pixels of
+`strokes`, 0.17 % of `paths` (antialiasing at curves and dash ends) and nowhere else, at the same or a higher frame
+rate (`BENCHMARKS.md`). Skia's geometry differs more (dash phase, curve flattening) and widens dashed strokes more
+slowly. Skia's text differs from DirectWrite's by a fraction of a pixel in line height (paragraphs drift by a pixel
+every few lines), its glyphs are unhinted outlines (DirectWrite's grayscale is about as soft), and FMX fonts added
+through `TFontManager` are not known to it.
 
 Functions: `FastCanvasSync` (wait until the render thread has executed everything recorded), `FastCanvasRenderBusyMs`,
 `FastCanvasDrawCalls`, `FastCanvasDeviceResets` (diagnostics), `FastCanvasSystemTextAntialias` (what `System` text
@@ -414,9 +419,10 @@ but for a few pixels of strokes), at about its speed (`BENCHMARKS.md`). It is th
   `FastCanvas.VkFmxShaders.inc` (run it again, with the Vulkan SDK, when a Delphi update changes FMX's shaders). A
   shader FMX does not ship (an application's `TContextShader` or material) raises `EContext3DException`. The descriptors
   of a draw are pushed (`VK_KHR_push_descriptor`), or written into a set of the canvas's descriptor pools where the
-  device lacks that extension (`FASTCANVAS_VK_NOPUSH=1` takes that path on any GPU). It runs on Windows only: FMX
-  ships the Direct3D sources of its shaders, whose variables give the context the constant layout and the key of the
-  SPIR-V, there only (`TFastContext3DVk.Valid` is `False` elsewhere).
+  device lacks that extension (`FASTCANVAS_VK_NOPUSH=1` takes that path on any GPU). The constant layout of each
+  shader (the variables of its Direct3D source: offsets, sizes, texture units) is kept in the generated include with
+  its SPIR-V and attribute locations, so the context runs where FMX ships no Direct3D sources too (Android, Linux):
+  there it finds a shader by its GLSL source alone. The SPIR-V is version 1.3, for Vulkan 1.1 devices.
 - **Memory**: textures and buffers share blocks of device memory (32 MB device-local, 8 MB host-visible; larger
   resources get memory of their own), so thousands of bitmaps take a few memory objects. `FASTCANVAS_VK_STATS=<file>`
   appends the peak numbers of memory objects and allocations when the device goes.
@@ -431,11 +437,10 @@ drawn without the ray-traced effects.
 
 ## Android and Linux
 
-There the canvas runs on its Vulkan back end, with Skia's geometry and text engines (Skia is part of Delphi's RTL:
-linked into the library on Android; on Linux `libsk4d.so` of `Redist\linux64` goes next to the program). The Vulkan 3D
-context builds there but does not run yet: FMX's shaders have no Direct3D sources off Windows, and the context takes
-their variables (`TFastContext3DVk.Valid` is `False`, `InstallFastContext3DVk` does nothing). The search path needs
-`src\Canvas` and `third_party\pasvulkan\src` only.
+There the canvas runs on its Vulkan back end, with FastCanvas's own geometry engine and Skia's text engine (Skia is
+part of Delphi's RTL: linked into the library on Android; on Linux `libsk4d.so` of `Redist\linux64` goes next to the
+program), and the Vulkan 3D context (`InstallFastContext3DVk`) draws `TViewport3D`, `TForm3D`, the effects and the
+ray-traced effects as on Windows. The search path needs `src\Canvas` and `third_party\pasvulkan\src` only.
 
 ```pascal
 begin
@@ -443,6 +448,8 @@ begin
   try
     TFastDevice.Ensure;   // EFastDevice when there is no Vulkan device the canvas can use, with the reason
     InstallFastCanvas;
+    if TFastContext3DVk.Valid then
+      InstallFastContext3DVk;
   except
     // No install: FMX's own canvas (TCanvasGpu on Android) draws the forms.
   end;
@@ -450,10 +457,10 @@ begin
   ...
 ```
 
-`src\Probe\PortProbe.dpr` does this, shows the device, its Vulkan version and limits, and remembers a start with
-FastCanvas that crashed or raised (the next start takes FMX's canvas and says why); on Windows it also draws a cube
-in a `TViewport3D` with the Vulkan 3D context. With FastCanvas off Windows, FMX's own 3D context would draw 3D
-controls; that has not been tried.
+`src\Probe\PortProbe.dpr` does this, shows the device, its Vulkan version and limits and the engines, draws a cube in a
+`TViewport3D` with the Vulkan 3D context (`--shadows=1 --ao=1 --reflect=1`: with the ray-traced effects, a floor and a
+pole; `--effects=1`: FMX effects on two controls), and remembers a start with FastCanvas that crashed or raised (the
+next start takes FMX's canvas and says why).
 
 Android:
 
@@ -473,19 +480,45 @@ Android:
   (`src\Probe\PortProbe.dproj` has them). Installing: `adb install -r <apk>` with USB debugging on.
 - Without a phone: an Android 14 x86_64 emulator image (`system-images;android-34;google_apis;x86_64`) runs the
   arm64 library through its ARM translation, with the host GPU's Vulkan (`emulator -avd <name> -gpu host`); PortProbe
-  was tested so.
+  was tested so (before the 3D context and the own geometry engine came to Android).
 
-Linux (compiles with `tools\check-port.ps1`, has not run yet):
+Linux:
 
-- X11 only: FMX's Linux platform (FMUX) runs GTK 3; the canvas makes the form's drawing area a native window and
-  presents to its X11 window (`VK_KHR_xlib_surface`, the XID and the display through GDK, loaded at run time). In a
-  Wayland session the program has to run through XWayland (`GDK_BACKEND=x11`); Wayland surfaces are not supported.
-- Running it needs `libvulkan.so.1` and a Vulkan 1.1 driver with the extensions above (Mesa: radv, anv, nvk; lavapipe
-  on the CPU), GTK 3, and `libsk4d.so` next to the program.
-- Building a Linux program needs the Linux SDK in the IDE (Tools > Options > Deployment > SDK Manager, a Linux 64-bit
-  profile pulled from a Linux machine running PAServer: `LinuxPAServer37.0.tar.gz`, a download of Embarcadero's, not
-  part of this installation), and PAServer there to deploy and run. WSL2 with WSLg can be that machine (X11 through
-  XWayland; Vulkan through Mesa's `dzn` driver over Direct3D 12, or lavapipe).
+- FMX's Linux platform (FMUX, a GTK 3 library embedded in the program, written to `~/.fmxlinux` at the first start)
+  runs GTK on X11: `FMX.Platform.Linux` calls `FmuxInit(FMUX_INIT_NOWAYLAND)`, so in a Wayland session the program
+  runs through XWayland without `GDK_BACKEND=x11`. The canvas makes the form's drawing area a native window and
+  presents to its X11 window (`VK_KHR_xlib_surface`, the XID and the display through GDK, loaded at run time).
+- Running it needs `libvulkan.so.1` and a Vulkan 1.1 driver with the extensions under "Requirements" (Mesa: radv,
+  anv, nvk; lavapipe on the CPU), GTK 3 (`libgtk-3.so.0`), and `libsk4d.so` next to the program.
+- Building without PAServer: Delphi links Linux programs against a copy of the target's libraries, the platform SDK.
+  `tools\make-linux-sdk.ps1 [-Distro Ubuntu-26.04] [-Sdk D:\LinuxSDK\ubuntu-26.04] [-Install]` makes one from a WSL
+  distribution (the top-level files of `/usr/lib/x86_64-linux-gnu` and `/usr/lib/gcc/x86_64-linux-gnu/<n>`,
+  `/lib64/ld-linux-x86-64.so.2` and `/usr/include`, symbolic links dereferenced, `lib` a junction to `usr\lib`;
+  `-Install` first installs `libc6-dev` and `libgcc-<n>-dev`, which hold the startup objects and linker scripts):
+  about 0.9 GB. Programs linked against it need that distribution's glibc or a later one (an SDK made from an older
+  distribution reaches more systems).
+- `tools\build-linux.ps1 -Project <dpr> -SearchPath <dirs> [-Config Debug] [-Sdk <dir>]` builds with `dcclinux64`
+  into `bin\Linux64\<Config>\<name>` and copies `libsk4d.so` next to it; with a `.dproj` that has the Linux64 platform
+  it runs msbuild instead (output where the project puts it). dcclinux64 links with LLVM's lld (`bin64\ld.lld.exe`, on
+  the PATH) and is told about the SDK with `--syslibroot:<sdk>` (the linker's sysroot) and `--libpath:<dirs>`: Delphi's
+  `lib\linux64\release` (`librtlhelper`), the SDK's `usr\lib\x86_64-linux-gnu` and `usr\lib\gcc\x86_64-linux-gnu\<n>`;
+  msbuild takes the same as `/p:DCC_SysLibRoot=<sdk>` and `/p:DCC_LibraryPath=<dirs>` (what an IDE SDK profile sets
+  as `Profile_sysroot` and `Profile_LibraryPath`). Delphi's `lib\linux64\release` must be on the resource path too,
+  and `-GD` (a map file with a `.drc`) fails on `FMX.Filter.res`, which Delphi 13 does not ship for Linux64: the
+  script makes the map with `-G`.
+- Running in WSL2 with WSLg (its windows appear on the Windows desktop):
+  `wsl -d Ubuntu-26.04 -- timeout 60 /mnt/d/<...>/bin/Linux64/Release/PortProbe`. In WSL only Mesa's lavapipe (Vulkan
+  1.4 on the CPU, with ray queries) is a usable Vulkan device. `FASTCANVAS_VK_DEBUG=<file>` works with the
+  distribution's `vulkan-validationlayers`. Screenshots: PortProbe `--shot=<png> --seconds=<s>` saves the frame
+  FastCanvas presented (`FastCanvasCaptureWindow`), or `xwd -id <window> | magick xwd:- <png>` (the root window
+  cannot be read under XWayland). WSLg's window manager does not close windows for `wmctrl`/`xdotool`; a
+  `WM_DELETE_WINDOW` client message closes them as a title bar's close button does.
+- Tested (2026-10-14, Ubuntu 26.04 in WSL2, lavapipe): PortProbe draws the scene, its text with Cyrillic and color
+  emoji, the controls (clicks work), the cube by the Vulkan 3D context with ray-traced shadows, ambient occlusion and
+  reflections, and FMX's effects, each pixel for pixel as Win64 on an RX 9070 XT outside the text (other fonts); with
+  `GDK_SCALE=2`, with sizes changed from code, closed by the window manager and by itself, 2.5 minutes without memory
+  growth after the caches fill; the validation layer (with synchronization validation, also with
+  `FASTCANVAS_VK_API=1.1` and `FASTCANVAS_VK_NOPUSH=1`) reports nothing. The benchmark is Windows-only.
 
 ## Threads
 
@@ -514,14 +547,14 @@ Linux (compiles with `tools\check-port.ps1`, has not run yet):
 - `FastCanvasCaptureWindow`: the frame a window presented last, as floats (checks of HDR output).
 - `ReportMemoryLeaksOnShutdown := True` in the program: FastCanvas frees everything it made at shutdown.
 - The benchmark runs on Vulkan with `--canvas=fcvk` (also `fcvkrt`, `fcvkao`, `fcvksoft`, `fcvkrefl` with ray-traced
-  effects, `fcvksep` with FMX's stock 3D context, `fcvkskia` with the Skia geometry and text engines of Android and
-  Linux).
+  effects, `fcvksep` with FMX's stock 3D context, `fcvkskia` with the Skia geometry and text engines, `fcvkown` with the
+  own geometry engine of Android and Linux).
 
 ## Limitations
 
-- Windows (Win64, Win32) and Android (arm64); Linux x64 compiles but has not run. On Android and Linux: the canvas on
-  Vulkan only, no 3D context of its own (see "Android and Linux"), no ClearType, no HDR output, no Direct2D
-  fallbacks (`D2DText`).
+- Windows (Win64, Win32), Android (arm64) and Linux (x64, X11). On Android and Linux: the canvas and the 3D context on
+  Vulkan only, no ClearType, no HDR output, no Direct2D fallbacks (`D2DText`). The Vulkan 3D context with the own
+  geometry engine has not run on an Android device yet.
 - Printing (`TPrinter` canvases) is not supported.
 - Text is grayscale antialiased by default (as FMX's stock Direct2D canvas draws it); ClearType
   (`FastCanvasTextAntialias`) only in the frames of windows, not in bitmaps, transparent forms and `TForm3D`. No

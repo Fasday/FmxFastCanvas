@@ -115,8 +115,9 @@ const
   /// best so (src\Probe\GeometryProbe.dpr). Round joins and caps take the tolerance as it is, as Direct2D's.
   /// </summary>
   Flatness = 0.6;
-  /// <summary>Dashes of one stroke at most (a dash pattern far finer than the path).</summary>
-  MaxDashes = 200000;
+  /// <summary>Dashes of one stroke at most (a dash pattern far finer than the path): about 500 000 edges, within what
+  /// the canvas draws of one path (GpuEdgesLimit).</summary>
+  MaxDashes = 50000;
 
 type
   /// <summary>The figures of a geometry as FMX path points, and its fill rule.</summary>
