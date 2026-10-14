@@ -51,13 +51,16 @@ type
 
   /// <summary>The attachments of a render pass (devices without dynamic rendering): one color attachment, and one of
   /// depth and stencil unless DepthFormat is VK_FORMAT_UNDEFINED, each in one layout throughout (the barriers before
-  /// the pass change layouts, as with dynamic rendering).</summary>
+  /// the pass change layouts, as with dynamic rendering). Resolve (1): a multisampled color attachment is resolved
+  /// into a single-sampled one of its format at the end of the pass (the last attachment, COLOR_ATTACHMENT_OPTIMAL,
+  /// its old content not loaded).</summary>
   TFastVkPassKey = packed record
     ColorFormat, DepthFormat: TVkFormat;
     Samples: Cardinal;
     ColorLayout, DepthLayout: TVkImageLayout;
     ColorLoad, DepthLoad, StencilLoad: TVkAttachmentLoadOp;
     ColorStore, DepthStore, StencilStore: TVkAttachmentStoreOp;
+    Resolve: Cardinal;
   end;
 
   /// <summary>The memory of a resource: a range of a block of TFastVulkan, or a memory object of its own.</summary>
@@ -155,10 +158,11 @@ type
     /// Thread-safe.</summary>
     function RenderPass(const AKey: TFastVkPassKey): TVkRenderPass;
     /// <summary>A render pass that pipelines and framebuffers for these attachments are made with (ADepthFormat
-    /// VK_FORMAT_UNDEFINED: color only); every render pass of the same formats and samples is compatible with it.
+    /// VK_FORMAT_UNDEFINED: color only; AResolve: with a resolve attachment, for framebuffers); every render pass of
+    /// the same formats and samples is compatible with it (a single subpass: resolve attachments do not count).
     /// Thread-safe.</summary>
     function CompatiblePass(const AColorFormat: TVkFormat; const ASamples: Integer;
-      const ADepthFormat: TVkFormat): TVkRenderPass;
+      const ADepthFormat: TVkFormat; const AResolve: Boolean = False): TVkRenderPass;
     /// <summary>What a graphics pipeline draws into: ARendering in AInfo's chain with dynamic rendering (AInfo.pNext
     /// must be free), else the compatible render pass of ARendering's formats and ASamples.</summary>
     procedure PipelineTarget(var AInfo: TVkGraphicsPipelineCreateInfo; const ARendering: PVkPipelineRenderingCreateInfo;
@@ -1480,11 +1484,12 @@ end;
 
 function TFastVulkan.RenderPass(const AKey: TFastVkPassKey): TVkRenderPass;
 var
-  Attachments: array[0..1] of TVkAttachmentDescription;
-  ColorRef, DepthRef: TVkAttachmentReference;
+  Attachments: array[0..2] of TVkAttachmentDescription;
+  ColorRef, DepthRef, ResolveRef: TVkAttachmentReference;
   Subpass: TVkSubpassDescription;
   Info: TVkRenderPassCreateInfo;
   Res: TVkResult;
+  N: Integer;
 begin
   TMonitor.Enter(FPasses);
   try
@@ -1527,6 +1532,23 @@ begin
       Subpass.pDepthStencilAttachment := @DepthRef;
       Info.attachmentCount := 2;
     end;
+    if AKey.Resolve <> 0 then
+    begin
+      // The samples' average written at the end of the subpass (on a tiler from tile memory).
+      N := Info.attachmentCount;
+      Attachments[N].format := AKey.ColorFormat;
+      Attachments[N].samples := VK_SAMPLE_COUNT_1_BIT;
+      Attachments[N].loadOp := VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+      Attachments[N].storeOp := VK_ATTACHMENT_STORE_OP_STORE;
+      Attachments[N].stencilLoadOp := VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+      Attachments[N].stencilStoreOp := VK_ATTACHMENT_STORE_OP_DONT_CARE;
+      Attachments[N].initialLayout := VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+      Attachments[N].finalLayout := VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+      ResolveRef.attachment := N;
+      ResolveRef.layout := VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+      Subpass.pResolveAttachments := @ResolveRef;
+      Info.attachmentCount := N + 1;
+    end;
     Result := VK_NULL_HANDLE;
     Res := FVk.CreateRenderPass(FDevice, @Info, nil, @Result);
     Check(Res, 'vkCreateRenderPass');
@@ -1537,7 +1559,7 @@ begin
 end;
 
 function TFastVulkan.CompatiblePass(const AColorFormat: TVkFormat; const ASamples: Integer;
-  const ADepthFormat: TVkFormat): TVkRenderPass;
+  const ADepthFormat: TVkFormat; const AResolve: Boolean): TVkRenderPass;
 var
   Key: TFastVkPassKey;
 begin
@@ -1546,6 +1568,7 @@ begin
   Key.ColorFormat := AColorFormat;
   Key.DepthFormat := ADepthFormat;
   Key.Samples := Max(ASamples, 1);
+  Key.Resolve := Ord(AResolve);
   Key.ColorLayout := VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
   Key.ColorLoad := VK_ATTACHMENT_LOAD_OP_LOAD;
   Key.ColorStore := VK_ATTACHMENT_STORE_OP_STORE;

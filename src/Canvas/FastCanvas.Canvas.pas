@@ -658,6 +658,9 @@ type
 var
   GQueue: TRenderQueue;
   GPlayer: TPlayer;
+  /// <summary>Where the player executes: the command after the one running now and the end of the chunk
+  /// (FastBridge.NextCommand); nil outside TPlayer.Execute.</summary>
+  GPlayNext, GPlayEnd: PByte;
   GRecTarget: TFastCanvas;
   GRunOffset: Integer = -1;
   GRunChunk: TRenderChunk;
@@ -4426,9 +4429,11 @@ var
 begin
   P := AData;
   PEnd := AData + ASize;
+  GPlayEnd := PEnd;
   while P < PEnd do
   begin
     H := PCmdHeader(P);
+    GPlayNext := P + H.Size;
     try
       Run(H);
     except
@@ -4443,6 +4448,8 @@ begin
     end;
     Inc(P, H.Size);
   end;
+  GPlayNext := nil;
+  GPlayEnd := nil;
 end;
 
 procedure PlayStream(const AData: PByte; const ASize: Integer);
@@ -4564,6 +4571,29 @@ begin
     Queue.Chunk.KeepAlive(ARef);
 end;
 
+function BridgeNextCommand(var ACursor: Pointer; out AHandler: TFastNativeHandler; out AData: Pointer): Boolean;
+var
+  P, D: PByte;
+  H: PCmdHeader;
+begin
+  AHandler := nil;
+  AData := nil;
+  P := ACursor;
+  if P = nil then
+    P := GPlayNext;
+  if (P = nil) or (P >= GPlayEnd) then
+    Exit(False);
+  H := PCmdHeader(P);
+  if H.Op = TCmd.Native then
+  begin
+    D := P + SizeOf(TCmdHeader);
+    AHandler := TFastNativeHandler(PPointer(D)^);
+    AData := D + SizeOf(Pointer);
+  end;
+  ACursor := P + H.Size;
+  Result := True;
+end;
+
 procedure BridgeWritten(const ABitmap: TBitmap);
 begin
   if (ABitmap <> nil) and ABitmap.HandleAllocated and ABitmap.CanvasClass.InheritsFrom(TFastCanvas) then
@@ -4651,6 +4681,7 @@ begin
   FastBridge.RunOnRender := BridgeRunOnRender;
   FastBridge.RecordNative := BridgeRecordNative;
   FastBridge.KeepAlive := BridgeKeepAlive;
+  FastBridge.NextCommand := BridgeNextCommand;
 end;
 
 initialization

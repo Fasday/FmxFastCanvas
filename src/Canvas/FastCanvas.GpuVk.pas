@@ -191,7 +191,7 @@ type
   /// <summary>The views and size a framebuffer is made for (devices without dynamic rendering).</summary>
   TGpuVkFramebufferKey = packed record
     Pass: TVkRenderPass;
-    Color, Depth: TVkImageView;
+    Color, Depth, Resolve: TVkImageView;
     Width, Height: Cardinal;
   end;
 
@@ -272,8 +272,8 @@ type
     procedure TimeStamp(const AStage: TVkPipelineStageFlagBits);
     /// <summary>GPU timing: the results of the slots whose submissions are done into the sums.</summary>
     procedure CollectTimes(const ADone: UInt64);
-    /// <summary>The framebuffer of AColor (and ADepth) for render passes compatible with APass.</summary>
-    function Framebuffer(const APass: TVkRenderPass; const AColor, ADepth: TVkImageView;
+    /// <summary>The framebuffer of AColor (and ADepth, AResolve) for render passes compatible with APass.</summary>
+    function Framebuffer(const APass: TVkRenderPass; const AColor, ADepth, AResolve: TVkImageView;
       const AExtent: TVkExtent2D): TVkFramebuffer;
     /// <summary>The framebuffers of an image view go (the view is destroyed now).</summary>
     procedure DropFramebuffers(const AView: TVkImageView);
@@ -761,11 +761,19 @@ function MemoryHandle(const AMemory: TFastVkAllocation): UInt64; inline;
 /// <summary>The subresources of the first mip level's color.</summary>
 function ColorRange: TVkImageSubresourceRange;
 function ColorLayers: TVkImageSubresourceLayers;
+/// <summary>GPU timing (FASTCANVAS_VK_GPUTIME) is on.</summary>
+function GpuVkTiming: Boolean;
 
 var
   /// <summary>Set by the 3D context: the recording context shuts down (the GPU is idle; device lock held): every
   /// Vulkan object made outside it goes now.</summary>
   GpuVkShutdownHook: procedure(const AContext: TGpuVkContext);
+  /// <summary>GPU timing (render thread), since the last report (FastCanvas.Context3DVk): scenes of the 3D context
+  /// whose last rendering instance lasted to their end (resolved there, what no later scene reads not stored), scenes
+  /// resolved by a rendering instance of their own, rendering instances of scenes stored before their end (the scene
+  /// went on after a copy, a texture update, the canvas, ...), and instances that were to last to their scene's end
+  /// but ended before it.</summary>
+  GpuVkTimeScenes: array[0..3] of Integer;
 
 implementation
 
@@ -891,6 +899,11 @@ begin
   end;
 end;
 
+function GpuVkTiming: Boolean;
+begin
+  Result := GTimeTarget <> '';
+end;
+
 /// <summary>GPU timing: one more window frame; every two seconds the GPU time per frame since the last report.
 /// </summary>
 procedure TimingFrame;
@@ -898,6 +911,7 @@ var
   Now, Copies: Int64;
   N: Integer;
   CopyNs: Double;
+  Scenes: string;
 begin
   Inc(GTimeFrames);
   Now := TStopwatch.GetTimeStamp;
@@ -908,10 +922,16 @@ begin
   N := Max(GTimeFrames, 1);
   Copies := TInterlocked.Exchange(GTimeCopies, 0);
   CopyNs := TInterlocked.Exchange(GTimeCopyNs, 0);
+  Scenes := '';
+  if GpuVkTimeScenes[0] + GpuVkTimeScenes[1] + GpuVkTimeScenes[2] + GpuVkTimeScenes[3] > 0 then
+    Scenes := Format(', 3D scenes: %.1f ended in their rendering, %.1f resolved apart, %.1f instances stored ' +
+      'before the end, %d ended early', [GpuVkTimeScenes[0] / N, GpuVkTimeScenes[1] / N, GpuVkTimeScenes[3] / N,
+      GpuVkTimeScenes[2]], TFormatSettings.Invariant);
+  FillChar(GpuVkTimeScenes, SizeOf(GpuVkTimeScenes), 0);
   TimingOutput(Format('FastCanvas GPU time per frame (%d frames in %.1f s): rendering %.2f ms (%.1f render passes, ' +
-    '%d not timed), command buffers %.2f ms (%.1f), presented copies %.2f ms (%.1f)', [GTimeFrames,
+    '%d not timed), command buffers %.2f ms (%.1f), presented copies %.2f ms (%.1f)%s', [GTimeFrames,
     (Now - GTimeLast) / TStopwatch.Frequency, GTimePassNs / 1E6 / N, GTimePasses / N, GTimeUntimed,
-    GTimeCmdNs / 1E6 / N, GTimeCmds / N, CopyNs / 1E6 / N, Copies / N], TFormatSettings.Invariant));
+    GTimeCmdNs / 1E6 / N, GTimeCmds / N, CopyNs / 1E6 / N, Copies / N, Scenes], TFormatSettings.Invariant));
   GTimeLast := Now;
   GTimeFrames := 0;
   GTimePasses := 0;
@@ -2405,8 +2425,8 @@ procedure TGpuVkContext.StartRendering(const AInfo: TVkRenderingInfo; const ACol
 var
   Key: TFastVkPassKey;
   Color, Depth, Stencil: PVkRenderingAttachmentInfo;
-  DepthView: TVkImageView;
-  Clears: array[0..1] of TVkClearValue;
+  DepthView, ResolveView: TVkImageView;
+  Clears: array[0..2] of TVkClearValue;
   Info: TVkRenderPassBeginInfo;
 begin
   if FTimeSlot >= 0 then
@@ -2435,6 +2455,13 @@ begin
   Key.ColorLayout := Color.imageLayout;
   Key.ColorLoad := Color.loadOp;
   Key.ColorStore := Color.storeOp;
+  ResolveView := VK_NULL_HANDLE;
+  if Color.resolveMode <> VK_RESOLVE_MODE_NONE then
+  begin
+    // A subpass resolve attachment (the average of the samples, as VK_RESOLVE_MODE_AVERAGE_BIT).
+    Key.Resolve := 1;
+    ResolveView := Color.resolveImageView;
+  end;
   Clears[0] := Color.clearValue;
   DepthView := VK_NULL_HANDLE;
   if Depth <> nil then
@@ -2458,45 +2485,53 @@ begin
   Info.sType := VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
   try
     Info.renderPass := FFast.RenderPass(Key);
-    Info.framebuffer := Framebuffer(FFast.CompatiblePass(AColorFormat, ASamples, Key.DepthFormat), Color.imageView,
-      DepthView, AInfo.renderArea.extent);
+    Info.framebuffer := Framebuffer(FFast.CompatiblePass(AColorFormat, ASamples, Key.DepthFormat, Key.Resolve <> 0),
+      Color.imageView, DepthView, ResolveView, AInfo.renderArea.extent);
   except
     on E: EFastVulkan do
       raise EFastDevice.Create(E.Message);
   end;
   Info.renderArea := AInfo.renderArea;
-  Info.clearValueCount := 1;
-  if Depth <> nil then
-    Info.clearValueCount := 2;
+  // One per attachment (the resolve attachment's is not read).
+  Info.clearValueCount := 1 + Ord(Depth <> nil) + Ord(Key.Resolve <> 0);
   Info.pClearValues := @Clears[0];
   FVk.CmdBeginRenderPass(Cmd, @Info, VK_SUBPASS_CONTENTS_INLINE);
 end;
 
-function TGpuVkContext.Framebuffer(const APass: TVkRenderPass; const AColor, ADepth: TVkImageView;
+function TGpuVkContext.Framebuffer(const APass: TVkRenderPass; const AColor, ADepth, AResolve: TVkImageView;
   const AExtent: TVkExtent2D): TVkFramebuffer;
 var
   Key: TGpuVkFramebufferKey;
-  Views: array[0..1] of TVkImageView;
+  Views: array[0..2] of TVkImageView;
   Info: TVkFramebufferCreateInfo;
-  View: TVkImageView;
-  N: Integer;
+  I, N, Count: Integer;
 begin
   FillChar(Key, SizeOf(Key), 0);
   Key.Pass := APass;
   Key.Color := AColor;
   Key.Depth := ADepth;
+  Key.Resolve := AResolve;
   Key.Width := Max(AExtent.width, 1);
   Key.Height := Max(AExtent.height, 1);
   if FFramebuffers.TryGetValue(Key, Result) then
     Exit;
+  // The attachments in the order of the render pass: color, depth, resolve.
   Views[0] := AColor;
-  Views[1] := ADepth;
+  N := 1;
+  if ADepth <> VK_NULL_HANDLE then
+  begin
+    Views[N] := ADepth;
+    Inc(N);
+  end;
+  if AResolve <> VK_NULL_HANDLE then
+  begin
+    Views[N] := AResolve;
+    Inc(N);
+  end;
   FillChar(Info, SizeOf(Info), 0);
   Info.sType := VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
   Info.renderPass := APass;
-  Info.attachmentCount := 1;
-  if ADepth <> VK_NULL_HANDLE then
-    Info.attachmentCount := 2;
+  Info.attachmentCount := N;
   Info.pAttachments := @Views[0];
   Info.width := Key.Width;
   Info.height := Key.Height;
@@ -2504,36 +2539,37 @@ begin
   Result := VK_NULL_HANDLE;
   Check(FVk.CreateFramebuffer(FDevice, @Info, nil, @Result), 'vkCreateFramebuffer');
   FFramebuffers.Add(Key, Result);
-  for View in Views do
-    if View <> VK_NULL_HANDLE then
-    begin
-      if not FFramebufferViews.TryGetValue(View, N) then
-        N := 0;
-      FFramebufferViews.AddOrSetValue(View, N + 1);
-    end;
+  for I := 0 to N - 1 do
+  begin
+    if not FFramebufferViews.TryGetValue(Views[I], Count) then
+      Count := 0;
+    FFramebufferViews.AddOrSetValue(Views[I], Count + 1);
+  end;
 end;
 
 procedure TGpuVkContext.DropFramebuffers(const AView: TVkImageView);
 var
   Pair: TPair<TGpuVkFramebufferKey, TVkFramebuffer>;
+  Others: array[0..2] of TVkImageView;
   Other: TVkImageView;
   N: Integer;
 begin
   // The command buffers that used them are done (the view is destroyed now).
   for Pair in FFramebuffers.ToArray do
-    if (Pair.Key.Color = AView) or (Pair.Key.Depth = AView) then
+    if (Pair.Key.Color = AView) or (Pair.Key.Depth = AView) or (Pair.Key.Resolve = AView) then
     begin
       FVk.DestroyFramebuffer(FDevice, Pair.Value, nil);
       FFramebuffers.Remove(Pair.Key);
-      if Pair.Key.Color = AView then
-        Other := Pair.Key.Depth
-      else
-        Other := Pair.Key.Color;
-      if (Other <> VK_NULL_HANDLE) and FFramebufferViews.TryGetValue(Other, N) then
-        if N > 1 then
-          FFramebufferViews[Other] := N - 1
-        else
-          FFramebufferViews.Remove(Other);
+      // The other views of the framebuffer are in one less.
+      Others[0] := Pair.Key.Color;
+      Others[1] := Pair.Key.Depth;
+      Others[2] := Pair.Key.Resolve;
+      for Other in Others do
+        if (Other <> VK_NULL_HANDLE) and (Other <> AView) and FFramebufferViews.TryGetValue(Other, N) then
+          if N > 1 then
+            FFramebufferViews[Other] := N - 1
+          else
+            FFramebufferViews.Remove(Other);
     end;
   FFramebufferViews.Remove(AView);
 end;

@@ -55,6 +55,11 @@ type
     FSamples: Integer;
     FMSColor: IInterface;
     FDepth: IInterface;
+    /// <summary>What the scenes read of the scene before (KeepColor, KeepDepth, KeepStencil: a scene drew before it
+    /// cleared them, or ended without clearing its multisampled color); the rest is not stored at a scene's end. And
+    /// what the scene in progress has cleared so far.</summary>
+    FKeep: Cardinal;
+    FSceneCleared: Cardinal;
     /// <summary>A window (TForm3D): the window of the canvas back end that presents the frames, and the texture of its
     /// frame surface.</summary>
     FWindow: TObject;
@@ -158,13 +163,20 @@ type
     Format: TVkFormat;
     Width, Height, Mips, Samples: Integer;
     IsDepth: Boolean;
+    /// <summary>An attachment only (VK_IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT, lazily allocated memory where the device
+    /// has it): never copied, cleared or read outside rendering; a tiler need not keep it in memory.</summary>
+    Transient: Boolean;
     Canvas: IInterface;
     Window: TGpuVkWindow;
     // Render thread.
     WindowSurface: TGpuVkSurface;
     Use: TGpuVkUse;
-    /// <summary>A target the GPU has not cleared yet (cleared before its first use).</summary>
+    /// <summary>A target the GPU has not cleared yet, or whose content (a depth image: its depth) a rendering instance
+    /// did not store: cleared before its next use (by the load operation of its next rendering instance; else
+    /// transparent, depth 1).</summary>
     Uncleared: Boolean;
+    /// <summary>A depth image whose stencil is not defined likewise (cleared to 0).</summary>
+    StencilUncleared: Boolean;
     /// <summary>Recording thread: a recorded command refers to it (updates go through the stream from then on).
     /// </summary>
     Used: Boolean;
@@ -248,6 +260,8 @@ type
   TCmdTarget = packed record
     Target, Depth: Pointer;   // TTextureVk, kept alive by the command
     Width, Height: Integer;
+    /// <summary>KeepColor, KeepDepth, KeepStencil: what has to outlast the scene (TFastContext3DVk.FKeep).</summary>
+    Keep: Cardinal;
   end;
 
   PCmdClear = ^TCmdClear;
@@ -283,9 +297,10 @@ type
     X, Y: Integer;
   end;
 
-  PCmdResolve = ^TCmdResolve;
-  TCmdResolve = packed record
-    Source, Dest: Pointer;
+  PCmdEnd = ^TCmdEnd;
+  /// <summary>A scene ends: its multisampled target is resolved into Dest (nil: not multisampled).</summary>
+  TCmdEnd = packed record
+    Target, Depth, Dest: Pointer;   // TTextureVk, kept alive by the command
   end;
 
   PCmdUpload = ^TCmdUpload;
@@ -342,6 +357,11 @@ const
   // TCmdRay.Flags (FastRay.hlsl).
   RayShadowsOn = 1;
   RayReflect = 4;
+  // TCmdTarget.Keep: the multisampled color, the depth, the stencil of a scene are read by a later scene (it draws
+  // before it clears them), so they are stored at the end of every scene.
+  KeepColor = 1;
+  KeepDepth = 2;
+  KeepStencil = 4;
 
 type
   PCmdRay = ^TCmdRay;
@@ -386,8 +406,16 @@ type
     /// <summary>The target of the commands (kept alive here: commands of later chunks draw into it).</summary>
     Target, Depth: IInterface;
     Width, Height: Integer;
+    /// <summary>TCmdTarget.Keep of the target.</summary>
+    Keep: Cardinal;
     /// <summary>The depth texture of the rendering instance begun last (C.Rendering is its target).</summary>
     RenderDepth: TObject;
+    /// <summary>The rendering instance begun last lasts to the end of the scene of EndsTarget (EndsInPass): it
+    /// resolves the target at its end, and EndsDiscard (KeepColor, KeepDepth, KeepStencil bits) says what it does not
+    /// store.</summary>
+    Ends: Boolean;
+    EndsTarget, EndsDepth: IInterface;
+    EndsDiscard: Cardinal;
     Pipe: TVkPipeline;
     Scissor: TRect;
     StencilRef: Cardinal;
@@ -563,9 +591,11 @@ begin
 end;
 
 /// <summary>An image of the 3D context with its memory and views (any thread). Render targets and depth buffers are
-/// cleared by the render thread before their first use.</summary>
+/// cleared by the render thread before their first use. ATransient: an attachment only (AUsage has nothing but
+/// attachment bits), see TTextureVk.Transient.</summary>
 function NewTextureVk(const AWidth, AHeight, AMips, ASamples: Integer; const AFormat: TVkFormat;
-  const AUsage: TVkImageUsageFlags; const ADepth: Boolean = False; const AAlpha: Boolean = False): TTextureVk;
+  const AUsage: TVkImageUsageFlags; const ADepth: Boolean = False; const AAlpha: Boolean = False;
+  const ATransient: Boolean = False): TTextureVk;
 var
   F: TFastVulkan;
   Info: TVkImageCreateInfo;
@@ -586,8 +616,10 @@ begin
     Result.Samples := Max(ASamples, 1);
     Result.Format := AFormat;
     Result.IsDepth := ADepth;
+    Result.Transient := ATransient;
     Result.Uncleared := (AUsage and (Ord(VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT) or
       Ord(VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT))) <> 0;
+    Result.StencilUncleared := ADepth;
     FillChar(Info, SizeOf(Info), 0);
     Info.sType := VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
     Info.imageType := VK_IMAGE_TYPE_2D;
@@ -599,7 +631,10 @@ begin
     Info.arrayLayers := 1;
     Info.samples := TVkSampleCountFlagBits(Result.Samples);
     Info.tiling := VK_IMAGE_TILING_OPTIMAL;
-    Info.usage := AUsage or Ord(VK_IMAGE_USAGE_TRANSFER_DST_BIT);
+    if ATransient then
+      Info.usage := AUsage or Ord(VK_IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT)
+    else
+      Info.usage := AUsage or Ord(VK_IMAGE_USAGE_TRANSFER_DST_BIT);
     Info.sharingMode := VK_SHARING_MODE_EXCLUSIVE;
     Info.initialLayout := VK_IMAGE_LAYOUT_UNDEFINED;
     Check(F.Track(F.Vk.CreateImage(F.Device, @Info, nil, @Result.Image)), 'vkCreateImage');
@@ -607,7 +642,8 @@ begin
     AddLive(Result);
     F.Vk.GetImageMemoryRequirements(F.Device, Result.Image, @Req);
     try
-      Result.Memory := F.Allocate(Req, Ord(VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT), 0, False);
+      Result.Memory := F.Allocate(Req, Ord(VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT),
+        IfThen(ATransient, Ord(VK_MEMORY_PROPERTY_LAZILY_ALLOCATED_BIT), 0), False);
     except
       on E: EFastVulkan do
         raise EContext3DException.Create(E.Message);
@@ -773,10 +809,12 @@ begin
     Exit;
   C := GpuVk;
   Rg := Range;
-  if Uncleared then
+  // Attachments only: their rendering instances clear them (load operations, EnsureRendering).
+  if Uncleared and not Transient then
   begin
     // A new target or depth buffer: transparent, or depth 1 (as Direct3D 12 clears them).
     Uncleared := False;
+    StencilUncleared := False;
     if not ADiscard then
     begin
       C.Transition(Image, Use, TGpuVkUse.TransferDst, True, @Rg);
@@ -1261,15 +1299,119 @@ begin
   end;
 end;
 
+procedure HandleDraw(const AData: Pointer); forward;
+procedure HandleClear(const AData: Pointer); forward;
+procedure HandleTarget(const AData: Pointer); forward;
+procedure HandleEnd(const AData: Pointer); forward;
+
+/// <summary>Before a rendering instance into T (and D) begins: whether it can last to the end of the scene. The
+/// commands that follow in the chunk up to the scene's end (AEnd) must be draws into T whose textures are ready (no
+/// barrier, no upload: nothing ends the instance), clears of T, and T as the target again; anything else (a copy, a
+/// texture update, a ray pass, the canvas, another target) or the chunk's end before the scene's end: False. The
+/// draws must not read the texture the scene resolves into.</summary>
+function EndsInPass(const T, D: TTextureVk; out AEnd: PCmdEnd): Boolean;
+var
+  Cursor, Data: Pointer;
+  H: TFastNativeHandler;
+  Draw: PCmdDraw;
+  Dest: TTextureVk;
+  I: Integer;
+begin
+  Result := False;
+  AEnd := nil;
+  // The first draw makes the blank texture otherwise (a copy).
+  if not Assigned(FastBridge.NextCommand) or not G.BlankReady then
+    Exit;
+  Cursor := nil;
+  while FastBridge.NextCommand(Cursor, H, Data) do
+    if @H = @HandleDraw then
+    begin
+      Draw := Data;
+      for I := 0 to Draw.UnitCount - 1 do
+        if TTextureVk(Draw.Units[I]).CurrentUse <> TGpuVkUse.ShaderRead then
+          Exit;
+    end
+    else if @H = @HandleClear then
+    begin
+      if (PCmdClear(Data).Target <> Pointer(T)) or (PCmdClear(Data).Depth <> Pointer(D)) then
+        Exit;
+    end
+    else if @H = @HandleTarget then
+    begin
+      if (PCmdTarget(Data).Target <> Pointer(T)) or (PCmdTarget(Data).Depth <> Pointer(D)) or
+        (PCmdTarget(Data).Width <> R.Width) or (PCmdTarget(Data).Height <> R.Height) then
+        Exit;
+    end
+    else if @H = @HandleEnd then
+    begin
+      if PCmdEnd(Data).Target <> Pointer(T) then
+        Exit;
+      AEnd := Data;
+      Break;
+    end
+    else
+      Exit;
+  if AEnd = nil then
+    Exit;
+  Dest := AEnd.Dest;
+  if Dest <> nil then
+  begin
+    if (Dest.GpuView = VK_NULL_HANDLE) or (Dest.Width < R.Width) or (Dest.Height < R.Height) then
+      Exit;
+    // A material that shows the target's own texture: it is read while the instance resolves into it.
+    Cursor := nil;
+    while FastBridge.NextCommand(Cursor, H, Data) and (Data <> Pointer(AEnd)) do
+      if @H = @HandleDraw then
+        for I := 0 to PCmdDraw(Data).UnitCount - 1 do
+          if TTextureVk(PCmdDraw(Data).Units[I]).GpuImage = Dest.GpuImage then
+            Exit;
+  end;
+  Result := True;
+end;
+
+/// <summary>The rendering instance that was to last to the end of a scene (R.Ends) has ended: ALost, before the
+/// scene's end (what it did not store is gone: counted, and cleared before its next use).</summary>
+procedure ForgetEnds(const ALost: Boolean);
+var
+  T, D: TTextureVk;
+begin
+  if not R.Ends then
+    Exit;
+  R.Ends := False;
+  T := nil;
+  if R.EndsTarget <> nil then
+    T := TTextureVk(R.EndsTarget as TObject);
+  D := nil;
+  if R.EndsDepth <> nil then
+    D := TTextureVk(R.EndsDepth as TObject);
+  if (T <> nil) and ((R.EndsDiscard and KeepColor) <> 0) then
+    T.Uncleared := True;
+  if (D <> nil) and ((R.EndsDiscard and KeepDepth) <> 0) then
+    D.Uncleared := True;
+  if (D <> nil) and ((R.EndsDiscard and KeepStencil) <> 0) then
+    D.StencilUncleared := True;
+  R.EndsTarget := nil;
+  R.EndsDepth := nil;
+  if ALost and GpuVkTiming then
+    Inc(GpuVkTimeScenes[2]);
+end;
+
 /// <summary>Rendering into the target (and depth buffer) for the commands that follow: begun again after barriers,
-/// when another target was drawn into, or to clear (AClear: with the attachments' clear operations).</summary>
+/// when another target was drawn into, or to clear (AClear: with the attachments' clear operations). An instance that
+/// lasts to the end of the scene (EndsInPass) resolves a multisampled target into the scene's texture at its end and
+/// does not store what no later scene reads (TCmdTarget.Keep): on a tiler the samples and the depth stay in tile
+/// memory. Content that is not defined (a new target, or not stored at the end of the last scene) is cleared by the
+/// load operations: transparent, depth 1, stencil 0, as Direct3D 12 clears new targets.</summary>
 procedure EnsureRendering(const AClear: PCmdClear);
 var
   C: TGpuVkContext;
-  T, D: TTextureVk;
-  ColorWas, DepthWas: TGpuVkUse;
+  T, D, Dest: TTextureVk;
+  ColorWas, DepthWas, DestWas: TGpuVkUse;
   Color, Depth, Stencil: TVkRenderingAttachmentInfo;
   Info: TVkRenderingInfo;
+  ClearColor, ClearDepth, ClearStencil, ColorZero, DepthOne, StencilZero, Ends: Boolean;
+  Last: PCmdEnd;
+  Discard: Cardinal;
 begin
   C := Begin3D;
   if R.Target = nil then
@@ -1280,13 +1422,39 @@ begin
     D := TTextureVk(R.Depth as TObject);
   if (AClear = nil) and (C.Rendering = T) and (R.RenderDepth = D) and not C.HasBarriers then
     Exit;
+  // An instance that was to last to the scene's end is ended before it.
+  ForgetEnds(True);
+  ClearColor := (AClear <> nil) and AClear.ClearColor;
+  ClearDepth := (AClear <> nil) and AClear.ClearDepth;
+  ClearStencil := (AClear <> nil) and AClear.ClearStencil;
+  ColorZero := not ClearColor and T.Uncleared and (T.Canvas = nil) and (T.Window = nil);
+  DepthOne := (D <> nil) and not ClearDepth and D.Uncleared;
+  StencilZero := (D <> nil) and not ClearStencil and D.StencilUncleared;
+  Ends := False;
+  Dest := nil;
+  Discard := 0;
+  if ((T.Samples > 1) or (D <> nil)) and EndsInPass(T, D, Last) then
+  begin
+    Ends := True;
+    Dest := Last.Dest;
+    Discard := (KeepColor or KeepDepth or KeepStencil) and not R.Keep;
+    // The texture's own color is the scene's image.
+    if T.Samples = 1 then
+      Discard := Discard and not KeepColor;
+    if D = nil then
+      Discard := Discard and not (KeepDepth or KeepStencil);
+  end;
   ColorWas := T.CurrentUse;
-  T.UseAs(TGpuVkUse.ColorTarget, (AClear <> nil) and AClear.ClearColor);
+  // Cleared by the load operations below.
+  T.UseAs(TGpuVkUse.ColorTarget, ClearColor or ColorZero);
+  T.Uncleared := False;
   DepthWas := TGpuVkUse.Undefined;
   if D <> nil then
   begin
     DepthWas := D.CurrentUse;
-    D.UseAs(TGpuVkUse.DepthTarget, (AClear <> nil) and AClear.ClearDepth and AClear.ClearStencil);
+    D.Uncleared := False;
+    D.StencilUncleared := False;
+    D.UseAs(TGpuVkUse.DepthTarget, (ClearDepth or DepthOne) and (ClearStencil or StencilZero));
   end;
   // Drawn in an earlier rendering instance: its writes come before the next ones (blending and tests read them).
   if ColorWas = TGpuVkUse.ColorTarget then
@@ -1294,6 +1462,14 @@ begin
   if (D <> nil) and (DepthWas = TGpuVkUse.DepthTarget) then
     C.MemoryBarrier(StageLateTests, AccessDepthWrite, StageEarlyTests or StageLateTests,
       AccessDepthRead or AccessDepthWrite);
+  if Dest <> nil then
+  begin
+    // The resolve writes all of it, after what wrote it before.
+    DestWas := Dest.CurrentUse;
+    Dest.UseAs(TGpuVkUse.ColorTarget, True);
+    if DestWas = TGpuVkUse.ColorTarget then
+      C.MemoryBarrier(StageColorOutput, AccessColorWrite, StageColorOutput, AccessColorWrite);
+  end;
   FillChar(Color, SizeOf(Color), 0);
   Color.sType := VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
   Color.imageView := T.GpuView;
@@ -1301,10 +1477,20 @@ begin
   Color.resolveMode := VK_RESOLVE_MODE_NONE;
   Color.loadOp := VK_ATTACHMENT_LOAD_OP_LOAD;
   Color.storeOp := VK_ATTACHMENT_STORE_OP_STORE;
-  if (AClear <> nil) and AClear.ClearColor then
+  if ClearColor then
   begin
     Color.loadOp := VK_ATTACHMENT_LOAD_OP_CLEAR;
     Move(AClear.Color, Color.clearValue.color.float32, SizeOf(AClear.Color));
+  end
+  else if ColorZero then
+    Color.loadOp := VK_ATTACHMENT_LOAD_OP_CLEAR;
+  if (Discard and KeepColor) <> 0 then
+    Color.storeOp := VK_ATTACHMENT_STORE_OP_DONT_CARE;
+  if Dest <> nil then
+  begin
+    Color.resolveMode := VK_RESOLVE_MODE_AVERAGE_BIT;
+    Color.resolveImageView := Dest.GpuView;
+    Color.resolveImageLayout := VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
   end;
   FillChar(Info, SizeOf(Info), 0);
   Info.sType := VK_STRUCTURE_TYPE_RENDERING_INFO;
@@ -1323,28 +1509,46 @@ begin
     Depth.loadOp := VK_ATTACHMENT_LOAD_OP_LOAD;
     Depth.storeOp := VK_ATTACHMENT_STORE_OP_STORE;
     Stencil := Depth;
-    if AClear <> nil then
-    begin
+    Depth.clearValue.depthStencil.depth := 1;
+    if ClearDepth then
       Depth.clearValue.depthStencil.depth := AClear.DepthValue;
+    if ClearStencil then
       Depth.clearValue.depthStencil.stencil := AClear.Stencil;
-      Stencil.clearValue := Depth.clearValue;
-      if AClear.ClearDepth then
-        Depth.loadOp := VK_ATTACHMENT_LOAD_OP_CLEAR;
-      if AClear.ClearStencil then
-        Stencil.loadOp := VK_ATTACHMENT_LOAD_OP_CLEAR;
-    end;
+    Stencil.clearValue := Depth.clearValue;
+    if ClearDepth or DepthOne then
+      Depth.loadOp := VK_ATTACHMENT_LOAD_OP_CLEAR;
+    if ClearStencil or StencilZero then
+      Stencil.loadOp := VK_ATTACHMENT_LOAD_OP_CLEAR;
+    if (Discard and KeepDepth) <> 0 then
+      Depth.storeOp := VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    if (Discard and KeepStencil) <> 0 then
+      Stencil.storeOp := VK_ATTACHMENT_STORE_OP_DONT_CARE;
     Info.pDepthAttachment := @Depth;
     Info.pStencilAttachment := @Stencil;
   end;
   C.BeginRenderingInfo(T, Info, T.Format, T.Samples);
   R.RenderDepth := D;
+  if Ends then
+  begin
+    R.Ends := True;
+    R.EndsTarget := T;
+    R.EndsDepth := D;
+    R.EndsDiscard := Discard;
+  end
+  else if ((T.Samples > 1) or (D <> nil)) and GpuVkTiming then
+    Inc(GpuVkTimeScenes[3]);
 end;
 
 procedure HandleTarget(const AData: Pointer);
 var
   C: PCmdTarget;
+  Same: Boolean;
 begin
   C := AData;
+  // The same target again: its rendering instance, if one is active, goes on.
+  Same := (R.Target <> nil) and ((R.Target as TObject) = TObject(C.Target)) and (R.Width = C.Width) and
+    (R.Height = C.Height) and (((R.Depth = nil) and (C.Depth = nil)) or
+    ((R.Depth <> nil) and ((R.Depth as TObject) = TObject(C.Depth))));
   R.Target := TTextureVk(C.Target);
   if C.Depth <> nil then
     R.Depth := TTextureVk(C.Depth)
@@ -1352,8 +1556,10 @@ begin
     R.Depth := nil;
   R.Width := C.Width;
   R.Height := C.Height;
+  R.Keep := C.Keep;
   // Rendering begins with the first clear or draw.
-  R.RenderDepth := nil;
+  if not Same then
+    R.RenderDepth := nil;
   R.ViewportW := -1;
 end;
 
@@ -1374,8 +1580,9 @@ begin
   D := C.Depth;
   if (R.Target = nil) or (T <> TTextureVk(R.Target as TObject)) then
   begin
-    // Not the target of the commands (never so far): a clear of its color outside rendering.
-    if (T = nil) or not C.ClearColor or (T.GpuImage = VK_NULL_HANDLE) then
+    // Not the target of the commands (never so far): a clear of its color outside rendering (not of an attachment
+    // only, which its next rendering instance clears).
+    if (T = nil) or not C.ClearColor or (T.GpuImage = VK_NULL_HANDLE) or T.Transient then
       Exit;
     T.UseAs(TGpuVkUse.TransferDst, True);
     Move(C.Color, Color.float32, SizeOf(C.Color));
@@ -1660,31 +1867,89 @@ begin
   end;
 end;
 
-procedure HandleResolve(const AData: Pointer);
+/// <summary>A rendering instance of its own that resolves the multisampled S into D (the scene's rendering instances
+/// were split: S was stored); ADiscard: S is not stored again.</summary>
+procedure ResolvePass(const S, D: TTextureVk; const ADiscard: Boolean);
 var
-  C: PCmdResolve;
+  C: TGpuVkContext;
+  Was, DestWas: TGpuVkUse;
+  Zero: Boolean;
+  Color: TVkRenderingAttachmentInfo;
+  Info: TVkRenderingInfo;
+begin
+  if (S.GpuView = VK_NULL_HANDLE) or (D.GpuView = VK_NULL_HANDLE) then
+    Exit;
+  C := GpuVk;
+  // Not drawn since its content was left out: the resolve is transparent.
+  Zero := S.Uncleared;
+  Was := S.CurrentUse;
+  S.UseAs(TGpuVkUse.ColorTarget, Zero);
+  S.Uncleared := False;
+  if Was = TGpuVkUse.ColorTarget then
+    C.MemoryBarrier(StageColorOutput, AccessColorWrite, StageColorOutput, AccessColorRead or AccessColorWrite);
+  DestWas := D.CurrentUse;
+  D.UseAs(TGpuVkUse.ColorTarget, True);
+  if DestWas = TGpuVkUse.ColorTarget then
+    C.MemoryBarrier(StageColorOutput, AccessColorWrite, StageColorOutput, AccessColorWrite);
+  FillChar(Color, SizeOf(Color), 0);
+  Color.sType := VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+  Color.imageView := S.GpuView;
+  Color.imageLayout := VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+  Color.resolveMode := VK_RESOLVE_MODE_AVERAGE_BIT;
+  Color.resolveImageView := D.GpuView;
+  Color.resolveImageLayout := VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+  if Zero then
+    Color.loadOp := VK_ATTACHMENT_LOAD_OP_CLEAR
+  else
+    Color.loadOp := VK_ATTACHMENT_LOAD_OP_LOAD;
+  if ADiscard then
+    Color.storeOp := VK_ATTACHMENT_STORE_OP_DONT_CARE
+  else
+    Color.storeOp := VK_ATTACHMENT_STORE_OP_STORE;
+  FillChar(Info, SizeOf(Info), 0);
+  Info.sType := VK_STRUCTURE_TYPE_RENDERING_INFO;
+  Info.renderArea.extent.width := Max(Min(S.Width, D.Width), 1);
+  Info.renderArea.extent.height := Max(Min(S.Height, D.Height), 1);
+  Info.layerCount := 1;
+  Info.colorAttachmentCount := 1;
+  Info.pColorAttachments := @Color;
+  // No draws: the subpass ends at once, with the resolve.
+  C.BeginRenderingInfo(G, Info, S.Format, S.Samples);
+  C.EndRendering;
+  if ADiscard then
+    S.Uncleared := True;
+end;
+
+procedure HandleEnd(const AData: Pointer);
+var
+  C: PCmdEnd;
   Ctx: TGpuVkContext;
-  S, D: TTextureVk;
-  Region: TVkImageResolve;
+  T: TTextureVk;
 begin
   C := AData;
-  S := C.Source;
-  D := C.Dest;
-  if (S.GpuImage = VK_NULL_HANDLE) or (D.GpuImage = VK_NULL_HANDLE) then
-    Exit;
+  T := C.Target;
   Ctx := GpuVk;
-  S.UseAs(TGpuVkUse.TransferSrc);
-  if D.CurrentUse = TGpuVkUse.TransferDst then
-    Ctx.MemoryBarrier(StageTransfer, AccessTransferWrite, StageTransfer, AccessTransferWrite);
-  D.UseAs(TGpuVkUse.TransferDst, True);
-  FillChar(Region, SizeOf(Region), 0);
-  Region.srcSubresource := ColorLayers;
-  Region.dstSubresource := ColorLayers;
-  Region.extent.width := Min(S.Width, D.Width);
-  Region.extent.height := Min(S.Height, D.Height);
-  Region.extent.depth := 1;
-  Ctx.Vk.CmdResolveImage(Ctx.TransferCmd, S.GpuImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, D.GpuImage,
-    VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, @Region);
+  if R.Ends and (R.EndsTarget <> nil) and ((R.EndsTarget as TObject) = TObject(T)) and (Ctx.Rendering = T) then
+  begin
+    // The scene's one rendering instance ends: its resolve is written, what it does not store is gone.
+    Ctx.EndRendering;
+    ForgetEnds(False);
+    if GpuVkTiming then
+      Inc(GpuVkTimeScenes[0]);
+    Exit;
+  end;
+  if R.Ends then
+  begin
+    // Ended before the scene's end: the resolve has the image as drawn until then.
+    ForgetEnds(True);
+    Exit;
+  end;
+  if (C.Dest <> nil) and (T.Samples > 1) then
+  begin
+    ResolvePass(T, C.Dest, (R.Keep and KeepColor) = 0);
+    if GpuVkTiming then
+      Inc(GpuVkTimeScenes[1]);
+  end;
 end;
 
 /// <summary>Device lock held: every level of a texture into the open command buffer.</summary>
@@ -1781,6 +2046,9 @@ begin
     R.Target := nil;
     R.Depth := nil;
     R.RenderDepth := nil;
+    R.Ends := False;
+    R.EndsTarget := nil;
+    R.EndsDepth := nil;
     R.Pipe := VK_NULL_HANDLE;
     R.Ctx := nil;
     R.ListGen := -1;
@@ -1902,12 +2170,20 @@ begin
   while (Wanted > 1) and ((Counts and Cardinal(Wanted)) = 0) do
     Wanted := Wanted div 2;
   FSamples := Wanted;
+  // The samples are resolved by the scene's rendering instances (EnsureRendering, ResolvePass): an attachment only,
+  // which a tiler keeps in tile memory.
   if FSamples > 1 then
     FMSColor := NewTextureVk(Px.Width, Px.Height, 1, FSamples, TVkFormat(FFormat),
-      Ord(VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT) or Ord(VK_IMAGE_USAGE_TRANSFER_SRC_BIT));
+      Ord(VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT), False, False, True);
+  // The ray-traced effects read the depth; else it is an attachment only too.
   if DepthStencil then
-    FDepth := NewTextureVk(Px.Width, Px.Height, 1, FSamples, S.DepthFormat,
-      Ord(VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT) or Ord(VK_IMAGE_USAGE_SAMPLED_BIT), True);
+    if RaySupported then
+      FDepth := NewTextureVk(Px.Width, Px.Height, 1, FSamples, S.DepthFormat,
+        Ord(VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT) or Ord(VK_IMAGE_USAGE_SAMPLED_BIT), True)
+    else
+      FDepth := NewTextureVk(Px.Width, Px.Height, 1, FSamples, S.DepthFormat,
+        Ord(VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT), True, False, True);
+  FKeep := 0;
 end;
 
 procedure TFastContext3DVk.DoCreateBuffer;
@@ -1969,6 +2245,7 @@ begin
   end;
   C.Width := Px.Width;
   C.Height := Px.Height;
+  C.Keep := FKeep;
   FScissorDirty := True;
 end;
 
@@ -1982,6 +2259,7 @@ begin
   if not Result then
     Exit;
   GScenes.Add(Self);
+  FSceneCleared := 0;
   if FFrame <> nil then
   begin
     Px := TargetPixels;
@@ -2006,8 +2284,8 @@ end;
 
 procedure TFastContext3DVk.DoEndScene;
 var
-  T: TTextureVk;
-  C: PCmdResolve;
+  T, Target: TTextureVk;
+  C: PCmdEnd;
   P: PCmdPresent;
 begin
   // Where the scene ends: the window's frame, the texture.
@@ -2020,13 +2298,27 @@ begin
     FRay.Reflections) then
     RecordRay;
   FScene := 0;
-  if (FMSColor <> nil) and (T <> nil) then
+  // A scene that did not clear its multisampled color resolves what the scene before left in it.
+  if (FMSColor <> nil) and ((FSceneCleared and KeepColor) = 0) then
+    FKeep := FKeep or KeepColor;
+  Target := TTextureVk(DrawTarget);
+  if Target <> nil then
   begin
-    C := Rec(HandleResolve, SizeOf(TCmdResolve), FMSColor);
-    C.Source := FMSColor as TObject;
-    C.Dest := T;
-    T.Used := True;
-    Keep(T);
+    C := Rec(HandleEnd, SizeOf(TCmdEnd), Target);
+    C.Target := Target;
+    C.Depth := nil;
+    if FDepth <> nil then
+    begin
+      C.Depth := FDepth as TObject;
+      Keep(FDepth);
+    end;
+    C.Dest := nil;
+    if (FMSColor <> nil) and (T <> nil) then
+    begin
+      C.Dest := T;
+      T.Used := True;
+      Keep(T);
+    end;
   end;
   GScenes.Remove(Self);
   if GScenes.Count > 0 then
@@ -2070,6 +2362,12 @@ begin
   C.ClearStencil := (TClearTarget.Stencil in ATarget) and (FDepth <> nil);
   C.DepthValue := ADepth;
   C.Stencil := Byte(AStencil);
+  if C.ClearColor then
+    FSceneCleared := FSceneCleared or KeepColor;
+  if C.ClearDepth then
+    FSceneCleared := FSceneCleared or KeepDepth;
+  if C.ClearStencil then
+    FSceneCleared := FSceneCleared or KeepStencil;
 end;
 
 var
@@ -2152,6 +2450,14 @@ begin
   Key.Samples := T.Samples;
   Key.Depth := FDepth <> nil;
   Key.Format := Ord(T.Format);
+  // A draw before the scene clears the multisampled color, the depth or the stencil it uses: later scenes read what
+  // the scene before left there too (stored at every scene's end from now on).
+  if (FMSColor <> nil) and ((FSceneCleared and KeepColor) = 0) then
+    FKeep := FKeep or KeepColor;
+  if (FDepth <> nil) and (FState.DepthTest or FState.DepthWrite) and ((FSceneCleared and KeepDepth) = 0) then
+    FKeep := FKeep or KeepDepth;
+  if (FDepth <> nil) and FState.Stencil and ((FSceneCleared and KeepStencil) = 0) then
+    FKeep := FKeep or KeepStencil;
   VBytes := VertexSize * VertexCount;
   IBytes := IndexSize * IndexCount;
   VSBytes := 0;
@@ -2638,6 +2944,9 @@ begin
   R.Target := nil;
   R.Depth := nil;
   R.RenderDepth := nil;
+  R.Ends := False;
+  R.EndsTarget := nil;
+  R.EndsDepth := nil;
   R.Ctx := nil;
   R.ListGen := -1;
   LockLive;

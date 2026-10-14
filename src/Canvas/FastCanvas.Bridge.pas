@@ -67,6 +67,10 @@ type
     RecordNative: function(const AHandler: TFastNativeHandler; const ASize: Integer; const ARef: IInterface): Pointer;
     /// <summary>One more object that lives until the command recorded last has run.</summary>
     KeepAlive: procedure(const ARef: IInterface);
+    /// <summary>In a native command's handler: the command after ACursor in the chunk being executed (ACursor nil: the
+    /// one after the command running now), and ACursor moved past it. AHandler: its handler (AData its payload), nil
+    /// for a command of the canvas. False at the end of the chunk (later commands are not known yet).</summary>
+    NextCommand: function(var ACursor: Pointer; out AHandler: TFastNativeHandler; out AData: Pointer): Boolean;
   end;
 
   TFastFlushProc = procedure;
