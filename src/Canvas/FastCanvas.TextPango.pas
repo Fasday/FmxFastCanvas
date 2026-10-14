@@ -188,6 +188,8 @@ const
   MaxPangoSize = 1E6;
   /// <summary>PangoFonts the table of fonts keeps before it starts over.</summary>
   MaxFonts = 1024;
+  /// <summary>The smallest font size given to Pango (pixels; it takes no size of 0).</summary>
+  MinFontSize = 0.1;
 
 type
   // Pango's structs (pango-glyph.h, pango-item.h, pango-layout.h; x86-64, offsets checked with offsetof).
@@ -1056,7 +1058,7 @@ begin
   Desc := pango_font_description_new;
   Family := UTF8String(Base.Family);
   pango_font_description_set_family(Desc, PAnsiChar(Family));
-  pango_font_description_set_absolute_size(Desc, Base.Size * PANGO_SCALE);
+  pango_font_description_set_absolute_size(Desc, Max(Base.Size, MinFontSize) * PANGO_SCALE);
   pango_font_description_set_weight(Desc, FontWeights[Base.Weight]);
   pango_font_description_set_style(Desc, PangoStyle(Base.Slant));
   pango_font_description_set_stretch(Desc, Ord(Base.Stretch));
@@ -1085,7 +1087,7 @@ begin
         InsertAttr(Attrs, pango_attr_family_new(PAnsiChar(Family)), B0, B1);
       end;
       if S.Size <> Base.Size then
-        InsertAttr(Attrs, pango_attr_size_new_absolute(Round(S.Size * PANGO_SCALE)), B0, B1);
+        InsertAttr(Attrs, pango_attr_size_new_absolute(Round(Max(S.Size, MinFontSize) * PANGO_SCALE)), B0, B1);
       if S.Weight <> Base.Weight then
         InsertAttr(Attrs, pango_attr_weight_new(FontWeights[S.Weight]), B0, B1);
       if S.Slant <> Base.Slant then
