@@ -37,11 +37,12 @@ type
     Feature: TFastDlssFeature;
     Mode: TFastDlssMode;
     Hdr, Active: Boolean;
-    /// <summary>Taken from FastDlssEmulate, FastDlssAutoExposure and FastDlssPreset when the textures are made.
-    /// </summary>
+    /// <summary>Taken from FastDlssEmulate, FastDlssAutoExposure, FastDlssPreset and FastDlssConservativeMotion when the
+    /// textures are made (Conservative: and the device rasterizes conservatively).</summary>
     Emulation: TFastDlssEmulation;
     AutoExposure: Boolean;
     Preset: TFastDlssPreset;
+    Conservative: Boolean;
     /// <summary>The texture LOD bias of the scene's samplers: log2(render width / output width) - 1, as NVIDIA's
     /// guide recommends (textures sampled as at the output size).</summary>
     MipBias: Single;
@@ -234,7 +235,7 @@ var Desc: TD3D12_GRAPHICS_PIPELINE_STATE_DESC; Element: TD3D12_INPUT_ELEMENT_DES
 const Culls: array[0..2] of TD3D12_CULL_MODE = (D3D12_CULL_MODE_NONE, D3D12_CULL_MODE_BACK, D3D12_CULL_MODE_FRONT);
 begin
   Key := UInt64(Cardinal(AStride)) shl 32 or UInt64(Cardinal(AOffset)) shl 16 or
-    UInt64(Ord(AFormat)) shl 8 or UInt64(ACull shl 4 or AKind);
+    UInt64(Ord(AFormat)) shl 8 or UInt64(ACull shl 4 or AKind) or UInt64(Ord(Conservative)) shl 63;
   if Psos.TryGetValue(Key, Result) then Exit;
   EnsureRoot;
   Desc := Default(TD3D12_GRAPHICS_PIPELINE_STATE_DESC);
@@ -265,6 +266,10 @@ begin
     // Pulled slightly towards the camera: FMX's shaders and this one compute the depth with other instructions, the
     // test must not depend on the last bits.
     Desc.RasterizerState.DepthBias := -64;
+    // Thin features (a cone's tip at the render size) cover a pixel only now and then: conservative rasterization
+    // gives every pixel they touch their vectors (NVIDIA's DLSS guide, 3.6.4).
+    if Conservative then
+      Desc.RasterizerState.ConservativeRaster := D3D12_CONSERVATIVE_RASTERIZATION_MODE_ON;
     Desc.DepthStencilState.DepthEnable := True;
     Desc.DepthStencilState.DepthWriteMask := D3D12_DEPTH_WRITE_MASK_ZERO;
     Desc.DepthStencilState.DepthFunc := D3D12_COMPARISON_FUNC_LESS_EQUAL;
@@ -284,6 +289,16 @@ begin
   end;
   Check(TFastDevice.D3D12.CreateGraphicsPipelineState(@Desc, IID_ID3D12PipelineState, Result), 'DLSS pipeline');
   Psos.Add(Key, Result);
+end;
+
+/// <summary>The device rasterizes conservatively (D3D12_OPTIONS: tier 1 or higher).</summary>
+function DlssConservativeSupported: Boolean;
+var
+  Options: TD3D12_FEATURE_DATA_D3D12_OPTIONS;
+begin
+  Options := Default(TD3D12_FEATURE_DATA_D3D12_OPTIONS);
+  Result := Succeeded(TFastDevice.D3D12.CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS, @Options, SizeOf(Options))) and
+    (Ord(Options.ConservativeRasterizationTier) >= Ord(D3D12_CONSERVATIVE_RASTERIZATION_TIER_1));
 end;
 
 function Halton(var AIndex: Cardinal; const ABase: Cardinal): Single;

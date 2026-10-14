@@ -25,8 +25,10 @@ type
   TFastDlssView = (Output, Input, Motion);
   /// <summary>Diagnostics without NGX (FastDlssEmulate).</summary>
   TFastDlssEmulation = (Off, Temporal, Accumulate);
-  /// <summary>NVIDIA's DLSS models (render presets, FastDlssPreset); Default: NVIDIA's choice for each mode.</summary>
-  TFastDlssPreset = (Default, J, K, L, M);
+  /// <summary>NVIDIA's DLSS models (render presets, FastDlssPreset). Default: model M for Quality and Balanced (NVIDIA's
+  /// default there, K, left a speckled halo around a bright object moving over a dark background on an RTX 3090; M did
+  /// not), NVIDIA's choice for the other modes; Nvidia: NVIDIA's choice for every mode.</summary>
+  TFastDlssPreset = (Default, Nvidia, J, K, L, M);
   {$SCOPEDENUMS OFF}
 
   /// <summary>The NGX session of a device, reference counted: held by the DLSS states of the 3D contexts and by the
@@ -130,6 +132,10 @@ var
   /// <summary>True: DLSS measures the exposure itself (its AutoExposure flag). False: a fixed exposure of 1 (a 1x1
   /// exposure texture; the colors are already exposed for the display). Read when the feature is made.</summary>
   FastDlssAutoExposure: Boolean = True;
+  /// <summary>The motion pass rasterizes conservatively where the device can: thin features (a cone's tip at the
+  /// render size of Performance and Ultra Performance) get their vectors in every pixel they touch, as NVIDIA's guide
+  /// recommends (3.6.4). Read when the context makes its buffers.</summary>
+  FastDlssConservativeMotion: Boolean = True;
 
 function DlssModeName(const AMode: TFastDlssMode): string;
 /// <summary>The render size of a mode by NVIDIA's usual ratios (the emulation; NGX's optimal settings with DLSS).
@@ -169,7 +175,8 @@ const
   LOAD_LIBRARY_SEARCH_DEFAULT_DIRS = $1000;
   PerfQuality: array[TFastDlssMode] of Integer = (2, 2, 1, 0, 3, 5);
   // NVSDK_NGX_DLSS_Hint_Render_Preset of nvsdk_ngx_defs.h, and the parameters that take it.
-  PresetValues: array[TFastDlssPreset] of Cardinal = (0, 10, 11, 12, 13);
+  PresetValues: array[TFastDlssPreset] of Cardinal = (0, 0, 10, 11, 12, 13);
+  PresetM = 13;
   PresetNames: array[0..4] of PAnsiChar = ('DLSS.Hint.Render.Preset.DLAA', 'DLSS.Hint.Render.Preset.Quality',
     'DLSS.Hint.Render.Preset.Balanced', 'DLSS.Hint.Render.Preset.Performance',
     'DLSS.Hint.Render.Preset.UltraPerformance');
@@ -490,7 +497,8 @@ function TFastDlssFeature.Configure(const AList: ID3D12GraphicsCommandList; cons
 var
   Flags: Integer;
   S: TFastDlss;
-  Name: PAnsiChar;
+  I: Integer;
+  Value: Cardinal;
 begin
   Result := False;
   S := FSession;
@@ -519,8 +527,14 @@ begin
     S.SetUInt('CreationNodeMask', 1);
     S.SetUInt('VisibilityNodeMask', 1);
     // The parameter block is shared: every hint is set (0: NVIDIA's default model of the mode).
-    for Name in PresetNames do
-      S.SetUInt(Name, PresetValues[APreset]);
+    for I := Low(PresetNames) to High(PresetNames) do
+    begin
+      Value := PresetValues[APreset];
+      // PresetNames 1 and 2: Quality and Balanced.
+      if (APreset = TFastDlssPreset.Default) and (I in [1, 2]) then
+        Value := PresetM;
+      S.SetUInt(PresetNames[I], Value);
+    end;
     Result := Check(TCreateFeature(S.FCreate)(Pointer(AList), 1, S.FParameters, FHandle), 'Create DLSS SR');
     if Result then
     begin

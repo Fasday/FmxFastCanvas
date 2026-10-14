@@ -314,8 +314,13 @@ Limitations:
   guide recommends (textures as sharp as at the output size).
 - Starting NGX for a device takes a moment: on an RTX 3090 the first DLSS frame came about 1.5 s after the window, the
   first after a device loss about 2 s after it (the session of the new device is made again).
-- Settings, read when the feature is made: `FastDlssPreset` (NVIDIA's model of every mode: `Default` or `J`, `K`, `L`,
-  `M`), `FastDlssAutoExposure` (default True; False gives DLSS a fixed exposure of 1).
+- Settings, read when the feature is made: `FastDlssPreset` (NVIDIA's model: `Default` = model M for Quality and
+  Balanced, NVIDIA's choice for the other modes — NVIDIA's default K left a speckled halo around a bright object moving
+  over a dark background on an RTX 3090, M did not; `Nvidia` = NVIDIA's choice everywhere; or `J`, `K`, `L`, `M` for
+  every mode), `FastDlssAutoExposure` (default True; False gives DLSS a fixed exposure of 1),
+  `FastDlssConservativeMotion` (default True: the motion pass rasterizes conservatively where the device can, so thin
+  features such as a cone's tip at the render size of Performance and Ultra Performance get their vectors, as NVIDIA's
+  guide recommends).
 - Diagnostics: `FastDlssJitterTest` turns the subpixel jitter off or negates what DLSS is told; `FastDlssView`
   shows the scene DLSS gets (`Input`) or its motion vectors (`Motion`: grey where still) instead of the result;
   `FastDlssCameraMotion := False` leaves the pixels without an object's vector still. `FastDlssEmulate` runs the

@@ -10,7 +10,8 @@ program HelloForm3D;
   DLSS diagnostics and variants (FastCanvas.Dlss): FC_DLSS_JITTER=off|-x|-y|-xy, FC_DLSS_VIEW=input|motion,
   FC_DLSS_EMULATE=1|accumulate (a simple shader instead of NVIDIA's DLSS, on any Direct3D 12 card: with
   FC_DLSS_VIEW=motion it shows the motion vectors), FC_DLSS_CAMERA_MOTION=0 (no camera motion for the background),
-  FC_DLSS_PRESET=j|k|l|m (NVIDIA's model), FC_DLSS_EXPOSURE=fixed (no auto exposure).
+  FC_DLSS_PRESET=nvidia|j|k|l|m (NVIDIA's model), FC_DLSS_EXPOSURE=fixed (no auto exposure),
+  FC_DLSS_CONSERVATIVE=0 (motion vectors without conservative rasterization).
   DLSS (NVIDIA RTX): nvngx_dlss.dll of the DLSS SDK next to the program. }
 
 uses
@@ -60,7 +61,8 @@ begin
     else if SameText(GetEnvironmentVariable('FC_DLSS'), 'dlaa') then
       FastContext3DDlssMode := TFastDlssMode.DLAA;
     // Diagnostics of DLSS: FC_DLSS_JITTER=off|-x|-y|-xy, FC_DLSS_VIEW=input|motion, FC_DLSS_EMULATE=1|accumulate
-    // (any card), FC_DLSS_CAMERA_MOTION=0; variants: FC_DLSS_PRESET=j|k|l|m, FC_DLSS_EXPOSURE=fixed.
+    // (any card), FC_DLSS_CAMERA_MOTION=0; variants: FC_DLSS_PRESET=nvidia|j|k|l|m, FC_DLSS_EXPOSURE=fixed,
+    // FC_DLSS_CONSERVATIVE=0.
     if SameText(GetEnvironmentVariable('FC_DLSS_JITTER'), 'off') then
       FastDlssJitterTest := TFastDlssJitterTest.Off
     else if SameText(GetEnvironmentVariable('FC_DLSS_JITTER'), '-x') then
@@ -80,7 +82,9 @@ begin
       FastDlssEmulate := TFastDlssEmulation.Temporal;
     if GetEnvironmentVariable('FC_DLSS_CAMERA_MOTION') = '0' then
       FastDlssCameraMotion := False;
-    if SameText(GetEnvironmentVariable('FC_DLSS_PRESET'), 'j') then
+    if SameText(GetEnvironmentVariable('FC_DLSS_PRESET'), 'nvidia') then
+      FastDlssPreset := TFastDlssPreset.Nvidia
+    else if SameText(GetEnvironmentVariable('FC_DLSS_PRESET'), 'j') then
       FastDlssPreset := TFastDlssPreset.J
     else if SameText(GetEnvironmentVariable('FC_DLSS_PRESET'), 'k') then
       FastDlssPreset := TFastDlssPreset.K
@@ -88,6 +92,8 @@ begin
       FastDlssPreset := TFastDlssPreset.L
     else if SameText(GetEnvironmentVariable('FC_DLSS_PRESET'), 'm') then
       FastDlssPreset := TFastDlssPreset.M;
+    if GetEnvironmentVariable('FC_DLSS_CONSERVATIVE') = '0' then
+      FastDlssConservativeMotion := False;
     if SameText(GetEnvironmentVariable('FC_DLSS_EXPOSURE'), 'fixed') then
       FastDlssAutoExposure := False;
     InstallFastCanvas;

@@ -1986,6 +1986,7 @@ begin
       Dlss.Hdr := FWindowHdr;
       Dlss.AutoExposure := FastDlssAutoExposure;
       Dlss.Preset := FastDlssPreset;
+      Dlss.Conservative := FastDlssConservativeMotion and DlssConservativeSupported;
       Dlss.MipBias := Log2(Dlss.InputSize.Width / Dlss.OutputSize.Width) - 1;
       Dlss.MakeTextures;
       DepthSize := Dlss.InputSize;
