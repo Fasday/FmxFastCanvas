@@ -17,7 +17,8 @@ unit FastCanvas.Context3DVk;
 
   Shaders: FMX's own shaders as SPIR-V made from their GLSL sources (tools\compile-fmx-shaders-vk.ps1,
   FastCanvas.VkFmxShaders.inc), found by a hash of the GLSL source and of the Direct3D variables; their constants are
-  laid out as for Direct3D (FastCanvas.Context3D), one uniform block per stage. A shader without SPIR-V there (an
+  laid out as for Direct3D (FastCanvas.Context3D), one uniform block per stage. Off Windows FMX ships no Direct3D
+  sources: the table's copy of their variables gives the layout (ShaderLayout). A shader without SPIR-V there (an
   application's own shader) raises EContext3DException: not supported. One descriptor set layout, pushed per draw
   (VK_KHR_push_descriptor; without it written into a set of the recording context's pools and bound): binding 0 the
   vertex constants, 1 the pixel constants, 2..9 the texture units with their samplers. Clip space as
@@ -87,6 +88,8 @@ type
     class procedure DoUpdateTexture(const Texture: TTexture; const Bits: Pointer; const Pitch: Integer); override;
     class function DoBitmapToTexture(const Bitmap: TBitmap): TTexture; override;
     class procedure CreateNativeShader(const AShader: TFastShader); override;
+    class function ShaderLayout(const Shader: TContextShader; out AVariables: TContextShaderVariables): Boolean;
+      override;
     class function TextureObject(const ATexture: TTexture): IInterface; override;
     constructor CreateFromWindow(const AParent: TWindowHandle; const AWidth, AHeight: Single;
       const AMultisample: TMultisample; const ADepthStencil: Boolean); override;
@@ -1825,7 +1828,6 @@ begin
 end;
 
 class function TFastContext3DVk.Valid: Boolean;
-{$IFDEF MSWINDOWS}
 var
   V: TFastVulkan;
 begin
@@ -1833,13 +1835,6 @@ begin
   V := TFastDevice.Vulkan;
   Result := (V <> nil) and (V.DepthFormat <> VK_FORMAT_UNDEFINED);
 end;
-{$ELSE}
-begin
-  // FMX ships the Direct3D sources of its shaders on Windows only, and the context takes their variables (the
-  // constant layout, the key of the SPIR-V): elsewhere every shader would be left out and nothing drawn.
-  Result := False;
-end;
-{$ENDIF}
 
 class function TFastContext3DVk.RayTracingSupported: Boolean;
 begin
@@ -2565,9 +2560,38 @@ begin
   end;
 end;
 
+class function TFastContext3DVk.ShaderLayout(const Shader: TContextShader;
+  out AVariables: TContextShaderVariables): Boolean;
+var
+  Glsl: TContextShaderSource;
+  Hash: UInt64;
+  I, J: Integer;
+  V: TVkFmxVariable;
+begin
+  // No Direct3D source (off Windows): the entry of the GLSL source and stage (one layout per source and stage,
+  // checked by tools\compile-fmx-shaders-vk.ps1) has the Direct3D variables.
+  AVariables := nil;
+  Result := False;
+  Glsl := Shader.GetSourceByArch(TContextShaderArch.GLSL);
+  if not Glsl.IsDefined or (Length(Glsl.Code) = 0) then
+    Exit;
+  Hash := Fnv(@Glsl.Code[0], Length(Glsl.Code));
+  for I := 0 to High(VkFmxShaders) do
+    if (VkFmxShaders[I].Hash = Hash) and (VkFmxShaders[I].Vertex = (Shader.Kind = TContextShaderKind.VertexShader)) then
+    begin
+      SetLength(AVariables, VkFmxShaders[I].VarCount);
+      for J := 0 to VkFmxShaders[I].VarCount - 1 do
+      begin
+        V := VkFmxVariables[VkFmxShaders[I].VarFirst + J];
+        AVariables[J] := TContextShaderVariable.Create(V.Name, V.Kind, V.Index, V.Size);
+      end;
+      Exit(True);
+    end;
+end;
+
 class procedure TFastContext3DVk.CreateNativeShader(const AShader: TFastShader);
 var
-  Glsl, Dx: TContextShaderSource;
+  Glsl: TContextShaderSource;
   Hash, Vars: UInt64;
   I, Entry: Integer;
   Name: string;
@@ -2578,16 +2602,11 @@ begin
   begin
     Name := GPendingShader.Name;
     Glsl := GPendingShader.GetSourceByArch(TContextShaderArch.GLSL);
-    // The Direct3D source FastCanvas.Context3D took (its variables lay the constants out).
-    Dx := GPendingShader.GetSourceByArch(TContextShaderArch.DX11);
-    if not Dx.IsDefined then
-      Dx := GPendingShader.GetSourceByArch(TContextShaderArch.DX10);
-    if not Dx.IsDefined then
-      Dx := GPendingShader.GetSourceByArch(TContextShaderArch.DX11_level_9);
-    if Glsl.IsDefined and Dx.IsDefined then
+    if Glsl.IsDefined and (Length(Glsl.Code) > 0) then
     begin
       Hash := Fnv(@Glsl.Code[0], Length(Glsl.Code));
-      Vars := VariablesHash(Dx.Variables);
+      // The variables FastCanvas.Context3D took: of the Direct3D source, or of ShaderLayout.
+      Vars := VariablesHash(AShader.Variables);
       for I := 0 to High(VkFmxShaders) do
         if (VkFmxShaders[I].Hash = Hash) and (VkFmxShaders[I].Vars = Vars) and
           (VkFmxShaders[I].Vertex = (AShader.Kind = TContextShaderKind.VertexShader)) then
@@ -2742,10 +2761,6 @@ end;
 
 procedure InstallFastContext3DVk;
 begin
-{$IFNDEF MSWINDOWS}
-  // Not off Windows yet (see Valid): FMX's own 3D context stays.
-  Exit;
-{$ENDIF}
   if GContexts = nil then
   begin
     GContexts := TList<TFastContext3DVk>.Create;

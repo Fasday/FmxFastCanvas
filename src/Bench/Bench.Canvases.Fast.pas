@@ -10,7 +10,7 @@ implementation
 uses
   System.SysUtils, System.TypInfo, FMX.Graphics, Bench.Config, Bench.Canvases,
   FastCanvas.Context3D11, FastCanvas.Context3D12, FastCanvas.Context3DVk, FastCanvas.Device, FastCanvas.Hdr,
-  FastCanvas.Geometry, FastCanvas.Text, FastCanvas.Canvas;
+  FastCanvas.Geometry, FastCanvas.GeometryOwn, FastCanvas.Text, FastCanvas.Canvas;
 
 
 function FastCanvasOptionsText(const AOptions: TFastCanvasOptions): string;
@@ -56,7 +56,7 @@ begin
           SameText(Name, 'NoPartial') or SameText(Name, 'RayReflect') or SameText(Name, 'HdrForce') or
           SameText(Name, 'HdrAuto') or SameText(Name, 'Composition') or SameText(Name, 'ClearType') or
           SameText(Name, 'TextAliased') or SameText(Name, 'TextSystem') or SameText(Name, 'SkiaGeometry') or
-          SameText(Name, 'SkiaText') then
+          SameText(Name, 'SkiaText') or SameText(Name, 'OwnGeometry') then
           Continue;
         if SameText(Name, 'none') then
         begin
@@ -117,9 +117,11 @@ begin
         FastCanvasTextAntialias := TFastTextAntialias.System
       else
         FastCanvasTextAntialias := TFastTextAntialias.Grayscale;
-      // The CPU engines: Skia's (the engines of Android and Linux) or Direct2D's and DirectWrite's.
+      // The CPU engines: Skia's, FastCanvas's own geometry (Android's and Linux's) or Direct2D's and DirectWrite's.
       if (ABaseOptions + ',' + AConfig.CanvasOpts).Contains('SkiaGeometry') then
         FastCanvasGeometryEngine := TFastCanvasEngine.Skia
+      else if (ABaseOptions + ',' + AConfig.CanvasOpts).Contains('OwnGeometry') then
+        FastCanvasGeometryEngine := TFastCanvasEngine.Own
       else
         FastCanvasGeometryEngine := TFastCanvasEngine.Native;
       if (ABaseOptions + ',' + AConfig.CanvasOpts).Contains('SkiaText') then
@@ -184,7 +186,9 @@ begin
         TFastTextAntialias.System: Result := Result + '+TextSystem';
       end;
       if FastCanvasGeometryEngine = TFastCanvasEngine.Skia then
-        Result := Result + '+SkiaGeometry';
+        Result := Result + '+SkiaGeometry'
+      else if FastCanvasGeometryEngine = TFastCanvasEngine.Own then
+        Result := Result + '+OwnGeometry';
       if FastCanvasTextEngine = TFastCanvasEngine.Skia then
         Result := Result + '+SkiaText';
     end;
@@ -269,6 +273,9 @@ begin
   RegisterFastCanvas('fcvkskia',
     'FastCanvas on Vulkan with the Skia geometry and text engines (those of Android and Linux)',
     'Vulkan,SkiaGeometry,SkiaText');
+  RegisterFastCanvas('fcvkown',
+    'FastCanvas on Vulkan with its own geometry engine (that of Android and Linux; text by DirectWrite)',
+    'Vulkan,OwnGeometry');
   RegisterFastCanvas('fcst', 'FastCanvas without the render thread (commands executed on the main thread)',
     'MainThread');
   RegisterFastCanvas('fcheapsleep', 'FastCanvas with the memory manager sleeping on lock contention (RTL default)',

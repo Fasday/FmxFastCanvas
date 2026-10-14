@@ -5,9 +5,10 @@ unit FastCanvas.Geometry;
   flattened to a tolerance) or of the outline of a stroke (joins, caps, dashes) into a TFastEdgeSink, and whether a
   point is inside a fill (PtInPath).
 
-  Engines: Direct2D (FastCanvas.GeometryD2D, Windows, the default there: ID2D1Geometry.Simplify and Widen) and Skia
-  (FastCanvas.GeometrySkia, every platform, the only one on Android and Linux: SkPath, SkPaint.GetFillPath). An
-  engine unit registers itself when it is linked; FastCanvasGeometryEngine chooses one. }
+  Engines: Direct2D (FastCanvas.GeometryD2D, Windows, the default there: ID2D1Geometry.Simplify and Widen), FastCanvas's
+  own (FastCanvas.GeometryOwn, every platform, the default on Android and Linux: no library) and Skia
+  (FastCanvas.GeometrySkia, every platform: SkPath, SkPaint.GetFillPath). An engine unit registers itself when it is
+  linked; FastCanvasGeometryEngine chooses one. }
 
 interface
 
@@ -23,7 +24,10 @@ type
     /// <summary>Skia (System.Skia; sk4d.dll next to the program on Windows, libsk4d.so on Linux, linked into the
     /// program on Android). On Windows add the units FastCanvas.GeometrySkia and FastCanvas.TextSkia to the program.
     /// </summary>
-    Skia);
+    Skia,
+    /// <summary>FastCanvas's own (FastCanvas.GeometryOwn): geometry only, every platform. On Windows add the unit
+    /// FastCanvas.GeometryOwn to the program.</summary>
+    Own);
 
   TFastEdge = record
     X0, Y0, X1, Y1: Single;
@@ -109,13 +113,14 @@ type
 
 var
   /// <summary>The engine of the CPU geometry; read when the canvas makes its renderer (the first scene) and by
-  /// PtInPath. Android and Linux: Skia whatever it says.</summary>
+  /// PtInPath. Native (Direct2D) on Windows, Own elsewhere (Native stands for it there); Skia where asked for.
+  /// </summary>
   FastCanvasGeometryEngine: TFastCanvasEngine =
-    {$IFDEF MSWINDOWS}TFastCanvasEngine.Native{$ELSE}TFastCanvasEngine.Skia{$ENDIF};
+    {$IFDEF MSWINDOWS}TFastCanvasEngine.Native{$ELSE}TFastCanvasEngine.Own{$ENDIF};
 
 /// <summary>Called by the engine units (initialization).</summary>
 procedure FastRegisterGeometryEngine(const AKind: TFastCanvasEngine; const AClass: TFastGeometryEngineClass);
-/// <summary>The class of the engine FastCanvasGeometryEngine chooses (Skia on Android and Linux). Raises when the
+/// <summary>The class of the engine FastCanvasGeometryEngine chooses (off Windows Native means Own). Raises when the
 /// unit of that engine is not in the program.</summary>
 function FastGeometryEngineClass: TFastGeometryEngineClass;
 
@@ -130,17 +135,21 @@ begin
 end;
 
 function FastGeometryEngineClass: TFastGeometryEngineClass;
+const
+  Units: array[TFastCanvasEngine] of string = ('FastCanvas.GeometryD2D', 'FastCanvas.GeometrySkia',
+    'FastCanvas.GeometryOwn');
 var
   Kind: TFastCanvasEngine;
 begin
-{$IFDEF MSWINDOWS}
   Kind := FastCanvasGeometryEngine;
-{$ELSE}
-  Kind := TFastCanvasEngine.Skia;
+{$IFNDEF MSWINDOWS}
+  // No Direct2D there.
+  if Kind = TFastCanvasEngine.Native then
+    Kind := TFastCanvasEngine.Own;
 {$ENDIF}
   Result := GEngines[Kind];
   if Result = nil then
-    raise Exception.Create('FastCanvas: the geometry engine is not in the program (add FastCanvas.GeometrySkia)');
+    raise Exception.CreateFmt('FastCanvas: the geometry engine is not in the program (add %s)', [Units[Kind]]);
 end;
 
 { TFastGeometryEngine }

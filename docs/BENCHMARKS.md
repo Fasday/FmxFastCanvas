@@ -233,6 +233,15 @@ against 1195 / 1137, `text` 1979 / 1962 against 1941 / 1939, `paragraph` 547 / 5
 `paragraph` 25 % (Skia's line height is a fraction of a pixel larger, so lines drift and two lines break elsewhere),
 `controls` and `aa` 0.5 %, `rare` 1.6 %.
 
+`fcvkown` (the own geometry engine of Android and Linux, text by DirectWrite) against `fcvk` (Direct2D's geometry),
+measured 2026-10-14 at 1920 x 1080 on the second monitor (3840 x 2160, 60 Hz; check-only numbers), `medium`,
+throughput, median of three runs, frames per second: `strokes` 1226 / 1191, `paths` 1467 / 1395, `lines` 2077 / 1862,
+`roundrects` 2391 / 1955, `ellipses` 4812 / 4429, `clip` 5585 / 5703, `rare` 6651 / 5123, `aa` 2491 / 1838: the same
+or faster (paths that move are widened every frame, through Direct2D's COM calls on `fcvk`; repeated runs varied by
+up to 15 %). Screenshots (`tools\compare-shots.ps1`, pixels whose summed RGB difference exceeds 24): `strokes`
+0.35 %, `paths` 0.17 %, `rare` 0.026 %, `roundrects` 0.003 % (antialiasing at curves and dash ends), every other scene
+0 % (but for the window's corner pixels).
+
 ## Running the benchmark
 
 Everything that produced the tables is in the repository:
