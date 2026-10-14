@@ -466,7 +466,7 @@ begin
   Rendering.pColorAttachmentFormats := @ColorFormat;
   FillChar(Info, SizeOf(Info), 0);
   Info.sType := VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
-  Info.pNext := @Rendering;
+  C.Fast.PipelineTarget(Info, @Rendering, Max(ASamples, 1));
   Info.stageCount := Length(Stages);
   Info.pStages := @Stages[0];
   Info.pVertexInputState := @VertexInput;
@@ -910,7 +910,7 @@ begin
   Info.layerCount := 1;
   Info.colorAttachmentCount := 1;
   Info.pColorAttachments := @Color;
-  C.BeginRenderingInfo(S, Info);
+  C.BeginRenderingInfo(S, Info, ATarget.Format, ASamples);
   Cmd := C.Cmd;
   Format := ATarget.Format;
   C.Vk.CmdBindPipeline(Cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, S.Pipe(AKind, Format, ASamples, AMultisample));

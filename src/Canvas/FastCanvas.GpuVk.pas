@@ -14,6 +14,14 @@ unit FastCanvas.GpuVk;
   memory barriers. Bitmap surfaces rest in SHADER_READ_ONLY_OPTIMAL. Draws run in dynamic rendering instances, which
   the context ends before every copy or barrier and begins again for the next draw (loading the target).
 
+  Devices without these features (Vulkan 1.1 phones; FASTCANVAS_VK_LEGACY=1, FASTCANVAS_VK_NOTIMELINE=1 on others):
+  without synchronization2 a batch of barriers becomes one vkCmdPipelineBarrier (the union of the batch's stages, the
+  same access masks and layouts: the bits used here have the same values in both) and submissions go through
+  vkQueueSubmit (timeline values in VkTimelineSemaphoreSubmitInfo); without dynamic rendering a rendering instance is
+  a render pass of the same attachments, load and store operations and layouts (TFastVulkan.RenderPass) with a
+  framebuffer of the target's views (made once, destroyed with the views); without timeline semaphores every
+  submission signals a fence of its own (TGpuVkTimeline), whose order on the queue gives the values.
+
   The pipeline: one descriptor set layout (binding 0 the cbuffer Frame, 16..23 the textures of a draw, 24 atlas,
   25 ramps, 26..28 clips, paints and edges as uniform texel buffers, 32..34 the three immutable samplers) and three
   pipelines (blending, copy, dual-source blending) with the SPIR-V of FastCanvas.VkShaders.inc. A draw takes a
@@ -123,6 +131,45 @@ type
     Value: UInt64;
   end;
 
+  TGpuVkFenceValue = record
+    Fence: TVkFence;
+    Value: UInt64;
+  end;
+
+  /// <summary>Values the submissions of a queue signal one after the other, and how far the GPU has come: a timeline
+  /// semaphore, or where the device has none (TFastVulkan.TimelineSemaphore) a fence per submission (the fences of
+  /// one queue are signaled in submission order). Used by one thread at a time.</summary>
+  TGpuVkTimeline = class
+  private
+    FFast: TFastVulkan;
+    FSemaphore: TVkSemaphore;
+    FSignaled, FDone: UInt64;
+    /// <summary>Fences: of submissions not known to be done (by value), and free ones.</summary>
+    FPending: TList<TGpuVkFenceValue>;
+    FFree: TList<TVkFence>;
+  public
+    constructor Create(const AFast: TFastVulkan);
+    /// <summary>The GPU has to be done with the submissions.</summary>
+    destructor Destroy; override;
+    /// <summary>The value of the next submission (Signaled from now on) and the fence it signals (VK_NULL_HANDLE with
+    /// a semaphore: it signals the value of Semaphore).</summary>
+    function Next(out AFence: TVkFence): UInt64;
+    /// <summary>The last value the GPU has reached (all of them on a lost device).</summary>
+    function Completed: UInt64;
+    /// <summary>Waits until the GPU has reached AValue (or the device is lost).</summary>
+    procedure Wait(const AValue: UInt64);
+    /// <summary>The timeline semaphore; VK_NULL_HANDLE with fences.</summary>
+    property Semaphore: TVkSemaphore read FSemaphore;
+    property Signaled: UInt64 read FSignaled;
+  end;
+
+  /// <summary>The views and size a framebuffer is made for (devices without dynamic rendering).</summary>
+  TGpuVkFramebufferKey = packed record
+    Pass: TVkRenderPass;
+    Color, Depth: TVkImageView;
+    Width, Height: Cardinal;
+  end;
+
   /// <summary>Command recording on the queue of the device; with the device lock held.</summary>
   TGpuVkContext = class
   private
@@ -130,7 +177,7 @@ type
     FVk: TVulkan;
     FDevice: TVkDevice;
     FQueue: TVkQueue;
-    FTimeline: TVkSemaphore;
+    FTimeline: TGpuVkTimeline;
     FSignaled: UInt64;
     FCmd: TGpuVkCommands;
     FOpen: Boolean;
@@ -138,6 +185,12 @@ type
     FCommands: TQueue<TGpuVkCommands>;
     FBarriers: TArray<TVkImageMemoryBarrier2>;
     FBarrierCount: Integer;
+    /// <summary>Without synchronization2: the batch as Vulkan 1.0 barriers.</summary>
+    FLegacyBarriers: TArray<TVkImageMemoryBarrier>;
+    /// <summary>Without dynamic rendering: framebuffers by views and size, and how many there are of each view (they
+    /// go when it goes).</summary>
+    FFramebuffers: TDictionary<TGpuVkFramebufferKey, TVkFramebuffer>;
+    FFramebufferViews: TDictionary<TVkImageView, Integer>;
     // The global memory barrier of the batch (table buffers, host reads).
     FMemSrcStage, FMemSrcAccess, FMemDstStage, FMemDstAccess: UInt64;
     FPage: TGpuVkPage;
@@ -159,6 +212,14 @@ type
     function TakePage(const ASize: NativeInt): TGpuVkPage;
     procedure FreePage(const APage: TGpuVkPage);
     procedure NextPool;
+    /// <summary>Begins rendering as AInfo describes: dynamic rendering, else the render pass and framebuffer of the
+    /// same (AColorFormat, ASamples: of the color attachment).</summary>
+    procedure StartRendering(const AInfo: TVkRenderingInfo; const AColorFormat: TVkFormat; const ASamples: Integer);
+    /// <summary>The framebuffer of AColor (and ADepth) for render passes compatible with APass.</summary>
+    function Framebuffer(const APass: TVkRenderPass; const AColor, ADepth: TVkImageView;
+      const AExtent: TVkExtent2D): TVkFramebuffer;
+    /// <summary>The framebuffers of an image view go (the view is destroyed now).</summary>
+    procedure DropFramebuffers(const AView: TVkImageView);
   public
     constructor Create;
     destructor Destroy; override;
@@ -226,8 +287,10 @@ type
     /// whole target is filled with that color first.</summary>
     procedure BeginRendering(const ATarget: TGpuVkSurface; const AClear: PVkClearColorValue = nil);
     /// <summary>Rendering of another renderer (the 3D context), identified by AOwner (Rendering): the active one ends
-    /// and the barriers so far are issued first.</summary>
-    procedure BeginRenderingInfo(const AOwner: TObject; const AInfo: TVkRenderingInfo);
+    /// and the barriers so far are issued first. AColorFormat, ASamples: of the color attachment (render passes);
+    /// depth and stencil are in the device's DepthFormat.</summary>
+    procedure BeginRenderingInfo(const AOwner: TObject; const AInfo: TVkRenderingInfo; const AColorFormat: TVkFormat;
+      const ASamples: Integer);
     procedure EndRendering;
     /// <summary>What the active rendering instance draws into (a canvas surface, another renderer's object), nil
     /// outside rendering.</summary>
@@ -322,8 +385,8 @@ type
   /// driver's acquire and present: the render thread copies a finished frame into the window's FShown and wakes this
   /// thread, which acquires a swap chain image (where FIFO waits for the refresh), copies the newest frame into it and
   /// presents it; frames that come faster than it takes them are skipped. Its own swap chain, command buffers
-  /// (recorded once per image and frame size) and timeline semaphore; it takes the queue lock to submit and present,
-  /// never the device lock.</summary>
+  /// (recorded once per image and frame size) and timeline (TGpuVkTimeline); it takes the queue lock to submit and
+  /// present, never the device lock.</summary>
   TGpuVkPresenter = class(TThread)
   private
     FWindow: TGpuVkWindow;
@@ -361,7 +424,7 @@ type
     /// its last submission.</summary>
     FCmdGens: TArray<Integer>;
     FCmdValues: TArray<UInt64>;
-    FTimeline: TVkSemaphore;
+    FTimeline: TGpuVkTimeline;
     FValue: UInt64;
     FStale: Boolean;
     FCheckedW, FCheckedH: Integer;
@@ -575,12 +638,290 @@ begin
   Result.layerCount := 1;
 end;
 
-{ TGpuVkContext }
+/// <summary>Stages of synchronization2 as those of Vulkan 1.0 (the stages used here have the same bits in both);
+/// ANone where there are none (TOP_OF_PIPE for a source, BOTTOM_OF_PIPE for a destination).</summary>
+function LegacyStages(const AStages: UInt64; const ANone: TVkPipelineStageFlagBits): TVkPipelineStageFlags; inline;
+begin
+  Result := TVkPipelineStageFlags(AStages and $FFFFFFFF);
+  if Result = 0 then
+    Result := Ord(ANone);
+end;
 
-constructor TGpuVkContext.Create;
+/// <summary>Records one image barrier: synchronization2, or vkCmdPipelineBarrier with the same masks and layouts.
+/// </summary>
+procedure CmdImageBarrier(const AFast: TFastVulkan; const ACmd: TVkCommandBuffer;
+  const ABarrier: TVkImageMemoryBarrier2);
+var
+  Dep: TVkDependencyInfo;
+  B: TVkImageMemoryBarrier;
+begin
+  if AFast.Synchronization2 then
+  begin
+    FillChar(Dep, SizeOf(Dep), 0);
+    Dep.sType := VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+    Dep.imageMemoryBarrierCount := 1;
+    Dep.pImageMemoryBarriers := @ABarrier;
+    AFast.Vk.CmdPipelineBarrier2(ACmd, @Dep);
+    Exit;
+  end;
+  FillChar(B, SizeOf(B), 0);
+  B.sType := VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+  B.srcAccessMask := TVkAccessFlags(ABarrier.srcAccessMask and $FFFFFFFF);
+  B.dstAccessMask := TVkAccessFlags(ABarrier.dstAccessMask and $FFFFFFFF);
+  B.oldLayout := ABarrier.oldLayout;
+  B.newLayout := ABarrier.newLayout;
+  B.srcQueueFamilyIndex := ABarrier.srcQueueFamilyIndex;
+  B.dstQueueFamilyIndex := ABarrier.dstQueueFamilyIndex;
+  B.image := ABarrier.image;
+  B.subresourceRange := ABarrier.subresourceRange;
+  AFast.Vk.CmdPipelineBarrier(ACmd, LegacyStages(ABarrier.srcStageMask, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT),
+    LegacyStages(ABarrier.dstStageMask, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT), 0, 0, nil, 0, nil, 1, @B);
+end;
+
+/// <summary>Submits ACmd (VK_NULL_HANDLE: no command buffer) to the queue; the caller holds the queue lock. Waits for
+/// AWait (a binary semaphore, VK_NULL_HANDLE: none) at AWaitStage, signals ASignal (binary, or none) and AValue of
+/// ATimeline: its semaphore, or AFence. vkQueueSubmit2 with synchronization2, else vkQueueSubmit (the value in
+/// VkTimelineSemaphoreSubmitInfo).</summary>
+function QueueSubmit(const AFast: TFastVulkan; const ACmd: TVkCommandBuffer; const AWait: TVkSemaphore;
+  const AWaitStage: UInt64; const ASignal: TVkSemaphore; const ATimeline: TGpuVkTimeline; const AValue: UInt64;
+  const AFence: TVkFence): TVkResult;
+var
+  Info2: TVkSubmitInfo2;
+  CmdInfo: TVkCommandBufferSubmitInfo;
+  Wait2: TVkSemaphoreSubmitInfo;
+  Signals2: array[0..1] of TVkSemaphoreSubmitInfo;
+  Info: TVkSubmitInfo;
+  TimelineInfo: TVkTimelineSemaphoreSubmitInfo;
+  Signals, Waits: array[0..1] of TVkSemaphore;
+  Values: array[0..1] of UInt64;
+  WaitStage: TVkPipelineStageFlags;
+  Cmd: TVkCommandBuffer;
+  I, N: Integer;
+begin
+  N := 0;
+  if ATimeline.Semaphore <> VK_NULL_HANDLE then
+  begin
+    Signals[N] := ATimeline.Semaphore;
+    Values[N] := AValue;
+    Inc(N);
+  end;
+  if ASignal <> VK_NULL_HANDLE then
+  begin
+    Signals[N] := ASignal;
+    Values[N] := 0;
+    Inc(N);
+  end;
+  Cmd := ACmd;
+  if AFast.Synchronization2 then
+  begin
+    FillChar(Info2, SizeOf(Info2), 0);
+    Info2.sType := VK_STRUCTURE_TYPE_SUBMIT_INFO_2;
+    if Cmd <> VK_NULL_HANDLE then
+    begin
+      FillChar(CmdInfo, SizeOf(CmdInfo), 0);
+      CmdInfo.sType := VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO;
+      CmdInfo.commandBuffer := Cmd;
+      Info2.commandBufferInfoCount := 1;
+      Info2.pCommandBufferInfos := @CmdInfo;
+    end;
+    if AWait <> VK_NULL_HANDLE then
+    begin
+      FillChar(Wait2, SizeOf(Wait2), 0);
+      Wait2.sType := VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO;
+      Wait2.semaphore := AWait;
+      Wait2.stageMask := AWaitStage;
+      Info2.waitSemaphoreInfoCount := 1;
+      Info2.pWaitSemaphoreInfos := @Wait2;
+    end;
+    FillChar(Signals2, SizeOf(Signals2), 0);
+    for I := 0 to N - 1 do
+    begin
+      Signals2[I].sType := VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO;
+      Signals2[I].semaphore := Signals[I];
+      Signals2[I].value := Values[I];
+      Signals2[I].stageMask := StageAllCommands;
+    end;
+    Info2.signalSemaphoreInfoCount := N;
+    if N > 0 then
+      Info2.pSignalSemaphoreInfos := @Signals2[0];
+    Exit(AFast.Vk.QueueSubmit2(AFast.Queue, 1, @Info2, AFence));
+  end;
+  FillChar(Info, SizeOf(Info), 0);
+  Info.sType := VK_STRUCTURE_TYPE_SUBMIT_INFO;
+  if Cmd <> VK_NULL_HANDLE then
+  begin
+    Info.commandBufferCount := 1;
+    Info.pCommandBuffers := @Cmd;
+  end;
+  if AWait <> VK_NULL_HANDLE then
+  begin
+    Waits[0] := AWait;
+    WaitStage := LegacyStages(AWaitStage, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
+    Info.waitSemaphoreCount := 1;
+    Info.pWaitSemaphores := @Waits[0];
+    Info.pWaitDstStageMask := @WaitStage;
+  end;
+  Info.signalSemaphoreCount := N;
+  if N > 0 then
+    Info.pSignalSemaphores := @Signals[0];
+  if ATimeline.Semaphore <> VK_NULL_HANDLE then
+  begin
+    // A value per signaled semaphore (the binary one's is ignored); the wait is on a binary semaphore.
+    FillChar(TimelineInfo, SizeOf(TimelineInfo), 0);
+    TimelineInfo.sType := VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;
+    TimelineInfo.signalSemaphoreValueCount := N;
+    TimelineInfo.pSignalSemaphoreValues := @Values[0];
+    Info.pNext := @TimelineInfo;
+  end;
+  Result := AFast.Vk.QueueSubmit(AFast.Queue, 1, @Info, AFence);
+end;
+
+{ TGpuVkTimeline }
+
+constructor TGpuVkTimeline.Create(const AFast: TFastVulkan);
 var
   TypeInfo: TVkSemaphoreTypeCreateInfo;
   Info: TVkSemaphoreCreateInfo;
+begin
+  inherited Create;
+  FFast := AFast;
+  FPending := TList<TGpuVkFenceValue>.Create;
+  FFree := TList<TVkFence>.Create;
+  if not FFast.TimelineSemaphore then
+    Exit;
+  FillChar(TypeInfo, SizeOf(TypeInfo), 0);
+  TypeInfo.sType := VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO;
+  TypeInfo.semaphoreType := VK_SEMAPHORE_TYPE_TIMELINE;
+  TypeInfo.initialValue := 0;
+  FillChar(Info, SizeOf(Info), 0);
+  Info.sType := VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+  Info.pNext := @TypeInfo;
+  FFast.Check(FFast.Vk.CreateSemaphore(FFast.Device, @Info, nil, @FSemaphore), 'vkCreateSemaphore (timeline)');
+end;
+
+destructor TGpuVkTimeline.Destroy;
+var
+  F: TGpuVkFenceValue;
+  Fence: TVkFence;
+begin
+  if FFast <> nil then
+  begin
+    if FSemaphore <> VK_NULL_HANDLE then
+      FFast.Vk.DestroySemaphore(FFast.Device, FSemaphore, nil);
+    if FPending <> nil then
+      for F in FPending do
+        FFast.Vk.DestroyFence(FFast.Device, F.Fence, nil);
+    if FFree <> nil then
+      for Fence in FFree do
+        FFast.Vk.DestroyFence(FFast.Device, Fence, nil);
+  end;
+  FPending.Free;
+  FFree.Free;
+  inherited;
+end;
+
+function TGpuVkTimeline.Next(out AFence: TVkFence): UInt64;
+var
+  Info: TVkFenceCreateInfo;
+  F: TGpuVkFenceValue;
+begin
+  AFence := VK_NULL_HANDLE;
+  if FSemaphore = VK_NULL_HANDLE then
+  begin
+    // Fences of submissions done are free again.
+    Completed;
+    if FFree.Count > 0 then
+    begin
+      AFence := FFree.Last;
+      FFree.Delete(FFree.Count - 1);
+    end
+    else
+    begin
+      FillChar(Info, SizeOf(Info), 0);
+      Info.sType := VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+      FFast.Check(FFast.Vk.CreateFence(FFast.Device, @Info, nil, @AFence), 'vkCreateFence');
+    end;
+    F.Fence := AFence;
+    F.Value := FSignaled + 1;
+    FPending.Add(F);
+  end;
+  Inc(FSignaled);
+  Result := FSignaled;
+end;
+
+function TGpuVkTimeline.Completed: UInt64;
+var
+  Res: TVkResult;
+  Fence: TVkFence;
+begin
+  // A lost device never completes: everything counts as done.
+  if FSemaphore <> VK_NULL_HANDLE then
+  begin
+    if Ord(FFast.Track(FFast.Vk.GetSemaphoreCounterValue(FFast.Device, FSemaphore, @Result))) < 0 then
+      Result := FSignaled;
+    Exit;
+  end;
+  if FFast.Lost then
+    Exit(FSignaled);
+  while FPending.Count > 0 do
+  begin
+    Fence := FPending[0].Fence;
+    Res := FFast.Track(FFast.Vk.GetFenceStatus(FFast.Device, Fence));
+    if Res = VK_NOT_READY then
+      Break;
+    if Res <> VK_SUCCESS then
+      Exit(FSignaled);
+    FDone := FPending[0].Value;
+    FPending.Delete(0);
+    FFast.Vk.ResetFences(FFast.Device, 1, @Fence);
+    FFree.Add(Fence);
+  end;
+  Result := FDone;
+end;
+
+procedure TGpuVkTimeline.Wait(const AValue: UInt64);
+var
+  Info: TVkSemaphoreWaitInfo;
+  Value: UInt64;
+  Fence: TVkFence;
+  Res: TVkResult;
+  I: Integer;
+begin
+  if (AValue = 0) or (AValue > FSignaled) or (Completed >= AValue) then
+    Exit;
+  if FSemaphore <> VK_NULL_HANDLE then
+  begin
+    Value := AValue;
+    FillChar(Info, SizeOf(Info), 0);
+    Info.sType := VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;
+    Info.semaphoreCount := 1;
+    Info.pSemaphores := @FSemaphore;
+    Info.pValues := @Value;
+    // In slices, to notice a lost device.
+    repeat
+      Res := FFast.Track(FFast.Vk.WaitSemaphores(FFast.Device, @Info, WaitSlice));
+    until (Res <> VK_TIMEOUT) or FFast.Lost;
+    Exit;
+  end;
+  // The fence of the first submission with that value or a later one.
+  Fence := VK_NULL_HANDLE;
+  for I := 0 to FPending.Count - 1 do
+    if FPending[I].Value >= AValue then
+    begin
+      Fence := FPending[I].Fence;
+      Break;
+    end;
+  if Fence = VK_NULL_HANDLE then
+    Exit;
+  repeat
+    Res := FFast.Track(FFast.Vk.WaitForFences(FFast.Device, 1, @Fence, VK_TRUE, WaitSlice));
+  until (Res <> VK_TIMEOUT) or FFast.Lost;
+  Completed;
+end;
+
+{ TGpuVkContext }
+
+constructor TGpuVkContext.Create;
 begin
   inherited Create;
   FFast := TFastDevice.Vulkan;
@@ -598,15 +939,15 @@ begin
   FFreePools := TList<TVkDescriptorPool>.Create;
   FSurfaces := TList<TGpuVkSurface>.Create;
   FWindows := TList<TGpuVkWindow>.Create;
+  FFramebuffers := TDictionary<TGpuVkFramebufferKey, TVkFramebuffer>.Create;
+  FFramebufferViews := TDictionary<TVkImageView, Integer>.Create;
   SetLength(FBarriers, 16);
-  FillChar(TypeInfo, SizeOf(TypeInfo), 0);
-  TypeInfo.sType := VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO;
-  TypeInfo.semaphoreType := VK_SEMAPHORE_TYPE_TIMELINE;
-  TypeInfo.initialValue := 0;
-  FillChar(Info, SizeOf(Info), 0);
-  Info.sType := VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
-  Info.pNext := @TypeInfo;
-  Check(FVk.CreateSemaphore(FDevice, @Info, nil, @FTimeline), 'vkCreateSemaphore (timeline)');
+  try
+    FTimeline := TGpuVkTimeline.Create(FFast);
+  except
+    on E: EFastVulkan do
+      raise EFastDevice.Create(E.Message);
+  end;
 end;
 
 destructor TGpuVkContext.Destroy;
@@ -617,6 +958,7 @@ var
   D: TVkDescriptorPool;
   W: TGpuVkWindow;
   S: TGpuVkSurface;
+  Fb: TVkFramebuffer;
 begin
   WaitIdle;
   // The 3D context lets go of what it made on the device (textures FMX still holds, pipelines).
@@ -654,8 +996,11 @@ begin
     FCommands.Enqueue(FCmd);
   while FCommands.Count > 0 do
     FVk.DestroyCommandPool(FDevice, FCommands.Dequeue.Pool, nil);
-  if FTimeline <> VK_NULL_HANDLE then
-    FVk.DestroySemaphore(FDevice, FTimeline, nil);
+  FreeAndNil(FTimeline);
+  for Fb in FFramebuffers.Values do
+    FVk.DestroyFramebuffer(FDevice, Fb, nil);
+  FFramebuffers.Free;
+  FFramebufferViews.Free;
   FCommands.Free;
   FBusyPages.Free;
   FFreePages.Free;
@@ -675,9 +1020,9 @@ end;
 
 function TGpuVkContext.Completed: UInt64;
 begin
-  // A lost device never completes: everything counts as done.
-  if Ord(FFast.Track(FVk.GetSemaphoreCounterValue(FDevice, FTimeline, @Result))) < 0 then
-    Result := FSignaled;
+  if FTimeline = nil then
+    Exit(FSignaled);
+  Result := FTimeline.Completed;
 end;
 
 procedure TGpuVkContext.DestroyObject(const AKind: TGpuVkObject; const AHandle: UInt64);
@@ -686,7 +1031,12 @@ begin
     Exit;
   case AKind of
     TGpuVkObject.Image: FVk.DestroyImage(FDevice, AHandle, nil);
-    TGpuVkObject.ImageView: FVk.DestroyImageView(FDevice, AHandle, nil);
+    TGpuVkObject.ImageView:
+      begin
+        if (FFramebufferViews <> nil) and FFramebufferViews.ContainsKey(AHandle) then
+          DropFramebuffers(AHandle);
+        FVk.DestroyImageView(FDevice, AHandle, nil);
+      end;
     TGpuVkObject.Memory: FFast.Release(TFastVkAllocation(NativeUInt(AHandle)));
     TGpuVkObject.Buffer: FVk.DestroyBuffer(FDevice, AHandle, nil);
     TGpuVkObject.BufferView: FVk.DestroyBufferView(FDevice, AHandle, nil);
@@ -758,16 +1108,14 @@ end;
 function TGpuVkContext.Submit(const AWait: TVkSemaphore; const AWaitStage: UInt64;
   const ASignal: TVkSemaphore): UInt64;
 var
-  Info: TVkSubmitInfo2;
-  CmdInfo: TVkCommandBufferSubmitInfo;
-  Wait: TVkSemaphoreSubmitInfo;
-  Signals: array[0..1] of TVkSemaphoreSubmitInfo;
   Opened: Boolean;
   I: Integer;
   P: TGpuVkPage;
   R: TGpuVkRetired;
   Pool: TGpuVkPool;
   Res: TVkResult;
+  Fence: TVkFence;
+  Buffer: TVkCommandBuffer;
 begin
   EndRendering;
   if (FBarrierCount > 0) or (FMemDstStage <> 0) or (FMemSrcStage <> 0) then
@@ -775,48 +1123,22 @@ begin
   Opened := FOpen;
   if not Opened and (AWait = VK_NULL_HANDLE) and (ASignal = VK_NULL_HANDLE) then
     Exit(0);
+  Buffer := VK_NULL_HANDLE;
   if Opened then
   begin
     FOpen := False;
     Check(FVk.EndCommandBuffer(FCmd.Buffer), 'vkEndCommandBuffer');
+    Buffer := FCmd.Buffer;
   end;
-  Inc(FSignaled);
-  FillChar(Info, SizeOf(Info), 0);
-  Info.sType := VK_STRUCTURE_TYPE_SUBMIT_INFO_2;
-  if Opened then
-  begin
-    FillChar(CmdInfo, SizeOf(CmdInfo), 0);
-    CmdInfo.sType := VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO;
-    CmdInfo.commandBuffer := FCmd.Buffer;
-    Info.commandBufferInfoCount := 1;
-    Info.pCommandBufferInfos := @CmdInfo;
+  try
+    FSignaled := FTimeline.Next(Fence);
+  except
+    on E: EFastVulkan do
+      raise EFastDevice.Create(E.Message);
   end;
-  if AWait <> VK_NULL_HANDLE then
-  begin
-    FillChar(Wait, SizeOf(Wait), 0);
-    Wait.sType := VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO;
-    Wait.semaphore := AWait;
-    Wait.stageMask := AWaitStage;
-    Info.waitSemaphoreInfoCount := 1;
-    Info.pWaitSemaphoreInfos := @Wait;
-  end;
-  FillChar(Signals, SizeOf(Signals), 0);
-  Signals[0].sType := VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO;
-  Signals[0].semaphore := FTimeline;
-  Signals[0].value := FSignaled;
-  Signals[0].stageMask := StageAllCommands;
-  Info.signalSemaphoreInfoCount := 1;
-  if ASignal <> VK_NULL_HANDLE then
-  begin
-    Signals[1].sType := VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO;
-    Signals[1].semaphore := ASignal;
-    Signals[1].stageMask := StageAllCommands;
-    Info.signalSemaphoreInfoCount := 2;
-  end;
-  Info.pSignalSemaphoreInfos := @Signals[0];
   FFast.LockQueue;
   try
-    Res := FVk.QueueSubmit2(FQueue, 1, @Info, VK_NULL_HANDLE);
+    Res := QueueSubmit(FFast, Buffer, AWait, AWaitStage, ASignal, FTimeline, FSignaled, Fence);
   finally
     FFast.UnlockQueue;
   end;
@@ -852,26 +1174,14 @@ begin
       end;
   end;
   if Ord(Res) < 0 then
-    raise EFastDevice.CreateFmt('FastCanvas: vkQueueSubmit2 failed (%d)', [Ord(Res)]);
+    raise EFastDevice.CreateFmt('FastCanvas: the submission to the Vulkan queue failed (%d)', [Ord(Res)]);
 end;
 
 procedure TGpuVkContext.WaitFor(const AValue: UInt64);
-var
-  Info: TVkSemaphoreWaitInfo;
-  Value: UInt64;
-  Res: TVkResult;
 begin
-  if (AValue = 0) or (AValue > FSignaled) or (Completed >= AValue) then
+  if (AValue = 0) or (AValue > FSignaled) or (FTimeline = nil) then
     Exit;
-  Value := AValue;
-  FillChar(Info, SizeOf(Info), 0);
-  Info.sType := VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;
-  Info.semaphoreCount := 1;
-  Info.pSemaphores := @FTimeline;
-  Info.pValues := @Value;
-  repeat
-    Res := FFast.Track(FVk.WaitSemaphores(FDevice, @Info, WaitSlice));
-  until (Res <> VK_TIMEOUT) or FFast.Lost;
+  FTimeline.Wait(AValue);
 end;
 
 procedure TGpuVkContext.WaitIdle;
@@ -1059,13 +1369,63 @@ procedure TGpuVkContext.FlushBarriers;
 var
   Dep: TVkDependencyInfo;
   Mem: TVkMemoryBarrier2;
+  Mem1: TVkMemoryBarrier;
   C: TVkCommandBuffer;
+  Src, Dst: UInt64;
+  I, MemCount: Integer;
+  B: PVkImageMemoryBarrier2;
+  L: PVkImageMemoryBarrier;
 begin
   if (FBarrierCount = 0) and (FMemSrcStage = 0) and (FMemDstStage = 0) then
     Exit;
   // Barriers inside rendering are for the attachments' own feedback only.
   EndRendering;
   C := Cmd;
+  if not FFast.Synchronization2 then
+  begin
+    // One barrier of Vulkan 1.0 for the batch: the union of its stages, each barrier's accesses and layouts.
+    Src := FMemSrcStage;
+    Dst := FMemDstStage;
+    if Length(FLegacyBarriers) < FBarrierCount then
+      SetLength(FLegacyBarriers, Length(FBarriers));
+    for I := 0 to FBarrierCount - 1 do
+    begin
+      B := @FBarriers[I];
+      L := @FLegacyBarriers[I];
+      FillChar(L^, SizeOf(L^), 0);
+      L.sType := VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+      L.srcAccessMask := TVkAccessFlags(B.srcAccessMask and $FFFFFFFF);
+      L.dstAccessMask := TVkAccessFlags(B.dstAccessMask and $FFFFFFFF);
+      L.oldLayout := B.oldLayout;
+      L.newLayout := B.newLayout;
+      L.srcQueueFamilyIndex := B.srcQueueFamilyIndex;
+      L.dstQueueFamilyIndex := B.dstQueueFamilyIndex;
+      L.image := B.image;
+      L.subresourceRange := B.subresourceRange;
+      Src := Src or B.srcStageMask;
+      Dst := Dst or B.dstStageMask;
+    end;
+    MemCount := 0;
+    FillChar(Mem1, SizeOf(Mem1), 0);
+    if (FMemSrcStage <> 0) or (FMemDstStage <> 0) then
+    begin
+      Mem1.sType := VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+      Mem1.srcAccessMask := TVkAccessFlags(FMemSrcAccess and $FFFFFFFF);
+      Mem1.dstAccessMask := TVkAccessFlags(FMemDstAccess and $FFFFFFFF);
+      MemCount := 1;
+    end;
+    L := nil;
+    if FBarrierCount > 0 then
+      L := @FLegacyBarriers[0];
+    FVk.CmdPipelineBarrier(C, LegacyStages(Src, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT),
+      LegacyStages(Dst, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT), 0, MemCount, @Mem1, 0, nil, FBarrierCount, L);
+    FBarrierCount := 0;
+    FMemSrcStage := 0;
+    FMemSrcAccess := 0;
+    FMemDstStage := 0;
+    FMemDstAccess := 0;
+    Exit;
+  end;
   FillChar(Dep, SizeOf(Dep), 0);
   Dep.sType := VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
   if (FMemSrcStage <> 0) or (FMemDstStage <> 0) then
@@ -1447,16 +1807,146 @@ begin
   Info.layerCount := 1;
   Info.colorAttachmentCount := 1;
   Info.pColorAttachments := @Attachment;
-  FVk.CmdBeginRendering(Cmd, @Info);
+  StartRendering(Info, VK_FORMAT_B8G8R8A8_UNORM, 1);
   FRendering := ATarget;
 end;
 
-procedure TGpuVkContext.BeginRenderingInfo(const AOwner: TObject; const AInfo: TVkRenderingInfo);
+procedure TGpuVkContext.BeginRenderingInfo(const AOwner: TObject; const AInfo: TVkRenderingInfo;
+  const AColorFormat: TVkFormat; const ASamples: Integer);
 begin
   EndRendering;
   FlushBarriers;
-  FVk.CmdBeginRendering(Cmd, @AInfo);
+  StartRendering(AInfo, AColorFormat, ASamples);
   FRendering := AOwner;
+end;
+
+procedure TGpuVkContext.StartRendering(const AInfo: TVkRenderingInfo; const AColorFormat: TVkFormat;
+  const ASamples: Integer);
+var
+  Key: TFastVkPassKey;
+  Color, Depth, Stencil: PVkRenderingAttachmentInfo;
+  DepthView: TVkImageView;
+  Clears: array[0..1] of TVkClearValue;
+  Info: TVkRenderPassBeginInfo;
+begin
+  if FFast.DynamicRendering then
+  begin
+    FVk.CmdBeginRendering(Cmd, @AInfo);
+    Exit;
+  end;
+  // A render pass of the same attachments, operations and layouts, with a framebuffer of the views.
+  Color := AInfo.pColorAttachments;
+  Depth := AInfo.pDepthAttachment;
+  Stencil := AInfo.pStencilAttachment;
+  FillChar(Key, SizeOf(Key), 0);
+  FillChar(Clears, SizeOf(Clears), 0);
+  Key.ColorFormat := AColorFormat;
+  Key.DepthFormat := VK_FORMAT_UNDEFINED;
+  Key.Samples := Max(ASamples, 1);
+  Key.ColorLayout := Color.imageLayout;
+  Key.ColorLoad := Color.loadOp;
+  Key.ColorStore := Color.storeOp;
+  Clears[0] := Color.clearValue;
+  DepthView := VK_NULL_HANDLE;
+  if Depth <> nil then
+  begin
+    DepthView := Depth.imageView;
+    Key.DepthFormat := FFast.DepthFormat;
+    Key.DepthLayout := Depth.imageLayout;
+    Key.DepthLoad := Depth.loadOp;
+    Key.DepthStore := Depth.storeOp;
+    Key.StencilLoad := VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    Key.StencilStore := VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    Clears[1].depthStencil.depth := Depth.clearValue.depthStencil.depth;
+    if Stencil <> nil then
+    begin
+      Key.StencilLoad := Stencil.loadOp;
+      Key.StencilStore := Stencil.storeOp;
+      Clears[1].depthStencil.stencil := Stencil.clearValue.depthStencil.stencil;
+    end;
+  end;
+  FillChar(Info, SizeOf(Info), 0);
+  Info.sType := VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+  try
+    Info.renderPass := FFast.RenderPass(Key);
+    Info.framebuffer := Framebuffer(FFast.CompatiblePass(AColorFormat, ASamples, Key.DepthFormat), Color.imageView,
+      DepthView, AInfo.renderArea.extent);
+  except
+    on E: EFastVulkan do
+      raise EFastDevice.Create(E.Message);
+  end;
+  Info.renderArea := AInfo.renderArea;
+  Info.clearValueCount := 1;
+  if Depth <> nil then
+    Info.clearValueCount := 2;
+  Info.pClearValues := @Clears[0];
+  FVk.CmdBeginRenderPass(Cmd, @Info, VK_SUBPASS_CONTENTS_INLINE);
+end;
+
+function TGpuVkContext.Framebuffer(const APass: TVkRenderPass; const AColor, ADepth: TVkImageView;
+  const AExtent: TVkExtent2D): TVkFramebuffer;
+var
+  Key: TGpuVkFramebufferKey;
+  Views: array[0..1] of TVkImageView;
+  Info: TVkFramebufferCreateInfo;
+  View: TVkImageView;
+  N: Integer;
+begin
+  FillChar(Key, SizeOf(Key), 0);
+  Key.Pass := APass;
+  Key.Color := AColor;
+  Key.Depth := ADepth;
+  Key.Width := Max(AExtent.width, 1);
+  Key.Height := Max(AExtent.height, 1);
+  if FFramebuffers.TryGetValue(Key, Result) then
+    Exit;
+  Views[0] := AColor;
+  Views[1] := ADepth;
+  FillChar(Info, SizeOf(Info), 0);
+  Info.sType := VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+  Info.renderPass := APass;
+  Info.attachmentCount := 1;
+  if ADepth <> VK_NULL_HANDLE then
+    Info.attachmentCount := 2;
+  Info.pAttachments := @Views[0];
+  Info.width := Key.Width;
+  Info.height := Key.Height;
+  Info.layers := 1;
+  Result := VK_NULL_HANDLE;
+  Check(FVk.CreateFramebuffer(FDevice, @Info, nil, @Result), 'vkCreateFramebuffer');
+  FFramebuffers.Add(Key, Result);
+  for View in Views do
+    if View <> VK_NULL_HANDLE then
+    begin
+      if not FFramebufferViews.TryGetValue(View, N) then
+        N := 0;
+      FFramebufferViews.AddOrSetValue(View, N + 1);
+    end;
+end;
+
+procedure TGpuVkContext.DropFramebuffers(const AView: TVkImageView);
+var
+  Pair: TPair<TGpuVkFramebufferKey, TVkFramebuffer>;
+  Other: TVkImageView;
+  N: Integer;
+begin
+  // The command buffers that used them are done (the view is destroyed now).
+  for Pair in FFramebuffers.ToArray do
+    if (Pair.Key.Color = AView) or (Pair.Key.Depth = AView) then
+    begin
+      FVk.DestroyFramebuffer(FDevice, Pair.Value, nil);
+      FFramebuffers.Remove(Pair.Key);
+      if Pair.Key.Color = AView then
+        Other := Pair.Key.Depth
+      else
+        Other := Pair.Key.Color;
+      if (Other <> VK_NULL_HANDLE) and FFramebufferViews.TryGetValue(Other, N) then
+        if N > 1 then
+          FFramebufferViews[Other] := N - 1
+        else
+          FFramebufferViews.Remove(Other);
+    end;
+  FFramebufferViews.Remove(AView);
 end;
 
 procedure TGpuVkContext.EndRendering;
@@ -1464,7 +1954,10 @@ begin
   if FRendering = nil then
     Exit;
   FRendering := nil;
-  FVk.CmdEndRendering(FCmd.Buffer);
+  if FFast.DynamicRendering then
+    FVk.CmdEndRendering(FCmd.Buffer)
+  else
+    FVk.CmdEndRenderPass(FCmd.Buffer);
 end;
 
 { TGpuVkSurface }
@@ -1804,14 +2297,15 @@ end;
 
 /// <summary>Records the copy (or the stretching blit) of a frame into a swap chain image, between the barriers that
 /// take the image from the acquire to the present.</summary>
-procedure RecordChainCopy(const AVk: TVulkan; const ACmd: TVkCommandBuffer; const ASource: TGpuVkSurface;
+procedure RecordChainCopy(const AFast: TFastVulkan; const ACmd: TVkCommandBuffer; const ASource: TGpuVkSurface;
   const AImage: TVkImage; const AFormat: TVkFormat; const AExtent: TVkExtent2D);
 var
+  AVk: TVulkan;
   Barrier: TVkImageMemoryBarrier2;
-  Dep: TVkDependencyInfo;
   Copy: TVkImageCopy;
   Blit: TVkImageBlit;
 begin
+  AVk := AFast.Vk;
   FillChar(Barrier, SizeOf(Barrier), 0);
   Barrier.sType := VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
   // After the acquire semaphore (waited for at the transfer stage); the image's old content goes.
@@ -1824,11 +2318,7 @@ begin
   Barrier.dstQueueFamilyIndex := VK_QUEUE_FAMILY_IGNORED;
   Barrier.image := AImage;
   Barrier.subresourceRange := ColorRange;
-  FillChar(Dep, SizeOf(Dep), 0);
-  Dep.sType := VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
-  Dep.imageMemoryBarrierCount := 1;
-  Dep.pImageMemoryBarriers := @Barrier;
-  AVk.CmdPipelineBarrier2(ACmd, @Dep);
+  CmdImageBarrier(AFast, ACmd, Barrier);
   if (AFormat = VK_FORMAT_B8G8R8A8_UNORM) and (Cardinal(ASource.Width) = AExtent.width) and
     (Cardinal(ASource.Height) = AExtent.height) then
   begin
@@ -1863,7 +2353,7 @@ begin
   Barrier.dstAccessMask := 0;
   Barrier.oldLayout := VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
   Barrier.newLayout := VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
-  AVk.CmdPipelineBarrier2(ACmd, @Dep);
+  CmdImageBarrier(AFast, ACmd, Barrier);
 end;
 
 function TGpuVkWindow.Prepare(const AWidth, AHeight: Integer; const ATearing: Boolean;
@@ -2077,8 +2567,6 @@ end;
 
 constructor TGpuVkPresenter.Create(const AWindow: TGpuVkWindow);
 var
-  TypeInfo: TVkSemaphoreTypeCreateInfo;
-  Info: TVkSemaphoreCreateInfo;
   PoolInfo: TVkCommandPoolCreateInfo;
   FenceInfo: TVkFenceCreateInfo;
 begin
@@ -2093,13 +2581,7 @@ begin
 {$ENDIF}
   FWake := TEvent.Create(nil, False, False, '');
   FTaken := TEvent.Create(nil, True, False, '');
-  FillChar(TypeInfo, SizeOf(TypeInfo), 0);
-  TypeInfo.sType := VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO;
-  TypeInfo.semaphoreType := VK_SEMAPHORE_TYPE_TIMELINE;
-  FillChar(Info, SizeOf(Info), 0);
-  Info.sType := VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
-  Info.pNext := @TypeInfo;
-  FFast.Check(FVk.CreateSemaphore(FDevice, @Info, nil, @FTimeline), 'vkCreateSemaphore (timeline)');
+  FTimeline := TGpuVkTimeline.Create(FFast);
   FillChar(PoolInfo, SizeOf(PoolInfo), 0);
   PoolInfo.sType := VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
   PoolInfo.flags := Ord(VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT);
@@ -2190,22 +2672,10 @@ begin
 end;
 
 procedure TGpuVkPresenter.WaitValue(const AValue: UInt64);
-var
-  Info: TVkSemaphoreWaitInfo;
-  Value: UInt64;
-  Res: TVkResult;
 begin
-  if AValue = 0 then
+  if (AValue = 0) or (FTimeline = nil) then
     Exit;
-  Value := AValue;
-  FillChar(Info, SizeOf(Info), 0);
-  Info.sType := VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;
-  Info.semaphoreCount := 1;
-  Info.pSemaphores := @FTimeline;
-  Info.pValues := @Value;
-  repeat
-    Res := FFast.Track(FVk.WaitSemaphores(FDevice, @Info, WaitSlice));
-  until (Res <> VK_TIMEOUT) or FFast.Lost;
+  FTimeline.Wait(AValue);
 end;
 
 /// <summary>The images, semaphores and command buffers of the swap chain go (and the swap chain when ADestroyOld),
@@ -2239,14 +2709,13 @@ end;
 
 procedure TGpuVkPresenter.Release;
 begin
-  if FTimeline = VK_NULL_HANDLE then
+  if FTimeline = nil then
     Exit;
   ReleaseChain(True);
   FVk.DestroyCommandPool(FDevice, FPool, nil);
-  FVk.DestroySemaphore(FDevice, FTimeline, nil);
+  FreeAndNil(FTimeline);
   FVk.DestroyFence(FDevice, FAcquired, nil);
   FPool := VK_NULL_HANDLE;
-  FTimeline := VK_NULL_HANDLE;
 end;
 
 function TGpuVkPresenter.CreateChain(const AWidth, AHeight: Integer): Boolean;
@@ -2344,7 +2813,7 @@ begin
   FillChar(Begin_, SizeOf(Begin_), 0);
   Begin_.sType := VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
   FFast.Check(FVk.BeginCommandBuffer(FCmds[AIndex], @Begin_), 'vkBeginCommandBuffer');
-  RecordChainCopy(FVk, FCmds[AIndex], AShown, FImages[AIndex], FFormat.format, FExtent);
+  RecordChainCopy(FFast, FCmds[AIndex], AShown, FImages[AIndex], FFormat.format, FExtent);
   FFast.Check(FVk.EndCommandBuffer(FCmds[AIndex]), 'vkEndCommandBuffer');
   FCmdGens[AIndex] := FShownGen;
 end;
@@ -2355,11 +2824,9 @@ var
   W, H, Attempt: Integer;
   Index: Cardinal;
   Res: TVkResult;
-  Submit: TVkSubmitInfo2;
-  CmdInfo: TVkCommandBufferSubmitInfo;
-  Signals: array[0..1] of TVkSemaphoreSubmitInfo;
   Info: TVkPresentInfoKHR;
   Sem: TVkSemaphore;
+  Fence: TVkFence;
 begin
   Result := False;
   Lock;
@@ -2447,25 +2914,8 @@ begin
     FTaken.SetEvent;
     if FCmdGens[Index] <> FShownGen then
       Record_(Index, Shown);
-    Inc(FValue);
-    FillChar(CmdInfo, SizeOf(CmdInfo), 0);
-    CmdInfo.sType := VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO;
-    CmdInfo.commandBuffer := FCmds[Index];
+    FValue := FTimeline.Next(Fence);
     Sem := FPresentSems[Index];
-    FillChar(Signals, SizeOf(Signals), 0);
-    Signals[0].sType := VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO;
-    Signals[0].semaphore := FTimeline;
-    Signals[0].value := FValue;
-    Signals[0].stageMask := StageAllCommands;
-    Signals[1].sType := VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO;
-    Signals[1].semaphore := Sem;
-    Signals[1].stageMask := StageAllCommands;
-    FillChar(Submit, SizeOf(Submit), 0);
-    Submit.sType := VK_STRUCTURE_TYPE_SUBMIT_INFO_2;
-    Submit.commandBufferInfoCount := 1;
-    Submit.pCommandBufferInfos := @CmdInfo;
-    Submit.signalSemaphoreInfoCount := 2;
-    Submit.pSignalSemaphoreInfos := @Signals[0];
     FillChar(Info, SizeOf(Info), 0);
     Info.sType := VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
     Info.waitSemaphoreCount := 1;
@@ -2475,7 +2925,7 @@ begin
     Info.pImageIndices := @Index;
     FFast.LockQueue;
     try
-      Res := FFast.Track(FVk.QueueSubmit2(FFast.Queue, 1, @Submit, VK_NULL_HANDLE));
+      Res := FFast.Track(QueueSubmit(FFast, FCmds[Index], VK_NULL_HANDLE, 0, Sem, FTimeline, FValue, Fence));
       if Ord(Res) >= 0 then
         Res := FFast.Track(FVk.QueuePresentKHR(FFast.Queue, @Info))
       else
@@ -2724,7 +3174,12 @@ begin
   Rendering.pColorAttachmentFormats := @Format;
   FillChar(Info, SizeOf(Info), 0);
   Info.sType := VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
-  Info.pNext := @Rendering;
+  try
+    C.Fast.PipelineTarget(Info, @Rendering, 1);
+  except
+    on E: EFastVulkan do
+      raise EFastDevice.Create(E.Message);
+  end;
   Info.stageCount := Length(Stages);
   Info.pStages := @Stages[0];
   Info.pVertexInputState := @VertexInput;

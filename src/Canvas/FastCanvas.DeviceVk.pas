@@ -26,11 +26,20 @@ unit FastCanvas.DeviceVk;
 
   Other platforms: VK_KHR_android_surface (Android) or VK_KHR_xlib_surface (Linux, X11) instead of
   VK_KHR_win32_surface; the queue family is the first one that draws (whether it presents to a window is asked when
-  the window's surface is made). Devices below Vulkan 1.3 (many phones have 1.1) are taken when they have the
-  extensions of the same features (VK_KHR_dynamic_rendering, VK_KHR_synchronization2, and below 1.2
-  VK_KHR_timeline_semaphore): Legacy, the KHR commands then stand in for the core ones; push descriptors (the 3D
-  context) where the device has them, no ray tracing features. FASTCANVAS_VK_NOPUSH=1: push descriptors stay off (a
-  test of the 3D context's path without them). }
+  the window's surface is made). Devices below Vulkan 1.3 (many phones have 1.1) are Legacy: dynamic rendering,
+  synchronization2 and (below 1.2) timeline semaphores come from their extensions where the device has them, the KHR
+  commands then stand in for the core ones; push descriptors (the 3D context) where the device has them, no ray
+  tracing features.
+
+  Vulkan 1.1 is the least the canvas needs (negative viewport heights, vkGetPhysicalDeviceFeatures2), with
+  VK_KHR_swapchain; each of the three features is optional (many 2021-2024 phones have none but timeline semaphores):
+  without dynamic rendering the recording context draws in render passes (RenderPass, CompatiblePass: made once per
+  set of attachments and kept with the device; pipelines are made for a compatible one, PipelineTarget), without
+  synchronization2 it issues vkCmdPipelineBarrier and vkQueueSubmit, without timeline semaphores a fence per
+  submission tells what the GPU has done (FastCanvas.GpuVk). FASTCANVAS_VK_LEGACY=1: neither dynamic rendering,
+  synchronization2 nor push descriptors on any device; FASTCANVAS_VK_NOTIMELINE=1: no timeline semaphores (tests of
+  those paths on a desktop GPU, ray tracing included). FASTCANVAS_VK_NOPUSH=1: push descriptors stay off (a test of
+  the 3D context's path without them). }
 
 interface
 
@@ -39,6 +48,17 @@ uses
 
 type
   EFastVulkan = class(Exception);
+
+  /// <summary>The attachments of a render pass (devices without dynamic rendering): one color attachment, and one of
+  /// depth and stencil unless DepthFormat is VK_FORMAT_UNDEFINED, each in one layout throughout (the barriers before
+  /// the pass change layouts, as with dynamic rendering).</summary>
+  TFastVkPassKey = packed record
+    ColorFormat, DepthFormat: TVkFormat;
+    Samples: Cardinal;
+    ColorLayout, DepthLayout: TVkImageLayout;
+    ColorLoad, DepthLoad, StencilLoad: TVkAttachmentLoadOp;
+    ColorStore, DepthStore, StencilStore: TVkAttachmentStoreOp;
+  end;
 
   /// <summary>The memory of a resource: a range of a block of TFastVulkan, or a memory object of its own.</summary>
   TFastVkAllocation = class
@@ -89,13 +109,12 @@ type
     FInstanceVersion: Cardinal;
     /// <summary>The device is used through extensions below Vulkan 1.3.</summary>
     FLegacy: Boolean;
+    FDynamicRendering, FSynchronization2, FTimelineSemaphore: Boolean;
+    /// <summary>Render passes made so far (RenderPass); TMonitor of the dictionary guards it.</summary>
+    FPasses: TDictionary<TFastVkPassKey, TVkRenderPass>;
     procedure CreateInstance;
     procedure PickDevice(const APreferSoftware: Boolean);
     procedure CreateDevice;
-    /// <summary>A device below Vulkan 1.3 (or of an instance below 1.3): True when it has the extensions and features
-    /// the canvas needs; AFeatures: its core features.</summary>
-    function LegacyFeatures(const ADevice: TVkPhysicalDevice; const AVersion: Cardinal;
-      const AExts: TArray<TVkExtensionProperties>; out AFeatures: TVkPhysicalDeviceFeatures2): Boolean;
     procedure CreateLegacyDevice(const AExts: TArray<TVkExtensionProperties>; const AFifoName: PAnsiChar);
     /// <summary>The depth and stencil format of the 3D context (DepthFormat).</summary>
     procedure FindDepthFormat;
@@ -110,9 +129,8 @@ type
     procedure LockAlloc; inline;
     procedure UnlockAlloc; inline;
   public
-    /// <summary>Raises EFastVulkan when there is no Vulkan 1.3 device (or 1.1 with the extensions of the same
-    /// features) that can present to windows. APreferSoftware: a CPU implementation first (TFastDevice.UseWarp).
-    /// </summary>
+    /// <summary>Raises EFastVulkan, with what each device lacks, when there is no Vulkan 1.1 device that draws and
+    /// presents to windows. APreferSoftware: a CPU implementation first (TFastDevice.UseWarp).</summary>
     constructor Create(const APreferSoftware: Boolean);
     /// <summary>Everything made on the device must be destroyed before.</summary>
     destructor Destroy; override;
@@ -133,6 +151,18 @@ type
     procedure Release(const AAllocation: TFastVkAllocation);
     /// <summary>Host-visible memory that is not coherent: the CPU sees what the GPU wrote to the allocation.</summary>
     procedure Invalidate(const AAllocation: TFastVkAllocation);
+    /// <summary>Without dynamic rendering: the render pass of AKey (made on first use, kept until the device goes).
+    /// Thread-safe.</summary>
+    function RenderPass(const AKey: TFastVkPassKey): TVkRenderPass;
+    /// <summary>A render pass that pipelines and framebuffers for these attachments are made with (ADepthFormat
+    /// VK_FORMAT_UNDEFINED: color only); every render pass of the same formats and samples is compatible with it.
+    /// Thread-safe.</summary>
+    function CompatiblePass(const AColorFormat: TVkFormat; const ASamples: Integer;
+      const ADepthFormat: TVkFormat): TVkRenderPass;
+    /// <summary>What a graphics pipeline draws into: ARendering in AInfo's chain with dynamic rendering (AInfo.pNext
+    /// must be free), else the compatible render pass of ARendering's formats and ASamples.</summary>
+    procedure PipelineTarget(var AInfo: TVkGraphicsPipelineCreateInfo; const ARendering: PVkPipelineRenderingCreateInfo;
+      const ASamples: Integer);
     /// <summary>Memory objects there are now, and at most so far; allocations likewise.</summary>
     property MemoryObjects: Integer read FMemoryObjects;
     property PeakMemoryObjects: Integer read FPeakMemoryObjects;
@@ -175,9 +205,15 @@ type
     property DepthFormat: TVkFormat read FDepthFormat;
     /// <summary>Alignment of the scratch memory of acceleration structure builds.</summary>
     property ScratchAlignment: Cardinal read FScratchAlignment;
-    /// <summary>Below Vulkan 1.3: dynamic rendering, synchronization2 (and timeline semaphores) are extensions.
-    /// </summary>
+    /// <summary>Below Vulkan 1.3: dynamic rendering, synchronization2 (and timeline semaphores) are extensions, where
+    /// the device has them.</summary>
     property Legacy: Boolean read FLegacy;
+    /// <summary>Dynamic rendering is enabled; else draws run in render passes (RenderPass).</summary>
+    property DynamicRendering: Boolean read FDynamicRendering;
+    /// <summary>Synchronization2 is enabled; else barriers and submissions are those of Vulkan 1.0.</summary>
+    property Synchronization2: Boolean read FSynchronization2;
+    /// <summary>Timeline semaphores are enabled; else every submission signals a fence.</summary>
+    property TimelineSemaphore: Boolean read FTimelineSemaphore;
     /// <summary>The device's name (diagnostics).</summary>
     property DeviceName: string read GetDeviceName;
     /// <summary>The Vulkan version of the device's driver (diagnostics; the canvas uses at most 1.3).</summary>
@@ -197,6 +233,8 @@ const
   StatsVariable = 'FASTCANVAS_VK_STATS';
   ApiVariable = 'FASTCANVAS_VK_API';
   NoPushVariable = 'FASTCANVAS_VK_NOPUSH';
+  LegacyVariable = 'FASTCANVAS_VK_LEGACY';
+  NoTimelineVariable = 'FASTCANVAS_VK_NOTIMELINE';
   ValidationLayer: AnsiString = 'VK_LAYER_KHRONOS_validation';
   /// <summary>Messages logged per process at most.</summary>
   MaxMessages = 2000;
@@ -408,6 +446,121 @@ begin
   Result := False;
 end;
 
+type
+  /// <summary>What a device has of the optional features (DeviceCaps).</summary>
+  TFastVkCaps = record
+    DynamicRendering, Synchronization2, Timeline, DualSource: Boolean;
+  end;
+
+/// <summary>The optional features of a device used at AVersion (the device's version, at most the instance's): those
+/// of the core version, else of their extensions.</summary>
+function DeviceCaps(const AVk: TVulkan; const ADevice: TVkPhysicalDevice; const AVersion: Cardinal;
+  const AExts: TArray<TVkExtensionProperties>): TFastVkCaps;
+var
+  Features: TVkPhysicalDeviceFeatures2;
+  F12: TVkPhysicalDeviceVulkan12Features;
+  F13: TVkPhysicalDeviceVulkan13Features;
+  Dynamic: TVkPhysicalDeviceDynamicRenderingFeatures;
+  Sync2: TVkPhysicalDeviceSynchronization2Features;
+  Timeline: TVkPhysicalDeviceTimelineSemaphoreFeatures;
+  DynamicExt, Sync2Ext, TimelineExt: Boolean;
+  Chain: Pointer;
+begin
+  FillChar(F12, SizeOf(F12), 0);
+  F12.sType := VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
+  FillChar(F13, SizeOf(F13), 0);
+  F13.sType := VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
+  FillChar(Dynamic, SizeOf(Dynamic), 0);
+  Dynamic.sType := VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_FEATURES;
+  FillChar(Sync2, SizeOf(Sync2), 0);
+  Sync2.sType := VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SYNCHRONIZATION_2_FEATURES;
+  FillChar(Timeline, SizeOf(Timeline), 0);
+  Timeline.sType := VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES;
+  // Only structures of the version and of extensions the device has go into the chain. Dynamic rendering needs
+  // depth_stencil_resolve, which needs create_renderpass2 (both core in 1.2).
+  DynamicExt := (AVersion < VK_API_VERSION_1_3) and HasExtension(AExts, VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME) and
+    ((AVersion >= VK_API_VERSION_1_2) or (HasExtension(AExts, VK_KHR_DEPTH_STENCIL_RESOLVE_EXTENSION_NAME) and
+    HasExtension(AExts, VK_KHR_CREATE_RENDERPASS_2_EXTENSION_NAME)));
+  Sync2Ext := (AVersion < VK_API_VERSION_1_3) and HasExtension(AExts, VK_KHR_SYNCHRONIZATION_2_EXTENSION_NAME);
+  TimelineExt := (AVersion < VK_API_VERSION_1_2) and HasExtension(AExts, VK_KHR_TIMELINE_SEMAPHORE_EXTENSION_NAME);
+  Chain := nil;
+  if AVersion >= VK_API_VERSION_1_2 then
+  begin
+    F12.pNext := Chain;
+    Chain := @F12;
+  end;
+  if AVersion >= VK_API_VERSION_1_3 then
+  begin
+    F13.pNext := Chain;
+    Chain := @F13;
+  end;
+  if DynamicExt then
+  begin
+    Dynamic.pNext := Chain;
+    Chain := @Dynamic;
+  end;
+  if Sync2Ext then
+  begin
+    Sync2.pNext := Chain;
+    Chain := @Sync2;
+  end;
+  if TimelineExt then
+  begin
+    Timeline.pNext := Chain;
+    Chain := @Timeline;
+  end;
+  FillChar(Features, SizeOf(Features), 0);
+  Features.sType := VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+  Features.pNext := Chain;
+  AVk.GetPhysicalDeviceFeatures2(ADevice, @Features);
+  Result.DynamicRendering := ((AVersion >= VK_API_VERSION_1_3) and (F13.dynamicRendering <> VK_FALSE)) or
+    (DynamicExt and (Dynamic.dynamicRendering <> VK_FALSE));
+  Result.Synchronization2 := ((AVersion >= VK_API_VERSION_1_3) and (F13.synchronization2 <> VK_FALSE)) or
+    (Sync2Ext and (Sync2.synchronization2 <> VK_FALSE));
+  Result.Timeline := ((AVersion >= VK_API_VERSION_1_2) and (F12.timelineSemaphore <> VK_FALSE)) or
+    (TimelineExt and (Timeline.timelineSemaphore <> VK_FALSE));
+  Result.DualSource := Features.features.dualSrcBlend <> VK_FALSE;
+end;
+
+/// <summary>What the formats of a device lack of what the canvas uses (mandatory in Vulkan, asked all the same);
+/// '': nothing.</summary>
+function FormatsMissing(const AVk: TVulkan; const ADevice: TVkPhysicalDevice): string;
+const
+  Sampled = Ord(VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT) or Ord(VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT);
+var
+  S: string;
+
+  procedure Need(const AFormat: TVkFormat; const AName: string; const AFeatures: TVkFormatFeatureFlags;
+    const ABuffer: Boolean; const AWhat: string);
+  var
+    Props: TVkFormatProperties;
+    Have: TVkFormatFeatureFlags;
+  begin
+    FillChar(Props, SizeOf(Props), 0);
+    AVk.GetPhysicalDeviceFormatProperties(ADevice, AFormat, @Props);
+    if ABuffer then
+      Have := Props.bufferFeatures
+    else
+      Have := Props.optimalTilingFeatures;
+    if (Have and AFeatures) = AFeatures then
+      Exit;
+    if S <> '' then
+      S := S + ', ';
+    S := S + AName + ' without ' + AWhat;
+  end;
+
+begin
+  S := '';
+  Need(VK_FORMAT_B8G8R8A8_UNORM, 'B8G8R8A8_UNORM', Sampled or Ord(VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT) or
+    Ord(VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BLEND_BIT) or Ord(VK_FORMAT_FEATURE_BLIT_SRC_BIT), False,
+    'sampling, blending or blits');
+  Need(VK_FORMAT_R8_UNORM, 'R8_UNORM', Sampled, False, 'filtered sampling');
+  Need(VK_FORMAT_R8G8B8A8_UNORM, 'R8G8B8A8_UNORM', Sampled, False, 'filtered sampling');
+  Need(VK_FORMAT_R32G32B32A32_SFLOAT, 'R32G32B32A32_SFLOAT', Ord(VK_FORMAT_FEATURE_UNIFORM_TEXEL_BUFFER_BIT), True,
+    'uniform texel buffers');
+  Result := S;
+end;
+
 { TFastVulkan }
 
 constructor TFastVulkan.Create(const APreferSoftware: Boolean);
@@ -420,6 +573,7 @@ begin
   FAllocLock := TObject.Create;
   FQueueLock := TObject.Create;
 {$ENDIF}
+  FPasses := TDictionary<TFastVkPassKey, TVkRenderPass>.Create;
   FDebug := GetEnvironmentVariable(DebugVariable) <> '';
   CreateInstance;
   PickDevice(APreferSoftware);
@@ -431,10 +585,18 @@ var
   T: Integer;
   B: Boolean;
   O: TObject;
+  P: TVkRenderPass;
 begin
   if FDevice <> VK_NULL_HANDLE then
     FVk.DeviceWaitIdle(FDevice);
   WriteStats;
+  if FPasses <> nil then
+  begin
+    if FDevice <> VK_NULL_HANDLE then
+      for P in FPasses.Values do
+        FVk.DestroyRenderPass(FDevice, P, nil);
+    FreeAndNil(FPasses);
+  end;
   // Blocks still there: empty ones kept for reuse (allocations still alive would be a leak of their owners).
   for T := 0 to High(FPools) do
     for B := False to True do
@@ -519,8 +681,11 @@ begin
       Rewrite(F);
     try
       Writeln(F, Format('memory objects: %d at most (%d MB), %d left; allocations: %d at most (%d MB), %d left ' +
-        '(limit %u)', [FPeakMemoryObjects, FPeakMemoryBytes shr 20, FMemoryObjects, FPeakAllocations,
-        FPeakAllocatedBytes shr 20, FAllocations, FProperties.limits.maxMemoryAllocationCount]));
+        '(limit %u); dynamic rendering %s, synchronization2 %s, timeline semaphores %s, push descriptors %s, ' +
+        'render passes %d', [FPeakMemoryObjects, FPeakMemoryBytes shr 20, FMemoryObjects, FPeakAllocations,
+        FPeakAllocatedBytes shr 20, FAllocations, FProperties.limits.maxMemoryAllocationCount,
+        BoolToStr(FDynamicRendering, True), BoolToStr(FSynchronization2, True), BoolToStr(FTimelineSemaphore, True),
+        BoolToStr(FPushDescriptor, True), FPasses.Count]));
     finally
       CloseFile(F);
     end;
@@ -627,17 +792,14 @@ end;
 
 procedure TFastVulkan.PickDevice(const APreferSoftware: Boolean);
 var
-  Count, Families, Family: Cardinal;
+  Count, Families, Family, Version: Cardinal;
   Devices: TArray<TVkPhysicalDevice>;
   Props: TVkPhysicalDeviceProperties;
   Queues: TArray<TVkQueueFamilyProperties>;
   Exts: TArray<TVkExtensionProperties>;
-  Features: TVkPhysicalDeviceFeatures2;
-  F13: TVkPhysicalDeviceVulkan13Features;
-  F12: TVkPhysicalDeviceVulkan12Features;
+  Caps: TFastVkCaps;
   I, F, Score, Best: Integer;
-  Legacy: Boolean;
-  Name, Rejected: string;
+  Name, Rejected, Missing: string;
 begin
   Count := 0;
   FInstanceVk.EnumeratePhysicalDevices(FInstance, @Count, nil);
@@ -651,42 +813,27 @@ begin
     FInstanceVk.GetPhysicalDeviceProperties(Devices[I], @Props);
     Name := Format('%s (Vulkan %s)', [string(UTF8String(PAnsiChar(@Props.deviceName[0]))),
       FastVulkanVersionText(Props.apiVersion)]);
+    // The version in use: the device's, at most the instance's.
+    Version := Min(Props.apiVersion and $1FFFFFFF, FInstanceVersion);
+    if Version < VK_API_VERSION_1_1 then
+    begin
+      Rejected := Rejected + '; ' + Name + ': Vulkan 1.1 is needed';
+      Continue;
+    end;
     Count := 0;
     FInstanceVk.EnumerateDeviceExtensionProperties(Devices[I], nil, @Count, nil);
     SetLength(Exts, Count);
     if Count > 0 then
       FInstanceVk.EnumerateDeviceExtensionProperties(Devices[I], nil, @Count, @Exts[0]);
-    Legacy := ((Props.apiVersion and $1FFFFFFF) < VK_API_VERSION_1_3) or (FInstanceVersion < VK_API_VERSION_1_3);
-    if Legacy then
-    begin
-      if not LegacyFeatures(Devices[I], Props.apiVersion, Exts, Features) then
-      begin
-        Rejected := Rejected + '; ' + Name + ': no dynamic rendering, synchronization2 or timeline semaphores';
-        Continue;
-      end;
-    end
-    else
-    begin
-      FillChar(F12, SizeOf(F12), 0);
-      F12.sType := VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
-      FillChar(F13, SizeOf(F13), 0);
-      F13.sType := VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
-      F13.pNext := @F12;
-      FillChar(Features, SizeOf(Features), 0);
-      Features.sType := VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
-      Features.pNext := @F13;
-      FInstanceVk.GetPhysicalDeviceFeatures2(Devices[I], @Features);
-      if (F13.dynamicRendering = VK_FALSE) or (F13.synchronization2 = VK_FALSE) or
-        (F12.timelineSemaphore = VK_FALSE) then
-      begin
-        Rejected := Rejected + '; ' + Name + ': no dynamic rendering, synchronization2 or timeline semaphores';
-        Continue;
-      end;
-    end;
+    // Everything the device lacks, at once.
+    Missing := '';
     if not HasExtension(Exts, VK_KHR_SWAPCHAIN_EXTENSION_NAME) then
+      Missing := 'no VK_KHR_swapchain';
+    if FormatsMissing(FInstanceVk, Devices[I]) <> '' then
     begin
-      Rejected := Rejected + '; ' + Name + ': no swap chains';
-      Continue;
+      if Missing <> '' then
+        Missing := Missing + ', ';
+      Missing := Missing + FormatsMissing(FInstanceVk, Devices[I]);
     end;
     // A family that draws and presents to windows (one queue for everything).
     Families := 0;
@@ -707,7 +854,13 @@ begin
       end;
     if Family = High(Cardinal) then
     begin
-      Rejected := Rejected + '; ' + Name + ': no queue family that draws and presents';
+      if Missing <> '' then
+        Missing := Missing + ', ';
+      Missing := Missing + 'no queue family that draws' {$IFDEF MSWINDOWS}+ ' and presents to windows'{$ENDIF};
+    end;
+    if Missing <> '' then
+    begin
+      Rejected := Rejected + '; ' + Name + ': ' + Missing;
       Continue;
     end;
     case Props.deviceType of
@@ -724,55 +877,26 @@ begin
     end;
     if Score > Best then
     begin
+      Caps := DeviceCaps(FInstanceVk, Devices[I], Version, Exts);
       Best := Score;
       FPhysical := Devices[I];
       FQueueFamily := Family;
       FProperties := Props;
-      FDualSource := Features.features.dualSrcBlend <> VK_FALSE;
-      FLegacy := Legacy;
+      FDualSource := Caps.DualSource;
+      FLegacy := Version < VK_API_VERSION_1_3;
+      // FASTCANVAS_VK_LEGACY=1, FASTCANVAS_VK_NOTIMELINE=1: the paths of devices without them, on any device.
+      FDynamicRendering := Caps.DynamicRendering and (GetEnvironmentVariable(LegacyVariable) <> '1');
+      FSynchronization2 := Caps.Synchronization2 and (GetEnvironmentVariable(LegacyVariable) <> '1');
+      FTimelineSemaphore := Caps.Timeline and (GetEnvironmentVariable(NoTimelineVariable) <> '1');
     end;
   end;
   if Best < 0 then
-    raise EFastVulkan.Create('FastCanvas: no Vulkan 1.3 device with dynamic rendering and a queue that presents' +
-      Rejected);
+  begin
+    if Rejected = '' then
+      Rejected := '; there are no Vulkan devices';
+    raise EFastVulkan.Create('FastCanvas: no Vulkan 1.1 device that draws and presents' + Rejected);
+  end;
   FInstanceVk.GetPhysicalDeviceMemoryProperties(FPhysical, @FMemory);
-end;
-
-function TFastVulkan.LegacyFeatures(const ADevice: TVkPhysicalDevice; const AVersion: Cardinal;
-  const AExts: TArray<TVkExtensionProperties>; out AFeatures: TVkPhysicalDeviceFeatures2): Boolean;
-var
-  Dynamic: TVkPhysicalDeviceDynamicRenderingFeatures;
-  Sync2: TVkPhysicalDeviceSynchronization2Features;
-  Timeline: TVkPhysicalDeviceTimelineSemaphoreFeatures;
-  Version: Cardinal;
-begin
-  FillChar(AFeatures, SizeOf(AFeatures), 0);
-  Version := AVersion and $1FFFFFFF;
-  if Version > FInstanceVersion then
-    Version := FInstanceVersion;
-  Result := False;
-  // Dynamic rendering needs depth_stencil_resolve, which needs create_renderpass2 (both core in 1.2).
-  if (Version < VK_API_VERSION_1_1) or not HasExtension(AExts, VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME) or
-    not HasExtension(AExts, VK_KHR_SYNCHRONIZATION_2_EXTENSION_NAME) then
-    Exit;
-  if (Version < VK_API_VERSION_1_2) and (not HasExtension(AExts, VK_KHR_TIMELINE_SEMAPHORE_EXTENSION_NAME) or
-    not HasExtension(AExts, VK_KHR_DEPTH_STENCIL_RESOLVE_EXTENSION_NAME) or
-    not HasExtension(AExts, VK_KHR_CREATE_RENDERPASS_2_EXTENSION_NAME)) then
-    Exit;
-  FillChar(Timeline, SizeOf(Timeline), 0);
-  Timeline.sType := VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES;
-  FillChar(Sync2, SizeOf(Sync2), 0);
-  Sync2.sType := VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SYNCHRONIZATION_2_FEATURES;
-  Sync2.pNext := @Timeline;
-  FillChar(Dynamic, SizeOf(Dynamic), 0);
-  Dynamic.sType := VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_FEATURES;
-  Dynamic.pNext := @Sync2;
-  AFeatures.sType := VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
-  AFeatures.pNext := @Dynamic;
-  FInstanceVk.GetPhysicalDeviceFeatures2(ADevice, @AFeatures);
-  AFeatures.pNext := nil;
-  Result := (Dynamic.dynamicRendering <> VK_FALSE) and (Sync2.synchronization2 <> VK_FALSE) and
-    (Timeline.timelineSemaphore <> VK_FALSE);
 end;
 
 function TFastVulkan.GetDeviceName: string;
@@ -872,7 +996,8 @@ begin
     AccelFeatures.pNext := @RayFeatures;
   FillChar(F12, SizeOf(F12), 0);
   F12.sType := VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
-  F12.timelineSemaphore := VK_TRUE;
+  if FTimelineSemaphore then
+    F12.timelineSemaphore := VK_TRUE;
   if FBufferDeviceAddress then
     F12.bufferDeviceAddress := VK_TRUE;
   if FRayQuery then
@@ -894,16 +1019,19 @@ begin
   FillChar(F13, SizeOf(F13), 0);
   F13.sType := VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
   F13.pNext := @F12;
-  F13.dynamicRendering := VK_TRUE;
-  F13.synchronization2 := VK_TRUE;
+  if FDynamicRendering then
+    F13.dynamicRendering := VK_TRUE;
+  if FSynchronization2 then
+    F13.synchronization2 := VK_TRUE;
   FillChar(Features, SizeOf(Features), 0);
   Features.sType := VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
   Features.pNext := @F13;
   if FDualSource then
     Features.features.dualSrcBlend := VK_TRUE;
-  // FASTCANVAS_VK_NOPUSH=1: the 3D context's path without push descriptors (a test of that path).
+  // FASTCANVAS_VK_NOPUSH=1 or FASTCANVAS_VK_LEGACY=1: the 3D context's path without push descriptors (a test of that
+  // path).
   FPushDescriptor := HasExtension(Exts, VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME) and
-    (GetEnvironmentVariable(NoPushVariable) <> '1');
+    (GetEnvironmentVariable(NoPushVariable) <> '1') and (GetEnvironmentVariable(LegacyVariable) <> '1');
   if FPushDescriptor then
     Names := Names + [PAnsiChar(VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME)];
   if FFifoLatestReady then
@@ -980,17 +1108,27 @@ var
   FifoFeatures: TVkPhysicalDevicePresentModeFifoLatestReadyFeaturesKHR;
   Cmds: TVulkanCommands;
   Res: TVkResult;
+  Version: Cardinal;
+  Chain: Pointer;
 begin
-  Names := [PAnsiChar(VK_KHR_SWAPCHAIN_EXTENSION_NAME), PAnsiChar(VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME),
-    PAnsiChar(VK_KHR_SYNCHRONIZATION_2_EXTENSION_NAME)];
-  // The version in use: the device's, at most the instance's.
-  if Min(GetApiVersion, FInstanceVersion) < VK_API_VERSION_1_2 then
-    Names := Names + [PAnsiChar(VK_KHR_TIMELINE_SEMAPHORE_EXTENSION_NAME),
-      PAnsiChar(VK_KHR_DEPTH_STENCIL_RESOLVE_EXTENSION_NAME), PAnsiChar(VK_KHR_CREATE_RENDERPASS_2_EXTENSION_NAME)];
+  // The version in use: the device's, at most the instance's. The extensions of the features PickDevice found.
+  Version := Min(GetApiVersion, FInstanceVersion);
+  Names := [PAnsiChar(VK_KHR_SWAPCHAIN_EXTENSION_NAME)];
+  if FDynamicRendering then
+  begin
+    Names := Names + [PAnsiChar(VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME)];
+    if Version < VK_API_VERSION_1_2 then
+      Names := Names + [PAnsiChar(VK_KHR_DEPTH_STENCIL_RESOLVE_EXTENSION_NAME),
+        PAnsiChar(VK_KHR_CREATE_RENDERPASS_2_EXTENSION_NAME)];
+  end;
+  if FSynchronization2 then
+    Names := Names + [PAnsiChar(VK_KHR_SYNCHRONIZATION_2_EXTENSION_NAME)];
+  if FTimelineSemaphore and (Version < VK_API_VERSION_1_2) then
+    Names := Names + [PAnsiChar(VK_KHR_TIMELINE_SEMAPHORE_EXTENSION_NAME)];
   // The optional extensions as on Vulkan 1.3 (no ray tracing: its shaders are built for Vulkan 1.2 with buffer
   // device addresses and descriptor indexing).
   FPushDescriptor := HasExtension(AExts, VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME) and
-    (GetEnvironmentVariable(NoPushVariable) <> '1');
+    (GetEnvironmentVariable(NoPushVariable) <> '1') and (GetEnvironmentVariable(LegacyVariable) <> '1');
   if FPushDescriptor then
     Names := Names + [PAnsiChar(VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME)];
   FillChar(FifoFeatures, SizeOf(FifoFeatures), 0);
@@ -1003,31 +1141,44 @@ begin
     FInstanceVk.GetPhysicalDeviceFeatures2(FPhysical, @Features);
   end;
   FFifoLatestReady := (AFifoName <> nil) and (FifoFeatures.presentModeFifoLatestReady <> VK_FALSE);
+  // Only the features in use go into the chain (each structure needs its extension, or Vulkan 1.2 for timeline
+  // semaphores).
+  Chain := nil;
   FillChar(Timeline, SizeOf(Timeline), 0);
   Timeline.sType := VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES;
   Timeline.timelineSemaphore := VK_TRUE;
+  if FTimelineSemaphore then
+    Chain := @Timeline;
   FillChar(Sync2, SizeOf(Sync2), 0);
   Sync2.sType := VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SYNCHRONIZATION_2_FEATURES;
-  Sync2.pNext := @Timeline;
   Sync2.synchronization2 := VK_TRUE;
+  if FSynchronization2 then
+  begin
+    Sync2.pNext := Chain;
+    Chain := @Sync2;
+  end;
   FillChar(Dynamic, SizeOf(Dynamic), 0);
   Dynamic.sType := VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_FEATURES;
-  Dynamic.pNext := @Sync2;
   Dynamic.dynamicRendering := VK_TRUE;
-  FillChar(Features, SizeOf(Features), 0);
-  Features.sType := VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
-  Features.pNext := @Dynamic;
-  if FDualSource then
-    Features.features.dualSrcBlend := VK_TRUE;
+  if FDynamicRendering then
+  begin
+    Dynamic.pNext := Chain;
+    Chain := @Dynamic;
+  end;
+  FillChar(FifoFeatures, SizeOf(FifoFeatures), 0);
+  FifoFeatures.sType := VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_MODE_FIFO_LATEST_READY_FEATURES_KHR;
+  FifoFeatures.presentModeFifoLatestReady := VK_TRUE;
   if FFifoLatestReady then
   begin
-    FillChar(FifoFeatures, SizeOf(FifoFeatures), 0);
-    FifoFeatures.sType := VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_MODE_FIFO_LATEST_READY_FEATURES_KHR;
-    FifoFeatures.presentModeFifoLatestReady := VK_TRUE;
-    FifoFeatures.pNext := @Dynamic;
-    Features.pNext := @FifoFeatures;
+    FifoFeatures.pNext := Chain;
+    Chain := @FifoFeatures;
     Names := Names + [AFifoName];
   end;
+  FillChar(Features, SizeOf(Features), 0);
+  Features.sType := VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+  Features.pNext := Chain;
+  if FDualSource then
+    Features.features.dualSrcBlend := VK_TRUE;
   Priority := 1;
   FillChar(Queue, SizeOf(Queue), 0);
   Queue.sType := VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
@@ -1058,8 +1209,9 @@ begin
     @Cmds.WaitSemaphores := @Cmds.WaitSemaphoresKHR;
   if not Assigned(Cmds.GetSemaphoreCounterValue) then
     @Cmds.GetSemaphoreCounterValue := @Cmds.GetSemaphoreCounterValueKHR;
-  if not Assigned(Cmds.CmdBeginRendering) or not Assigned(Cmds.CmdPipelineBarrier2) or
-    not Assigned(Cmds.QueueSubmit2) or not Assigned(Cmds.WaitSemaphores) then
+  if (FDynamicRendering and (not Assigned(Cmds.CmdBeginRendering) or not Assigned(Cmds.CmdEndRendering))) or
+    (FSynchronization2 and (not Assigned(Cmds.CmdPipelineBarrier2) or not Assigned(Cmds.QueueSubmit2))) or
+    (FTimelineSemaphore and (not Assigned(Cmds.WaitSemaphores) or not Assigned(Cmds.GetSemaphoreCounterValue))) then
     raise EFastVulkan.Create('FastCanvas: the Vulkan device lacks commands of its extensions');
   FVk := TVulkan.Create(Cmds);
   FVk.GetDeviceQueue(FDevice, FQueueFamily, 0, @FQueue);
@@ -1317,6 +1469,101 @@ begin
   if Range.offset + Range.size > Limit then
     Range.size := VK_WHOLE_SIZE;
   FVk.InvalidateMappedMemoryRanges(FDevice, 1, @Range);
+end;
+
+function TFastVulkan.RenderPass(const AKey: TFastVkPassKey): TVkRenderPass;
+var
+  Attachments: array[0..1] of TVkAttachmentDescription;
+  ColorRef, DepthRef: TVkAttachmentReference;
+  Subpass: TVkSubpassDescription;
+  Info: TVkRenderPassCreateInfo;
+  Res: TVkResult;
+begin
+  TMonitor.Enter(FPasses);
+  try
+    if FPasses.TryGetValue(AKey, Result) then
+      Exit;
+    // One subpass; the attachments keep their layouts (no dependencies: barriers outside the pass order it).
+    FillChar(Attachments, SizeOf(Attachments), 0);
+    Attachments[0].format := AKey.ColorFormat;
+    Attachments[0].samples := TVkSampleCountFlagBits(Max(AKey.Samples, 1));
+    Attachments[0].loadOp := AKey.ColorLoad;
+    Attachments[0].storeOp := AKey.ColorStore;
+    Attachments[0].stencilLoadOp := VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    Attachments[0].stencilStoreOp := VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    Attachments[0].initialLayout := AKey.ColorLayout;
+    Attachments[0].finalLayout := AKey.ColorLayout;
+    ColorRef.attachment := 0;
+    ColorRef.layout := AKey.ColorLayout;
+    FillChar(Subpass, SizeOf(Subpass), 0);
+    Subpass.pipelineBindPoint := VK_PIPELINE_BIND_POINT_GRAPHICS;
+    Subpass.colorAttachmentCount := 1;
+    Subpass.pColorAttachments := @ColorRef;
+    FillChar(Info, SizeOf(Info), 0);
+    Info.sType := VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
+    Info.attachmentCount := 1;
+    Info.pAttachments := @Attachments[0];
+    Info.subpassCount := 1;
+    Info.pSubpasses := @Subpass;
+    if AKey.DepthFormat <> VK_FORMAT_UNDEFINED then
+    begin
+      Attachments[1].format := AKey.DepthFormat;
+      Attachments[1].samples := Attachments[0].samples;
+      Attachments[1].loadOp := AKey.DepthLoad;
+      Attachments[1].storeOp := AKey.DepthStore;
+      Attachments[1].stencilLoadOp := AKey.StencilLoad;
+      Attachments[1].stencilStoreOp := AKey.StencilStore;
+      Attachments[1].initialLayout := AKey.DepthLayout;
+      Attachments[1].finalLayout := AKey.DepthLayout;
+      DepthRef.attachment := 1;
+      DepthRef.layout := AKey.DepthLayout;
+      Subpass.pDepthStencilAttachment := @DepthRef;
+      Info.attachmentCount := 2;
+    end;
+    Result := VK_NULL_HANDLE;
+    Res := FVk.CreateRenderPass(FDevice, @Info, nil, @Result);
+    Check(Res, 'vkCreateRenderPass');
+    FPasses.Add(AKey, Result);
+  finally
+    TMonitor.Exit(FPasses);
+  end;
+end;
+
+function TFastVulkan.CompatiblePass(const AColorFormat: TVkFormat; const ASamples: Integer;
+  const ADepthFormat: TVkFormat): TVkRenderPass;
+var
+  Key: TFastVkPassKey;
+begin
+  // Compatibility asks for the formats and samples only: the attachments as the canvas leaves them.
+  FillChar(Key, SizeOf(Key), 0);
+  Key.ColorFormat := AColorFormat;
+  Key.DepthFormat := ADepthFormat;
+  Key.Samples := Max(ASamples, 1);
+  Key.ColorLayout := VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+  Key.ColorLoad := VK_ATTACHMENT_LOAD_OP_LOAD;
+  Key.ColorStore := VK_ATTACHMENT_STORE_OP_STORE;
+  if ADepthFormat <> VK_FORMAT_UNDEFINED then
+  begin
+    Key.DepthLayout := VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+    Key.DepthLoad := VK_ATTACHMENT_LOAD_OP_LOAD;
+    Key.DepthStore := VK_ATTACHMENT_STORE_OP_STORE;
+    Key.StencilLoad := VK_ATTACHMENT_LOAD_OP_LOAD;
+    Key.StencilStore := VK_ATTACHMENT_STORE_OP_STORE;
+  end;
+  Result := RenderPass(Key);
+end;
+
+procedure TFastVulkan.PipelineTarget(var AInfo: TVkGraphicsPipelineCreateInfo;
+  const ARendering: PVkPipelineRenderingCreateInfo; const ASamples: Integer);
+begin
+  if FDynamicRendering then
+  begin
+    AInfo.pNext := ARendering;
+    Exit;
+  end;
+  AInfo.renderPass := CompatiblePass(ARendering.pColorAttachmentFormats^, ASamples,
+    ARendering.depthAttachmentFormat);
+  AInfo.subpass := 0;
 end;
 
 initialization

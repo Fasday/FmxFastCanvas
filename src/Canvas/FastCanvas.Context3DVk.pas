@@ -1167,7 +1167,13 @@ begin
   end;
   FillChar(Info, SizeOf(Info), 0);
   Info.sType := VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
-  Info.pNext := @Rendering;
+  // Dynamic rendering, else a render pass of the same attachments.
+  try
+    Fast.PipelineTarget(Info, @Rendering, Max(AKey.Samples, 1));
+  except
+    on E: EFastVulkan do
+      raise EContext3DException.Create(E.Message);
+  end;
   Info.stageCount := Length(Stages);
   Info.pStages := @Stages[0];
   Info.pVertexInputState := @VertexInput;
@@ -1327,7 +1333,7 @@ begin
     Info.pDepthAttachment := @Depth;
     Info.pStencilAttachment := @Stencil;
   end;
-  C.BeginRenderingInfo(T, Info);
+  C.BeginRenderingInfo(T, Info, T.Format, T.Samples);
   R.RenderDepth := D;
 end;
 
