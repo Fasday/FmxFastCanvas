@@ -1617,6 +1617,9 @@ begin
     Exit;
   Ctx := GpuVk;
   S.UseAs(TGpuVkUse.TransferSrc);
+  // A copy into it before (it stays in TransferDst): the writes are ordered by a barrier of their own.
+  if D.CurrentUse = TGpuVkUse.TransferDst then
+    Ctx.MemoryBarrier(StageTransfer, AccessTransferWrite, StageTransfer, AccessTransferWrite);
   D.UseAs(TGpuVkUse.TransferDst);
   if S.Format = D.Format then
   begin
@@ -1668,6 +1671,8 @@ begin
     Exit;
   Ctx := GpuVk;
   S.UseAs(TGpuVkUse.TransferSrc);
+  if D.CurrentUse = TGpuVkUse.TransferDst then
+    Ctx.MemoryBarrier(StageTransfer, AccessTransferWrite, StageTransfer, AccessTransferWrite);
   D.UseAs(TGpuVkUse.TransferDst, True);
   FillChar(Region, SizeOf(Region), 0);
   Region.srcSubresource := ColorLayers;
