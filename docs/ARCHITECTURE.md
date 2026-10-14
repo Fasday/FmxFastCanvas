@@ -1,7 +1,7 @@
 # How FastCanvas works
 
 FastCanvas replaces the canvas and the 3D context of FireMonkey on Windows. It is written from scratch on
-Direct3D 11 or Direct3D 12; FMX itself (forms, controls, styles, layout, animations) is unchanged.
+Direct3D 11, Direct3D 12 or Vulkan; FMX itself (forms, controls, styles, layout, animations) is unchanged.
 
 ## Units
 
@@ -17,13 +17,17 @@ Direct3D 11 or Direct3D 12; FMX itself (forms, controls, styles, layout, animati
 | `FastCanvas.Hdr`, `Shaders/FastOutput.hlsl` | HDR output: the setting, what the display of a window can show (DXGI outputs, SDR white level), the pass that turns a window's frame into scRGB. |
 | `FastCanvas.Service` | Installs the canvas class and the 3D context class into FMX (`IFMXCanvasService`, `IFMXContextService`). |
 | `FastCanvas.Bridge` | What a 3D context needs from the canvas: device, lock, bitmap textures, a way into the command stream. |
-| `FastCanvas.Context3D` | The part of the 3D contexts that does not depend on the API: shaders and their variables, pipeline state, vertex layouts. |
-| `FastCanvas.Context3D11`, `FastCanvas.Context3D12` | The 3D contexts (`TContext3D`) for `TViewport3D`, `TForm3D` and the effects. |
+| `FastCanvas.Context3D` | The part of the 3D contexts that does not depend on the API: shaders and their variables, pipeline state, vertex layouts, the settings of the ray-traced effects. |
+| `FastCanvas.Context3D11`, `FastCanvas.Context3D12`, `FastCanvas.Context3DVk` | The 3D contexts (`TContext3D`) for `TViewport3D`, `TForm3D` and the effects. |
 | `FastCanvas.Context3D12.Ray.inc`, `Shaders/FastRay.hlsl` → `FastCanvas.RayShaders.inc` | Ray-traced effects (DXR 1.1, shader model 6.5). |
+| `FastCanvas.DeviceVk` | The Vulkan device: instance, physical and logical device and their features, the memory suballocator, the queue lock. |
+| `FastCanvas.GpuVk` | The Vulkan back end of the renderer: the recording context, surfaces, windows and the threads that present them, pipelines. |
+| `FastCanvas.VkShaders.inc`, `FastCanvas.VkRayShaders.inc`, `FastCanvas.VkFmxShaders.inc` | SPIR-V: `FastCanvas.hlsl`, `FastOutput.hlsl` and `FastRay.hlsl` (dxc), FMX's own shaders (from their GLSL, `tools/compile-fmx-shaders-vk.ps1`). |
+| `FastCanvas.Context3DVk.Ray.inc` | Ray-traced effects on Vulkan (ray queries). |
 | `FastCanvas.D2D1Ext`, `FastCanvas.DWriteExt`, `FastCanvas.DCompExt` | Headers of Direct2D 1.1+, DirectWrite 2 and DirectComposition that Delphi's RTL lacks. |
 
-The shaders are compiled offline by `tools/compile-shaders.ps1` (fxc and dxc from the Windows SDK) into Pascal byte
-arrays; building FastCanvas needs neither compiler.
+The shaders are compiled offline by `tools/compile-shaders.ps1` (fxc and dxc from the Windows SDK; SPIR-V with dxc
+and glslangValidator from the Vulkan SDK) into Pascal byte arrays; building FastCanvas needs none of the compilers.
 
 ## Recording and the render thread
 
@@ -135,6 +139,29 @@ resources wait for that fence too. Resource states are tracked per resource and 
 canvas pipeline has one root signature (8 root constants, a table of eight textures, a table of the shared resources,
 three static samplers) and two pipeline states.
 
+## The Vulkan back end
+
+Modelled on the Direct3D 12 back end. One recording context per device: a primary command buffer per executed chunk,
+submitted before `Present` and whenever the CPU needs results; every submission signals the next value of a timeline
+semaphore, and command pools, upload pages, descriptor pools and released objects are reused or destroyed once the
+timeline has passed the submission that used them. Image layouts are tracked per image and changed by batched
+synchronization2 barriers; draws run in dynamic rendering instances. The canvas pipeline has one descriptor set layout
+(the frame constants, eight textures, atlas, ramps, the tables as uniform texel buffers, immutable samplers) and
+three pipelines; the viewport flips y (negative height), so the shaders keep Direct3D's coordinates.
+
+- **Memory** (`FastCanvas.DeviceVk`): blocks of device memory per memory type (32 MB device-local, 8 MB host-visible,
+  host-visible ones mapped), buffers and images in blocks of their own, suballocated first fit; resources larger than
+  half a block get memory of their own. Thread-safe: the 3D context makes textures on the main thread while the render
+  thread draws.
+- **Windows**: frames are drawn into a surface of the window, which keeps the frame for the next one (partial frames
+  start from it, as from the shown buffer on Direct3D 12). `Present` copies the frame into a second surface and
+  wakes the window's presenting thread, which acquires a swap chain image (waiting for a fence on the CPU: a semaphore
+  wait held up the whole queue), copies the newest frame into it with a recorded command buffer and presents; it takes
+  the queue lock only, never the device lock. The render thread waits for neither the display nor the driver's
+  acquire, and waits for the GPU only to stay three frames ahead. The present mode is `IMMEDIATE` when tearing is
+  allowed, else `MAILBOX`, `FIFO_LATEST_READY` (the AMD driver has no `MAILBOX`) or `FIFO`: frames come as fast as
+  with Direct3D 12 presenting with sync interval 0.
+
 ## The 3D contexts
 
 FMX's 3D context (`TContext3D`) renders `TViewport3D`, `TForm3D` and the filters of `FMX.Effects`. FastCanvas has its
@@ -151,6 +178,13 @@ own for each back end, on the canvas's device:
   changed constants, copy, resolve, texture upload, present) into the canvas's command stream; the render thread
   replays them into the canvas's command list. Pipeline state objects are cached by shaders, vertex layout, state and
   target format. With `Hdr` the target of a viewport is RGBA16F (see "HDR output").
+- **Vulkan**: as Direct3D 12, replayed into the canvas's command buffer, with push descriptors (one set layout: the
+  constants of both stages, eight texture units). FMX ships its shaders as Direct3D bytecode and GLSL ES sources;
+  `tools/compile-fmx-shaders-vk.ps1` rewrites the GLSL into Vulkan GLSL with the uniforms of a stage in one block at
+  the byte offsets of the Direct3D variables (matrices transposed; the few shaders whose GLSL computes otherwise than
+  their bytecode patched), so the constants `FastCanvas.Context3D` lays out are the same bytes on every back end. The
+  context finds a shader's SPIR-V by a hash of its GLSL and of its Direct3D variables. A `TForm3D` draws into the frame
+  surface of a canvas window, presented as the canvas's windows are.
 - Bitmaps of the canvas are used in place as textures and render targets: a `TViewport3D` renders and copies its image
   into the form's bitmap on the GPU (the stock contexts read it back through the CPU), and the effects filter canvas
   bitmaps without leaving the GPU.
@@ -163,7 +197,7 @@ own for each back end, on the canvas's device:
   uploads and writes are commands too, so they run in program order with the draws. FMX's cached state is marked dirty
   after a raw draw, so the next `DrawPrimitives` sets it again.
 
-### Ray-traced effects (Direct3D 12, DXR 1.1)
+### Ray-traced effects (Direct3D 12 with DXR 1.1, Vulkan with ray queries)
 
 While a scene with effects is recorded, every opaque object (triangles, depth test and write, float3 positions, drawn
 in world space) is announced to the render thread with its matrix and, for reflections, its vertex layout and material
@@ -184,6 +218,12 @@ its instances. Full-screen passes then work from the depth buffer, with inline r
 The results multiply (shadows, occlusion) or blend (reflections) into the color FMX has drawn, so FMX's materials and
 shaders are untouched. Off, the effects cost nothing: nothing is recorded or built.
 
+On Vulkan (`FastCanvas.Context3DVk.Ray.inc`) the passes are the same HLSL, compiled to SPIR-V with ray queries. The
+bottom-level structures are built from the vertices and indices the draw uploaded (device addresses in the upload
+pages, which ray tracing gives the usages it needs), the geometry copies and material textures of reflections are
+arrays of storage buffers and sampled images (descriptor indexing), and the descriptor sets of a scene's passes come
+from a pool of their own that is retired with them.
+
 **Application ray passes** use the same machinery: with `RayScene` on, the draws are announced to the render thread
 with the program's attributes (mask, 24-bit user value in `InstanceContributionToHitGroupIndex`, optional geometry
 key and version). `RayDispatch` and `RayDraw` record a command at their point of the stream; the render thread
@@ -196,12 +236,12 @@ transform keeps orientation, so that a ray sees the same front face as the raste
 
 ## Device loss
 
-The render thread only records that the device is gone (`DXGI_ERROR_DEVICE_REMOVED` or `RESET` from `Present`, or an
-exception on a removed device). The next scene that is not nested in another waits for the render thread, sends
-`TContextLostMessage`, releases everything made on the old device, creates a new device, recreates the bitmap textures
-(bitmaps the CPU wrote get their pixels back), sends `TContextResetMessage`, and repaints the forms. The 3D contexts
-make their buffers again on the main thread before their next scene. `FastCanvasSimulateDeviceLoss` exercises this
-path.
+The render thread only records that the device is gone (`DXGI_ERROR_DEVICE_REMOVED` or `RESET` from `Present`,
+`VK_ERROR_DEVICE_LOST`, or an exception on a removed device). The next scene that is not nested in another waits for
+the render thread, sends `TContextLostMessage`, releases everything made on the old device, creates a new device,
+recreates the bitmap textures (bitmaps the CPU wrote get their pixels back), sends `TContextResetMessage`, and repaints
+the forms. The 3D contexts make their buffers again on the main thread before their next scene.
+`FastCanvasSimulateDeviceLoss` exercises this path.
 
 ## Shutdown
 
@@ -212,14 +252,18 @@ cache, the back end's recording context, the device), the context service the 3D
 registries of live bitmaps go with their last entry when something outlives the service. The device and the
 factories live on the heap, not in class variables: the finalization of `FastCanvas.Device` would release those
 before the forms that still use them. With `ReportMemoryLeaksOnShutdown` nothing is reported (Direct3D 11 and 12, flip
-and DirectComposition, 3D with ray-traced effects, a window recreated at run time).
+and DirectComposition, 3D with ray-traced effects, a window recreated at run time). On Vulkan every object of the 3D
+context is destroyed when the canvas's recording context shuts down (textures FMX frees later have nothing left to
+release), before the device goes.
 
 ## Locks
 
 - FMX's global canvas lock (`TCanvas.Lock`, from `BeginScene` to `EndScene`) serializes recording; the command
   stream relies on it.
-- The device lock (the Direct2D multithread lock) guards the immediate context (Direct3D 11) or the open command list
-  (Direct3D 12) against other threads that need them (`TBitmap.Map`, texture uploads).
+- The device lock (the Direct2D multithread lock) guards the immediate context (Direct3D 11), the open command list
+  (Direct3D 12) or command buffer (Vulkan) against other threads that need them (`TBitmap.Map`, texture uploads).
+- Vulkan: submissions and presents take the queue lock (`TFastVulkan.LockQueue`); the threads presenting windows take
+  it alone, never the device lock.
 - `TContextResetMessage` is sent from whichever thread found the device loss; paths taken in its handlers (texture
   uploads) take the device lock only, never `TCanvas.Lock` (that deadlocked with a main thread holding it while
   waiting for FMX's message manager).

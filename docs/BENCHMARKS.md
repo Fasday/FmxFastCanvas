@@ -33,6 +33,8 @@ Machine: AMD Ryzen 5 7500F (6 cores), AMD Radeon RX 9070 XT (driver 32.0.31041.1
 | `fc` | FastCanvas on Direct3D 11, with its 3D context |
 | `fcdx12` | FastCanvas on Direct3D 12, with its 3D context |
 | `fcdx12rt` / `ao` / `soft` / `refl` | `fcdx12` with ray-traced shadows / shadows and ambient occlusion / soft shadows / shadows and reflections |
+| `fcvk` | FastCanvas on Vulkan, with its 3D context (see "Vulkan" below) |
+| `fcvkrt` / `ao` / `soft` / `refl` | `fcvk` with the ray-traced effects of `fcdx12rt` / `ao` / `soft` / `refl` |
 
 ### Scenes
 
@@ -166,6 +168,58 @@ mostly disappears behind it. Off, they cost nothing (the `fcdx12` columns of bot
 | `viewport3d` | light | 20 | 0.070 | 0.072 (+0.002) | 0.138 (+0.068) | 0.164 (+0.094) | 0.161 (+0.091) |
 | `viewport3d` | medium | 160 | 0.489 | 0.495 (+0.006) | 0.492 (+0.003) | 0.500 (+0.011) | 0.508 (+0.019) |
 | `viewport3d` | heavy | 480 | 1.58 | 1.58 (+0.002) | 1.65 (+0.069) | 1.56 (+0.000) | 1.64 (+0.058) |
+
+### Vulkan
+
+`fcvk` against `fcdx12`, measured 2026-10-14 on the same machine but on a 3840 x 2160 monitor at 60 Hz and 150 %
+scale (window 1920 x 1080 pixels), `medium`, throughput, frames per second (higher is better): for each of three
+repeats every scene ran on both canvases back to back, the table shows the median (1 s warm-up and 3 s measured per
+run). Other programs were running that day: repeated runs of a scene varied by up to 10–15 %. The screenshots of all
+scenes are identical to `fcdx12` (strokes: 0.001 % of the pixels apart). Geometric mean of the ratios: 1.04.
+
+| Scene | N | fcdx12 | fcvk | fcvk / fcdx12 |
+|---|---:|---:|---:|---:|
+| `rects` | 16000 | 564 | 581 | 1.03 |
+| `text` | 250 | 1832 | 1504 | 0.82 |
+| `textedge` | 16 | 2677 | 2437 | 0.91 |
+| `textcached` | 250 | 2239 | 1727 | 0.77 |
+| `paragraph` | 60 | 531 | 550 | 1.04 |
+| `reflow` | 32 | 280 | 279 | 1.00 |
+| `roundrects` | 800 | 1940 | 1883 | 0.97 |
+| `ellipses` | 700 | 2820 | 3541 | 1.26 |
+| `lines` | 1900 | 2138 | 1909 | 0.89 |
+| `strokes` | 450 | 862 | 1181 | 1.37 |
+| `gradients` | 100 | 3557 | 4540 | 1.28 |
+| `paths` | 330 | 1097 | 1423 | 1.30 |
+| `bitmaps` | 11500 | 695 | 683 | 0.98 |
+| `bitmapscaled` | 10800 | 676 | 629 | 0.93 |
+| `clip` | 75 | 3280 | 4204 | 1.28 |
+| `aa` | 4 | 1670 | 1459 | 0.87 |
+| `rare` | 3 | 3632 | 5210 | 1.43 |
+| `controls` | 190 | 379 | 378 | 1.00 |
+| `effects` | 112 | 1341 | 1493 | 1.11 |
+| `offscreen` | 16000 | 565 | 609 | 1.08 |
+| `offscreenmap` | 16000 | 198 | 237 | 1.20 |
+| `listbox` | 4000 | 479 | 469 | 0.98 |
+| `listview` | 10000 | 361 | 383 | 1.06 |
+| `viewport3d` | 160 | 689 | 688 | 1.00 |
+| `shadows3d` | 32 | 2557 | 2169 | 0.85 |
+| `mirror3d` | 32 | 2563 | 2246 | 0.88 |
+
+The text scenes are slower where the GPU limits them: at 960 x 540 `textcached` runs at the speed of `fcdx12`
+(2810 against 2892 FPS), at 1920 x 1080 the render thread spends about a quarter of its time in `vkQueueSubmit2`.
+Windows present from a thread of their own, which takes about a third of a CPU core at 2000+ FPS.
+
+Ray-traced effects on Vulkan, `light` preset (the GPU is the bottleneck), one run each, frames per second:
+
+| Scene | fcdx12 / fcvk | rt | ao | soft | refl |
+|---|---:|---:|---:|---:|---:|
+| `shadows3d` | 4040 / 5960 | 2900 / 6543 | 2258 / 4738 | 2185 / 4979 | 2430 / 5340 |
+| `mirror3d` | 4018 / 6019 | 2841 / 6430 | 2638 / 5480 | 2214 / 5004 | 2018 / 5308 |
+| `viewport3d` | 3671 / 4046 | 3020 / 4043 | 2329 / 3836 | 2289 / 3973 | 2429 / 3986 |
+
+With `medium` the effects cost `fcvk` nothing measurable (`shadows3d` and `mirror3d` 2750–2880 FPS with every
+variant, `viewport3d` 660–715). The images are identical to those of `fcdx12rt` / `ao` / `soft` / `refl`.
 
 ## Running the benchmark
 

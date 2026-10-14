@@ -256,8 +256,8 @@ public static class FmxGlsl
             "$6 = (vec3($2) + $3*($4 - vec3($2)))*$7;", "2" },
         new[] { "Gloom.fps", @"(\w+) = (\w+) \+ (\w+)\*\((\w+)\.x - \2\);\n(\s*)(\w+) = vec3\(\1, \1, \1\)\*(\w+);",
             "$6 = (vec3($2) + $3*($4 - vec3($2)))*$7;", "2" },
-        new[] { "BrightTransition.fps", @"(_leastBright\w+) = 1\.0;", "$1 = 1.0;\n    _leastBrightColor0006 = vec4(0.0);",
-            "1" },
+        new[] { "BrightTransition.fps", @"(_leastBright\w+) = 1\.0;",
+            "$1 = 1.0;\n    _leastBrightColor0006 = vec4(0.0);", "1" },
     };
 
     static string Patch(FmxShader s, string src)
@@ -555,7 +555,8 @@ try {
   [void]$sb.AppendLine('    /// <summary>FNV-1a of the GLSL source, and of the Direct3D variables (VarHash).</summary>')
   [void]$sb.AppendLine('    Hash, Vars: UInt64;')
   [void]$sb.AppendLine('    Vertex: Boolean;')
-  [void]$sb.AppendLine('    /// <summary>Bytes of the uniform block; attribute locations the shader reads; its words in VkFmxWords.')
+  [void]$sb.AppendLine('    /// <summary>Bytes of the uniform block; attribute locations the shader reads; ' +
+    'its words in VkFmxWords.')
   [void]$sb.AppendLine('    /// </summary>')
   [void]$sb.AppendLine('    Block: Integer;')
   [void]$sb.AppendLine('    Inputs: Cardinal;')

@@ -4,8 +4,8 @@ unit FastCanvas.DeviceVk;
   and VK_KHR_win32_surface), the physical device (a discrete graphics card first, with a graphics queue family that
   presents to windows), the logical device with dynamic rendering, synchronization2 and timeline semaphores, its
   graphics queue and the device command table, and memory type lookup. Buffer device address, acceleration
-  structures and ray query are enabled too where the device has them (the 3D context needs them), and
-  VK_KHR_present_mode_fifo_latest_ready.
+  structures and ray query with descriptor indexing are enabled too where the device has them (the ray-traced effects
+  of the 3D context need them), and VK_KHR_present_mode_fifo_latest_ready.
 
   Memory: blocks of VkDeviceMemory per memory type (32 MB device-local, 8 MB host-visible), buffers and images in
   blocks of their own (no bufferImageGranularity between them), suballocated first fit with merged free ranges;

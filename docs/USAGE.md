@@ -8,10 +8,11 @@
 - Windows 10 or 11.
 - Direct3D 11 back end: a GPU with feature level 10_0 or higher (WARP when there is none).
 - Direct3D 12 back end: a GPU with feature level 11_0 or higher.
-- Vulkan back end (in progress: the 2D canvas works, no HDR output, partial frames or 3D context of its own yet):
-  Vulkan 1.3 with dynamic rendering, synchronization2 and timeline semaphores.
+- Vulkan back end: Vulkan 1.3 with dynamic rendering, synchronization2 and timeline semaphores; its 3D context also
+  needs `VK_KHR_push_descriptor`. What it does not have is listed under "Vulkan back end".
 - Ray-traced effects: a GPU with DirectX Raytracing tier 1.1 (NVIDIA RTX 20 and later, AMD RX 6000 and later,
-  Intel Arc). Without it they are simply not drawn.
+  Intel Arc); on Vulkan, ray queries (`VK_KHR_ray_query` with acceleration structures, buffer device addresses and
+  descriptor indexing; AMD's 32-bit driver has none). Without it they are simply not drawn.
 
 ## Adding it to a project
 
@@ -50,8 +51,9 @@ end.
 ```
 
 For Direct3D 11 leave `FastCanvasBackend` at its default and install `FastCanvas.Context3D11.InstallFastContext3D11`
-instead. The 3D context must match the back end: it runs on the canvas's device and shares its bitmaps, its command
-stream and its render thread.
+instead; for Vulkan set `TFastCanvasBackend.Vulkan` and install `FastCanvas.Context3DVk.InstallFastContext3DVk`. The
+3D context must match the back end: it runs on the canvas's device and shares its bitmaps, its command stream and its
+render thread.
 
 Without a 3D context of its own, FMX keeps its stock DX11 3D context on a device of its own; the canvas works with it
 too (bitmaps then cross between the devices through the CPU, which is slower).
@@ -67,7 +69,7 @@ All settings are global variables, set before `Application.Initialize` unless no
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `FastCanvasBackend` | `D3D11` | The graphics API: `TFastCanvasBackend.D3D11`, `D3D12` or `Vulkan`. Read when the device is created (the first canvas, bitmap or text layout). Vulkan windows present to the window itself (as `Flip`, never `Composition`), with vertical sync unless `AllowTearing`; there is no 3D context on Vulkan yet (FMX's stock one is used). |
+| `FastCanvasBackend` | `D3D11` | The graphics API: `TFastCanvasBackend.D3D11`, `D3D12` or `Vulkan`. Read when the device is created (the first canvas, bitmap or text layout). On Vulkan see "Vulkan back end". |
 
 ### `FastCanvas.Canvas`
 
@@ -75,7 +77,7 @@ All settings are global variables, set before `Application.Initialize` unless no
 |---|---|---|
 | `FastCanvasRenderThread` | `True` | Commands recorded in a scene run on a render thread while the main thread goes on. `False`: they run on the recording thread at `EndScene`. Can be switched between frames. |
 | `FastCanvasFramesInFlight` | `1` | Window frames the main thread may run ahead of the render thread. |
-| `FastCanvasPartialFrames` | `True` | Direct3D 12 only: report `TCanvasStyle.SupportClipRects`, so FMX repaints only the rectangles that changed. Faster when part of a form changes (scrolled lists), about 5 % slower when hundreds of controls move every frame (FMX then works out the update rectangle of each). |
+| `FastCanvasPartialFrames` | `True` | Direct3D 12 and Vulkan: report `TCanvasStyle.SupportClipRects`, so FMX repaints only the rectangles that changed. Faster when part of a form changes (scrolled lists), about 5 % slower when hundreds of controls move every frame (FMX then works out the update rectangle of each). |
 | `FastCanvasPresentation` | `Composition` | How windows show their frames. `Composition`: a composition swap chain shown by DirectComposition, with the frame's alpha: where a form is drawn transparent, what is behind it shows, such as a DWM backdrop (Mica, Acrylic) with the frame extended into the client area, as with FMX's stock Direct2D canvas. `Flip`: a swap chain of the window, which DWM shows opaque. Same speed. Windows presenting with tearing (`AllowTearing`) take `Flip`, which tearing needs. Not for transparent forms (layered windows) and `TForm3D`; HDR output stays opaque. Read at every window frame; a form switching from `Flip` to `Composition` gets a new window (DWM would keep the last flip frame under the composition). |
 | `FastCanvasTextAntialias` | `Grayscale` | How text is antialiased. `Grayscale`: as FMX's stock Direct2D canvas draws it. `ClearType`: subpixel antialiasing with the system's ClearType settings (the ClearType tuner's gamma, contrast and level; RGB or BGR subpixels), blended as Direct2D blends ClearType text, also when ClearType is turned off in Windows (as Direct2D's ClearType mode). Only where ClearType can be drawn: text in the frames of windows, unrotated and uniformly scaled, on a display whose subpixels are in a row; text drawn into bitmaps (effects, `TLayer3D`, the 2D controls of a `TForm3D`, caches), into transparent forms and rotated text stays grayscale, as with DirectWrite and Direct2D. Over parts of a `Composition` window that are transparent, ClearType edges show colors. From the first ClearType glyph of a window frame on, its draws blend with a second color output of the pixel shader (dual-source blending); frames without text blend as usual. `Aliased`: no antialiasing, every pixel of a glyph covered or not (DirectWrite's aliased rendering), everywhere, also text drawn as outlines (large or rotated); color emoji stay smooth. `System`: as Windows draws text (`FastCanvasSystemTextAntialias`, read once): `Aliased` when "Smooth edges of screen fonts" is off, `ClearType` when ClearType is on, else `Grayscale`. Read at every scene. |
 | `FastCanvasKeepBitmapCopies` | `True` | Bitmaps the CPU wrote (loaded images, style bitmaps) keep a copy of their pixels and survive a device loss. |
@@ -133,6 +135,11 @@ With FMX's default `TLightMaterial` (`Specular = $FF606060`, `Shininess = 30`) e
 9 % when reflections are on; give a material a dark `Specular` to keep it matte.
 
 What they cost is in `BENCHMARKS.md`. Off, they cost nothing.
+
+On Vulkan the Vulkan 3D context (`TFastContext3DVk`) draws the same effects with the same shaders, compiled to SPIR-V,
+and the images match those of Direct3D 12. `TFastRayTracing` and `FastContext3DRayTracing` are declared in
+`FastCanvas.Context3D` (`FastCanvas.Context3D12` keeps aliases); a Vulkan context has them as its `RayTracing`
+property, and `TFastContext3DVk.RayTracingSupported` says whether the device has ray queries.
 
 ### `FastCanvas.Context3D12`: application ray passes
 
@@ -372,6 +379,33 @@ shaders, layout, state, topology and target format and kept.
 A program without FMX forms (a console test) shuts FastCanvas down as FMX's `FinalizeForms` does:
 `TContextManager.UnInitialize` and `TCanvasManager.UnInitialize` after its last context is freed.
 
+## Vulkan back end
+
+With `FastCanvasBackend := TFastCanvasBackend.Vulkan` and `InstallFastContext3DVk` everything is drawn with Vulkan
+1.3 (headers from `third_party\pasvulkan`): the canvas, text (ClearType included), bitmaps, transparent forms, the
+effects, `TViewport3D`, `TForm3D` and the ray-traced effects, with device loss handled as on Direct3D. The benchmark's
+scenes draw as on Direct3D 12 (identical screenshots but for a few pixels of strokes), at about its speed
+(`BENCHMARKS.md`).
+
+- **Windows** show their frames through a swap chain of the window itself (opaque, as `Flip`; `FastCanvasPresentation`
+  is ignored), each from a thread of its own: the render thread copies a finished frame and goes on, the window's
+  thread acquires an image, copies the newest frame into it and presents. The present mode: `IMMEDIATE` with
+  `AllowTearing`, else the first the driver has of `MAILBOX`, `FIFO_LATEST_READY` and `FIFO`. The GPU is at most
+  three frames behind. Frames are drawn into a surface of the window that keeps them, so partial frames
+  (`FastCanvasPartialFrames`) work as on Direct3D 12.
+- **The 3D context** runs FMX's own shaders (materials, filters, effects, transitions) as SPIR-V made from the GLSL
+  sources FMX ships, with the constants laid out as for Direct3D: `tools\compile-fmx-shaders-vk.ps1` writes
+  `FastCanvas.VkFmxShaders.inc` (run it again, with the Vulkan SDK, when a Delphi update changes FMX's shaders). A
+  shader FMX does not ship (an application's `TContextShader` or material) raises `EContext3DException`.
+- **Memory**: textures and buffers share blocks of device memory (32 MB device-local, 8 MB host-visible; larger
+  resources get memory of their own), so thousands of bitmaps take a few memory objects. `FASTCANVAS_VK_STATS=<file>`
+  appends the peak numbers of memory objects and allocations when the device goes.
+
+Not on Vulkan: HDR output (`FastCanvasHdr`, `Hdr`, `DrawIntensity`), DirectComposition, DLSS, the application ray
+passes (`RayScene`, `RayDispatch`, `RayDraw` and their types are Direct3D 12 only), application shaders in the 3D
+context, `D2DText`. Win32 programs run on Vulkan too, but AMD's 32-bit driver has no ray queries: their 3D scenes are
+drawn without the ray-traced effects.
+
 ## Threads
 
 - Draw with a canvas only between `BeginScene` and `EndScene`, as FMX requires. `TBitmap.Canvas` can be used on any
@@ -388,11 +422,14 @@ A program without FMX forms (a console test) shuts FastCanvas down as FMX's `Fin
   running).
 - `FASTCANVAS_VK_DEBUG=<file>` (environment variable): the Vulkan back end enables `VK_LAYER_KHRONOS_validation` (of
   the Vulkan SDK) and appends its warnings and errors to the file. `VK_KHRONOS_VALIDATION_VALIDATE_SYNC=1` adds the
-  layer's synchronization validation.
+  layer's synchronization validation. `FASTCANVAS_VK_STATS=<file>`: the peak numbers of Vulkan memory objects and
+  allocations, appended when the device goes.
 - `FastCanvasSimulateDeviceLoss`: the next scene treats the device as lost and recreates everything, as after a driver
   update or a GPU reset.
 - `FastCanvasCaptureWindow`: the frame a window presented last, as floats (checks of HDR output).
 - `ReportMemoryLeaksOnShutdown := True` in the program: FastCanvas frees everything it made at shutdown.
+- The benchmark runs on Vulkan with `--canvas=fcvk` (also `fcvkrt`, `fcvkao`, `fcvksoft`, `fcvkrefl` with ray-traced
+  effects, `fcvksep` with FMX's stock 3D context).
 
 ## Limitations
 
@@ -401,6 +438,9 @@ A program without FMX forms (a console test) shuts FastCanvas down as FMX's `Fin
 - Text is grayscale antialiased by default (as FMX's stock Direct2D canvas draws it); ClearType
   (`FastCanvasTextAntialias`) only in the frames of windows, not in bitmaps, transparent forms and `TForm3D`. No
   GDI-style text rendering (glyphs fitted to the pixel grid).
-- Ray-traced effects need a depth buffer and DXR tier 1.1; they do not trace transparent objects.
-- Partial frames are Direct3D 12 only.
+- Ray-traced effects need a depth buffer and DXR tier 1.1 or Vulkan ray queries; they do not trace transparent
+  objects.
+- Partial frames are Direct3D 12 and Vulkan only.
 - HDR output is Direct3D 12 only, and not for transparent forms.
+- On Vulkan the 3D context runs only FMX's own shaders, and there are no application ray passes and no DLSS (see
+  "Vulkan back end").
