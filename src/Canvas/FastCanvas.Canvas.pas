@@ -3419,9 +3419,11 @@ end;
 /// <summary>Band layout of polygon edges for the shader (PathCoverage), written to AOut (grown when needed, reused):
 /// (Bands + 1) div 2 headers of two (start, count) pairs each (relative to AOut, as Cardinal bits), then the edges
 /// of every band. A band lists the edges overlapping it widened by 0.75 pixel at the lowest scale of the bucket, so
-/// the pixel square around any point of the band finds all the edges it needs in that band. Returns the number of
-/// entries used.</summary>
-function BandEdges(const ASink: TFastEdgeSink; const AMinScale: Single; var AOut: TArray<TEdge>;
+/// the pixel square around any point of the band finds all the edges it needs in that band. ABandPixels > 0: bands
+/// at most that many pixels tall (TGpuRenderer.BandPixels; a pixel goes through every edge of its band, and those that
+/// do not reach its row add nothing, so the band count does not change the result). Returns the number of entries
+/// used.</summary>
+function BandEdges(const ASink: TFastEdgeSink; const AMinScale, ABandPixels: Single; var AOut: TArray<TEdge>;
   out ABands: Integer): Integer;
 var
   H, InvH, Margin: Single;
@@ -3465,7 +3467,10 @@ var
   end;
 
 begin
-  ABands := EnsureRange(ASink.Count div 6, 1, MaxPathBands);
+  ABands := ASink.Count div 6;
+  if ABandPixels > 0 then
+    ABands := Max(ABands, Trunc((ASink.MaxY - ASink.MinY) * AMinScale / ABandPixels));
+  ABands := EnsureRange(ABands, 1, MaxPathBands);
   H := (ASink.MaxY - ASink.MinY) / ABands;
   if H <= 1E-6 then
   begin
@@ -3619,7 +3624,7 @@ begin
   AEdges.Frame := -1;
   if FSink.Count > 0 then
   begin
-    N := BandEdges(FSink, Power(2, (BucketMin - 0.5) / 4), FBanded, Bands);
+    N := BandEdges(FSink, Power(2, (BucketMin - 0.5) / 4), FGpu.BandPixels, FBanded, Bands);
     if N > GpuEdgesLimit div 4 then
       Exit(False);
     if not Persistent and (N > FGpu.EdgeCapacity div 4) then

@@ -12,7 +12,8 @@ unit FastCanvas.GpuVk;
   Image layouts (and the stages and accesses that go with them, TGpuVkUse) are tracked per image and changed by
   batched synchronization2 barriers right before the next command that needs them; the table buffers take global
   memory barriers. Bitmap surfaces rest in SHADER_READ_ONLY_OPTIMAL. Draws run in dynamic rendering instances, which
-  the context ends before every copy or barrier and begins again for the next draw (loading the target).
+  the context ends before every copy or barrier and begins again for the next draw (loading the target); a clear of
+  a whole target waits to be the load operation of its next instance (a frame's clear and draws in one render pass).
 
   Devices without these features (Vulkan 1.1 phones; FASTCANVAS_VK_LEGACY=1, FASTCANVAS_VK_NOTIMELINE=1 on others):
   without synchronization2 a batch of barriers becomes one vkCmdPipelineBarrier (the union of the batch's stages, the
@@ -24,15 +25,19 @@ unit FastCanvas.GpuVk;
 
   The pipeline: one descriptor set layout (binding 0 the cbuffer Frame, 16..23 the textures of a draw, 24 atlas,
   25 ramps, 26..28 clips, paints and edges as uniform texel buffers, 32..34 the three immutable samplers) and three
-  pipelines (blending, copy, dual-source blending) with the SPIR-V of FastCanvas.VkShaders.inc. A draw takes a
-  descriptor set of the current pool (made again only when its textures or constants change); the instances and the
-  frame constants go into the upload pages. The shaders do not flip clip space for Vulkan: the viewport does
-  (negative height), so pixel coordinates are those of Direct3D.
+  pipelines (blending, copy, dual-source blending) with the SPIR-V of FastCanvas.VkShaders.inc. On GPUs other than
+  discrete ones (phones) blending draws are split into runs of variants of the pixel shader that leave out what the
+  run's instances do not need (TGpuVkVariant), and large rectangle outlines are drawn around their inside (scissors).
+  A draw takes a descriptor set of the current pool (made again only when its textures or constants change); the
+  instances and the frame constants go into the upload pages. The shaders do not flip clip space for Vulkan: the
+  viewport does (negative height), so pixel coordinates are those of Direct3D. FASTCANVAS_VK_GPUTIME reports the GPU
+  time of the render passes and presented copies per frame (timestamps).
 
   Windows: frames are drawn into a surface of the window (TGpuVkSurface), which keeps the frame (RestoreLast,
-  Capture) and which transparent windows read back. Present copies it into a second surface and wakes the window's
-  presenting thread (TGpuVkPresenter), which acquires a swap chain image, copies the newest frame into it (blit when
-  the sizes or formats differ) and presents it: the render thread waits neither for the display nor for the driver's
+  Capture) and which transparent windows read back. Present hands the surface to the window's presenting thread
+  (TGpuVkPresenter) and takes the one it showed before for the next frame (a partial frame starts from a copy of the
+  shown one); the thread acquires a swap chain image, copies the newest frame into it (blit when the sizes or formats
+  differ) and presents it: the render thread waits neither for the display nor for the driver's
   acquire and present (measured 2026-10-14 on the RX 9070 XT: text light without tearing 3800 FPS against 60 with
   FIFO on the render thread; with tearing 4900 against 3400 with IMMEDIATE on the render thread). The mode: IMMEDIATE
   when tearing is allowed, else MAILBOX, else FIFO_LATEST_READY (the AMD driver offers no MAILBOX), else FIFO, which
@@ -163,6 +168,13 @@ type
     property Signaled: UInt64 read FSignaled;
   end;
 
+  /// <summary>GPU timing (FASTCANVAS_VK_GPUTIME): the timestamps of a command buffer of the recording context, at its
+  /// start, around each rendering instance and at its end; Value: its submission (0: free).</summary>
+  TGpuVkTimeSlot = record
+    Value: UInt64;
+    Count: Integer;
+  end;
+
   /// <summary>The views and size a framebuffer is made for (devices without dynamic rendering).</summary>
   TGpuVkFramebufferKey = packed record
     Pass: TVkRenderPass;
@@ -203,6 +215,17 @@ type
     /// <summary>What the active rendering instance draws into: a surface of the canvas, or the object another
     /// renderer began it for (BeginRenderingInfo); nil: none.</summary>
     FRendering: TObject;
+    /// <summary>A clear of a whole surface not recorded yet (BeginRendering): it becomes the load operation of the
+    /// surface's next rendering instance, so that a frame's clear and draws take one render pass (a tiler writes
+    /// and reads the frame once less), or is recorded before anything else uses the surface (FlushClear).</summary>
+    FClearSurface: TGpuVkSurface;
+    FClearColor: TVkClearColorValue;
+    /// <summary>GPU timing (FASTCANVAS_VK_GPUTIME): the query pool, the slot of the open command buffer (-1: not
+    /// timed), the next slot, whether a rendering instance's start was stamped.</summary>
+    FTimePool: TVkQueryPool;
+    FTimeSlots: array of TGpuVkTimeSlot;
+    FTimeSlot, FTimeNext: Integer;
+    FTimePass: Boolean;
     FSurfaces: TList<TGpuVkSurface>;
     FWindows: TList<TGpuVkWindow>;
     FUniformAlign: Integer;
@@ -215,6 +238,16 @@ type
     /// <summary>Begins rendering as AInfo describes: dynamic rendering, else the render pass and framebuffer of the
     /// same (AColorFormat, ASamples: of the color attachment).</summary>
     procedure StartRendering(const AInfo: TVkRenderingInfo; const AColorFormat: TVkFormat; const ASamples: Integer);
+    /// <summary>Begins rendering into ATarget (AClear: cleared first), after the barriers so far.</summary>
+    procedure StartTarget(const ATarget: TGpuVkSurface; const AClear: PVkClearColorValue);
+    /// <summary>Records the deferred clear (FClearSurface), if any.</summary>
+    procedure FlushClear;
+    /// <summary>GPU timing: on with FASTCANVAS_VK_GPUTIME where the queue has timestamps.</summary>
+    procedure StartTiming;
+    /// <summary>GPU timing: a timestamp into the slot of the open command buffer.</summary>
+    procedure TimeStamp(const AStage: TVkPipelineStageFlagBits);
+    /// <summary>GPU timing: the results of the slots whose submissions are done into the sums.</summary>
+    procedure CollectTimes(const ADone: UInt64);
     /// <summary>The framebuffer of AColor (and ADepth) for render passes compatible with APass.</summary>
     function Framebuffer(const APass: TVkRenderPass; const AColor, ADepth: TVkImageView;
       const AExtent: TVkExtent2D): TVkFramebuffer;
@@ -284,7 +317,8 @@ type
     /// <summary>A descriptor set of ALayout for the open command buffer.</summary>
     function AllocSet(const ALayout: TVkDescriptorSetLayout): TVkDescriptorSet;
     /// <summary>Rendering into ATarget (begun if it is not the current one, after the barriers so far); AClear: the
-    /// whole target is filled with that color first.</summary>
+    /// whole target is filled with that color first (deferred to the next rendering into ATarget, see FClearSurface:
+    /// no rendering instance is begun then).</summary>
     procedure BeginRendering(const ATarget: TGpuVkSurface; const AClear: PVkClearColorValue = nil);
     /// <summary>Rendering of another renderer (the 3D context), identified by AOwner (Rendering): the active one ends
     /// and the barriers so far are issued first. AColorFormat, ASamples: of the color attachment (render passes);
@@ -342,14 +376,15 @@ type
 
   TGpuVkWindow = class(TGpuWindow)
   private
-    /// <summary>The surface frames are drawn into; Present copies it into FShown. Whether it holds a frame.
+    /// <summary>The surface frames are drawn into; Present makes it FShown and takes the one FShown was for the next
+    /// frame. FDrawn: it holds the frame drawn last; FLastShown: FShown holds it (RestoreLast copies it from there).
     /// </summary>
     FSurface: TGpuVkSurface;
-    FDrawn: Boolean;
+    FDrawn, FLastShown: Boolean;
     FVkSurface: TVkSurfaceKHR;
     /// <summary>The present modes the window's surface offers.</summary>
     FModes: TArray<TVkPresentModeKHR>;
-    /// <summary>The thread that presents, and the copy of the newest frame it presents from (resting in
+    /// <summary>The thread that presents, and the surface of the newest frame it presents from (resting in
     /// TRANSFER_SRC_OPTIMAL).</summary>
     FPresenter: TGpuVkPresenter;
     FShown: TGpuVkSurface;
@@ -424,6 +459,10 @@ type
     /// its last submission.</summary>
     FCmdGens: TArray<Integer>;
     FCmdValues: TArray<UInt64>;
+    /// <summary>GPU timing (FASTCANVAS_VK_GPUTIME): two timestamps around the copy of each image's command buffer,
+    /// and whether they were recorded.</summary>
+    FTimePool: TVkQueryPool;
+    FTimed: TArray<Boolean>;
     FTimeline: TGpuVkTimeline;
     FValue: UInt64;
     FStale: Boolean;
@@ -472,6 +511,13 @@ type
     Use: TGpuVkUse;
   end;
 
+  {$SCOPEDENUMS ON}
+  /// <summary>The variants of the pixel shader for blending draws (Shaders\FastCanvas.hlsl, the WITH_ switches):
+  /// shapes with gradients, glyphs, images, all three (controls), shapes and paths with gradients, each with and
+  /// without the clip test, and the full shader.</summary>
+  TGpuVkVariant = (Shapes, ShapesClip, Glyphs, GlyphsClip, Images, ImagesClip, Ui, UiClip, Paths, PathsClip, Full);
+  {$SCOPEDENUMS OFF}
+
   TGpuVkRenderer = class(TGpuRenderer)
   private
     FSamplers: array[0..2] of TVkSampler;
@@ -481,6 +527,17 @@ type
     FPipeBlend, FPipeCopy: TVkPipeline;
     /// <summary>Dual-source blending (ClearType text), made on first use; none without the feature.</summary>
     FPipeDual: TVkPipeline;
+    /// <summary>Blending draws in runs of the cheapest variant that fits, with the vertex shader that hands the table
+    /// entries to the pixel shader (FVSFlat; the full shader of these runs is FastCanvasVkPSFlat): on GPUs other than
+    /// discrete ones, with FASTCANVAS_VK_VARIANTS=1 on any, with 0 on none (the full shader, FPipeBlend). Modules and
+    /// pipelines are made on first use.</summary>
+    FVariants: Boolean;
+    FVSFlat: TVkShaderModule;
+    FVariantPS: array[TGpuVkVariant] of TVkShaderModule;
+    FVariantPipes: array[TGpuVkVariant] of TVkPipeline;
+    /// <summary>A run is split when that saves more than this of pixels times variant cost (see DrawPending).
+    /// </summary>
+    FSplitCost: Single;
     FAtlas, FRamps, FEmpty: TGpuVkImage;
     FClips, FPaints, FEdges: TGpuVkTable;
     FCopy: Boolean;
@@ -501,8 +558,17 @@ type
     FSetConst: UInt64;
     procedure CreatePipeline;
     function NewModule(const ACode: Pointer; const AWords: Integer): TVkShaderModule;
-    function NewPipeline(const AFormat: TVkFormat; const ABlend, ADual: Boolean): TVkPipeline;
+    /// <summary>APixel: the pixel shader module (entry PSMain); VK_NULL_HANDLE: FPS, or FPSDual when ADual. AVertex:
+    /// the vertex shader module; VK_NULL_HANDLE: FVS.</summary>
+    function NewPipeline(const AFormat: TVkFormat; const ABlend, ADual: Boolean;
+      const APixel: TVkShaderModule = VK_NULL_HANDLE; const AVertex: TVkShaderModule = VK_NULL_HANDLE): TVkPipeline;
     function TargetPipeline: TVkPipeline;
+    function VariantPipeline(const AVariant: TGpuVkVariant): TVkPipeline;
+    /// <summary>The pending instance is a rectangle outline with an inside large enough to leave out of its draw
+    /// (TGpuRenderer.HollowBands): the rectangles around it.</summary>
+    function Hollow(const AIndex: Integer; out ABands: TGpuBands; out ACount: Integer): Boolean;
+    /// <summary>The pending instances from AFirst on that one draw takes (at least one), and its variant.</summary>
+    function NextRun(const AFirst: Integer; out AVariant: TGpuVkVariant): Integer;
     function NewTexture(const AFormat: TVkFormat; const AWidth, AHeight: Integer): TGpuVkImage;
     function NewTable(const AFloat4s: Integer): TGpuVkTable;
     procedure ReleaseTable(var ATable: TGpuVkTable);
@@ -553,10 +619,16 @@ var
 
 implementation
 
-{$IFDEF MSWINDOWS}
 uses
-  Winapi.DxgiType;
-{$ELSE}
+{$IFDEF MSWINDOWS}
+  Winapi.DxgiType,
+{$ENDIF}
+{$IFDEF ANDROID}
+  Androidapi.Log,
+{$ENDIF}
+  System.Diagnostics;
+
+{$IFNDEF MSWINDOWS}
 const
   DXGI_ERROR_DEVICE_REMOVED = FastDeviceRemoved;
 {$ENDIF}
@@ -588,8 +660,103 @@ const
   /// <summary>The writes of a use, which a barrier makes available.</summary>
   UseWrites: array[TGpuVkUse] of UInt64 = (0, 0, AccessColorWrite, 0, AccessTransferWrite, AccessDepthWrite, 0);
 
+  /// <summary>What each variant of the pixel shader draws (GpuNeed*), and what a pixel of it costs, relatively: the
+  /// cycles of its longest path on a Mali-G57 (Mali Offline Compiler), the full shader's doubled for its registers
+  /// (half the threads).</summary>
+  VariantNeeds: array[TGpuVkVariant] of Cardinal = (GpuNeedShapes or GpuNeedGradients,
+    GpuNeedShapes or GpuNeedGradients or GpuNeedClips, GpuNeedGlyphs, GpuNeedGlyphs or GpuNeedClips, GpuNeedImages,
+    GpuNeedImages or GpuNeedClips, GpuNeedShapes or GpuNeedGradients or GpuNeedGlyphs or GpuNeedImages,
+    GpuNeedShapes or GpuNeedGradients or GpuNeedGlyphs or GpuNeedImages or GpuNeedClips,
+    GpuNeedShapes or GpuNeedGradients or GpuNeedPaths, GpuNeedShapes or GpuNeedGradients or GpuNeedPaths or GpuNeedClips,
+    GpuNeedAll);
+  VariantCost: array[TGpuVkVariant] of Single = (3, 4.5, 1, 2.5, 2.5, 4, 4, 6, 4.5, 6, 12);
+  VariantVariable = 'FASTCANVAS_VK_VARIANTS';
+
+  /// <summary>GPU timing: 1 for the platform's log (Android: logcat, tag FastCanvas; Windows: OutputDebugString), else
+  /// a file the report lines are appended to.</summary>
+  GpuTimeVariable = 'FASTCANVAS_VK_GPUTIME';
+  /// <summary>GPU timing: command buffers in flight that are timed, and timestamps each (its start and end, and 15
+  /// rendering instances; the ones after those are not timed).</summary>
+  TimeSlots = 64;
+  TimeSlotQueries = 32;
+
 var
   GCtx: TGpuVkContext;
+  /// <summary>The cheapest variant that draws instances of these needs (TGpuVkRenderer.Create fills it).</summary>
+  GVariantOf: array[0..GpuNeedAll] of TGpuVkVariant;
+  /// <summary>GPU timing: where it goes ('' off), nanoseconds per tick and the mask of the valid bits of timestamps;
+  /// since the last report: window frames, timed rendering instances and command buffers and their nanoseconds,
+  /// rendering instances not timed (render thread, device lock); presented copies and their nanoseconds (presenting
+  /// threads, atomic).</summary>
+  GTimeTarget: string;
+  GTimePeriod: Double;
+  GTimeMask: UInt64;
+  GTimeFrames, GTimePasses, GTimeUntimed, GTimeCmds: Integer;
+  GTimePassNs, GTimeCmdNs: Double;
+  GTimeCopies, GTimeCopyNs: Int64;
+  GTimeLast: Int64;
+
+/// <summary>GPU timing: a report line.</summary>
+procedure TimingOutput(const AText: string);
+var
+  F: TextFile;
+begin
+  if GTimeTarget = '1' then
+  begin
+{$IF Defined(ANDROID)}
+    __android_log_write(android_LogPriority.ANDROID_LOG_INFO, 'FastCanvas', MarshaledAString(UTF8String(AText)));
+{$ELSEIF Defined(MSWINDOWS)}
+    OutputDebugString(PChar(AText));
+{$ELSE}
+    Writeln(ErrOutput, AText);
+{$ENDIF}
+    Exit;
+  end;
+  AssignFile(F, GTimeTarget);
+  try
+    if FileExists(GTimeTarget) then
+      Append(F)
+    else
+      Rewrite(F);
+    try
+      Writeln(F, AText);
+    finally
+      CloseFile(F);
+    end;
+  except
+    // A development aid only.
+  end;
+end;
+
+/// <summary>GPU timing: one more window frame; every two seconds the GPU time per frame since the last report.
+/// </summary>
+procedure TimingFrame;
+var
+  Now, Copies: Int64;
+  N: Integer;
+  CopyNs: Double;
+begin
+  Inc(GTimeFrames);
+  Now := TStopwatch.GetTimeStamp;
+  if GTimeLast = 0 then
+    GTimeLast := Now;
+  if Now - GTimeLast < 2 * TStopwatch.Frequency then
+    Exit;
+  N := Max(GTimeFrames, 1);
+  Copies := TInterlocked.Exchange(GTimeCopies, 0);
+  CopyNs := TInterlocked.Exchange(GTimeCopyNs, 0);
+  TimingOutput(Format('FastCanvas GPU time per frame (%d frames in %.1f s): rendering %.2f ms (%.1f render passes, ' +
+    '%d not timed), command buffers %.2f ms (%.1f), presented copies %.2f ms (%.1f)', [GTimeFrames,
+    (Now - GTimeLast) / TStopwatch.Frequency, GTimePassNs / 1E6 / N, GTimePasses / N, GTimeUntimed,
+    GTimeCmdNs / 1E6 / N, GTimeCmds / N, CopyNs / 1E6 / N, Copies / N], TFormatSettings.Invariant));
+  GTimeLast := Now;
+  GTimeFrames := 0;
+  GTimePasses := 0;
+  GTimeUntimed := 0;
+  GTimeCmds := 0;
+  GTimePassNs := 0;
+  GTimeCmdNs := 0;
+end;
 
 function GpuVk: TGpuVkContext;
 begin
@@ -942,6 +1109,8 @@ begin
   FFramebuffers := TDictionary<TGpuVkFramebufferKey, TVkFramebuffer>.Create;
   FFramebufferViews := TDictionary<TVkImageView, Integer>.Create;
   SetLength(FBarriers, 16);
+  FTimeSlot := -1;
+  StartTiming;
   try
     FTimeline := TGpuVkTimeline.Create(FFast);
   except
@@ -965,6 +1134,9 @@ begin
   if Assigned(GpuVkShutdownHook) then
     GpuVkShutdownHook(Self);
   // Presentation too: swap chains and their semaphores go now.
+  if FTimePool <> VK_NULL_HANDLE then
+    FVk.DestroyQueryPool(FDevice, FTimePool, nil);
+  FTimePool := VK_NULL_HANDLE;
   FFast.LockQueue;
   try
     FVk.QueueWaitIdle(FQueue);
@@ -1010,6 +1182,75 @@ begin
   FSurfaces.Free;
   FWindows.Free;
   inherited;
+end;
+
+procedure TGpuVkContext.StartTiming;
+var
+  Count: Cardinal;
+  Families: TArray<TVkQueueFamilyProperties>;
+  Bits: Cardinal;
+  Info: TVkQueryPoolCreateInfo;
+begin
+  GTimeTarget := GetEnvironmentVariable(GpuTimeVariable);
+  if GTimeTarget = '' then
+    Exit;
+  Count := 0;
+  FFast.InstanceVk.GetPhysicalDeviceQueueFamilyProperties(FFast.Physical, @Count, nil);
+  SetLength(Families, Count);
+  if Count > 0 then
+    FFast.InstanceVk.GetPhysicalDeviceQueueFamilyProperties(FFast.Physical, @Count, @Families[0]);
+  Bits := 0;
+  if FFast.QueueFamily < Count then
+    Bits := Families[FFast.QueueFamily].timestampValidBits;
+  if Bits = 0 then
+  begin
+    TimingOutput('FastCanvas GPU time: the queue has no timestamps');
+    GTimeTarget := '';
+    Exit;
+  end;
+  if Bits >= 64 then
+    GTimeMask := High(UInt64)
+  else
+    GTimeMask := (UInt64(1) shl Bits) - 1;
+  GTimePeriod := FFast.Properties.limits.timestampPeriod;
+  FillChar(Info, SizeOf(Info), 0);
+  Info.sType := VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
+  Info.queryType := VK_QUERY_TYPE_TIMESTAMP;
+  Info.queryCount := TimeSlots * TimeSlotQueries;
+  Check(FVk.CreateQueryPool(FDevice, @Info, nil, @FTimePool), 'vkCreateQueryPool');
+  SetLength(FTimeSlots, TimeSlots);
+end;
+
+procedure TGpuVkContext.TimeStamp(const AStage: TVkPipelineStageFlagBits);
+begin
+  FVk.CmdWriteTimestamp(FCmd.Buffer, AStage, FTimePool, FTimeSlot * TimeSlotQueries + FTimeSlots[FTimeSlot].Count);
+  Inc(FTimeSlots[FTimeSlot].Count);
+end;
+
+procedure TGpuVkContext.CollectTimes(const ADone: UInt64);
+var
+  Q: array[0..TimeSlotQueries - 1] of UInt64;
+  I, K, N: Integer;
+begin
+  for I := 0 to High(FTimeSlots) do
+    if (FTimeSlots[I].Value <> 0) and (FTimeSlots[I].Value <= ADone) then
+    begin
+      N := FTimeSlots[I].Count;
+      FTimeSlots[I].Value := 0;
+      if (N < 2) or (FVk.GetQueryPoolResults(FDevice, FTimePool, I * TimeSlotQueries, N, SizeOf(Q), @Q[0],
+        SizeOf(UInt64), Ord(VK_QUERY_RESULT_64_BIT)) <> VK_SUCCESS) then
+        Continue;
+      // The start, pairs around rendering instances, the end.
+      GTimeCmdNs := GTimeCmdNs + ((Q[N - 1] - Q[0]) and GTimeMask) * GTimePeriod;
+      Inc(GTimeCmds);
+      K := 1;
+      while K + 1 <= N - 2 do
+      begin
+        GTimePassNs := GTimePassNs + ((Q[K + 1] - Q[K]) and GTimeMask) * GTimePeriod;
+        Inc(GTimePasses);
+        Inc(K, 2);
+      end;
+    end;
 end;
 
 procedure TGpuVkContext.Check(const ARes: TVkResult; const AWhat: string);
@@ -1084,6 +1325,20 @@ begin
   Check(FVk.BeginCommandBuffer(FCmd.Buffer, @Begin_), 'vkBeginCommandBuffer');
   FOpen := True;
   Inc(FListGen);
+  if FTimePool <> VK_NULL_HANDLE then
+  begin
+    // A slot whose last command buffer is not done (many in flight) leaves this one untimed.
+    FTimeSlot := FTimeNext;
+    FTimeNext := (FTimeNext + 1) mod TimeSlots;
+    if FTimeSlots[FTimeSlot].Value <> 0 then
+      FTimeSlot := -1
+    else
+    begin
+      FTimeSlots[FTimeSlot].Count := 0;
+      FVk.CmdResetQueryPool(FCmd.Buffer, FTimePool, FTimeSlot * TimeSlotQueries, TimeSlotQueries);
+      TimeStamp(VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT);
+    end;
+  end;
   // The current page and descriptor pool go on in this command buffer.
   if FPage <> nil then
     FPage.Value := InList;
@@ -1127,6 +1382,8 @@ begin
   if Opened then
   begin
     FOpen := False;
+    if FTimeSlot >= 0 then
+      TimeStamp(VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
     Check(FVk.EndCommandBuffer(FCmd.Buffer), 'vkEndCommandBuffer');
     Buffer := FCmd.Buffer;
   end;
@@ -1148,6 +1405,9 @@ begin
   Result := FSignaled;
   if Opened then
   begin
+    if FTimeSlot >= 0 then
+      FTimeSlots[FTimeSlot].Value := FSignaled;
+    FTimeSlot := -1;
     FCmd.Value := FSignaled;
     FCommands.Enqueue(FCmd);
     FCmd := Default(TGpuVkCommands);
@@ -1206,6 +1466,8 @@ var
   P: TGpuVkPage;
 begin
   Done := Completed;
+  if FTimePool <> VK_NULL_HANDLE then
+    CollectTimes(Done);
   I := 0;
   while I < FRetired.Count do
     if FRetired[I].Value <= Done then
@@ -1312,6 +1574,9 @@ var
   I: Integer;
   Old: TVkImageLayout;
 begin
+  // A deferred clear goes before any other use of its surface.
+  if (FClearSurface <> nil) and (AImage = FClearSurface.FImage) then
+    FlushClear;
   if (AUse = ANew) or (AImage = VK_NULL_HANDLE) then
     Exit;
   // A change of the same image waiting in the batch becomes one barrier (or none).
@@ -1758,10 +2023,9 @@ end;
 
 procedure TGpuVkContext.BeginRendering(const ATarget: TGpuVkSurface; const AClear: PVkClearColorValue);
 var
-  Attachment: TVkRenderingAttachmentInfo;
-  Info: TVkRenderingInfo;
   ClearAttachment: TVkClearAttachment;
   Rect: TVkClearRect;
+  Color: TVkClearColorValue;
 begin
   if (FRendering = ATarget) and (FBarrierCount = 0) and (FMemSrcStage = 0) and (FMemDstStage = 0) then
   begin
@@ -1779,6 +2043,49 @@ begin
     end;
     Exit;
   end;
+  if AClear <> nil then
+  begin
+    // Deferred: the load operation of the target's next rendering instance (one render pass for the clear and the
+    // draws after it), unless something else uses the target first (FlushClear).
+    if FRendering = ATarget then
+      EndRendering;
+    if (FClearSurface <> nil) and (FClearSurface <> ATarget) then
+      FlushClear;
+    FClearSurface := ATarget;
+    FClearColor := AClear^;
+    Exit;
+  end;
+  if FClearSurface = ATarget then
+  begin
+    FClearSurface := nil;
+    Color := FClearColor;
+    StartTarget(ATarget, @Color);
+  end
+  else
+    StartTarget(ATarget, nil);
+end;
+
+procedure TGpuVkContext.FlushClear;
+var
+  S: TGpuVkSurface;
+  Color: TVkClearColorValue;
+begin
+  S := FClearSurface;
+  if S = nil then
+    Exit;
+  FClearSurface := nil;
+  Color := FClearColor;
+  StartTarget(S, @Color);
+  EndRendering;
+  // The clear's writes come before the next ones (a use without a change of layout takes no barrier of its own).
+  MemoryBarrier(StageColorOutput, AccessColorWrite, StageColorOutput, AccessColorRead or AccessColorWrite);
+end;
+
+procedure TGpuVkContext.StartTarget(const ATarget: TGpuVkSurface; const AClear: PVkClearColorValue);
+var
+  Attachment: TVkRenderingAttachmentInfo;
+  Info: TVkRenderingInfo;
+begin
   EndRendering;
   if ATarget.FUse = TGpuVkUse.ColorTarget then
     // Drawn in an earlier rendering instance: its writes come before the next ones (blending reads them).
@@ -1829,6 +2136,15 @@ var
   Clears: array[0..1] of TVkClearValue;
   Info: TVkRenderPassBeginInfo;
 begin
+  if FTimeSlot >= 0 then
+    // Room for its end and the command buffer's.
+    if FTimeSlots[FTimeSlot].Count <= TimeSlotQueries - 3 then
+    begin
+      TimeStamp(VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
+      FTimePass := True;
+    end
+    else
+      Inc(GTimeUntimed);
   if FFast.DynamicRendering then
   begin
     FVk.CmdBeginRendering(Cmd, @AInfo);
@@ -1958,6 +2274,11 @@ begin
     FVk.CmdEndRendering(FCmd.Buffer)
   else
     FVk.CmdEndRenderPass(FCmd.Buffer);
+  if FTimePass then
+  begin
+    FTimePass := False;
+    TimeStamp(VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
+  end;
 end;
 
 { TGpuVkSurface }
@@ -2000,6 +2321,8 @@ begin
       GCtx.FSurfaces.Remove(Self);
       if GCtx.FRendering = Self then
         GCtx.EndRendering;
+      if GCtx.FClearSurface = Self then
+        GCtx.FClearSurface := nil;
       // Command buffers that are not executed yet may use them.
       GCtx.Retire(TGpuVkObject.ImageView, FView);
       GCtx.Retire(TGpuVkObject.Image, FImage);
@@ -2024,6 +2347,8 @@ var
 begin
   C := AContext;
   C.FSurfaces.Remove(Self);
+  if C.FClearSurface = Self then
+    C.FClearSurface := nil;
   C.DestroyObject(TGpuVkObject.ImageView, FView);
   C.DestroyObject(TGpuVkObject.Image, FImage);
   C.DestroyObject(TGpuVkObject.Memory, MemoryHandle(FMemory));
@@ -2359,10 +2684,15 @@ end;
 function TGpuVkWindow.Prepare(const AWidth, AHeight: Integer; const ATearing: Boolean;
   const AOutput: TGpuOutput): TGpuSurface;
 begin
-  // Frames are drawn into a surface of the window (8-bit: no HDR output yet), which Present copies on and
-  // transparent windows read back.
+  // Frames are drawn into a surface of the window (8-bit: no HDR output yet), which Present hands to the presenting
+  // thread and transparent windows read back.
   if (FSurface <> nil) and ((FSurface.Width <> AWidth) or (FSurface.Height <> AHeight)) then
+  begin
+    // It may have been the one shown: it goes once a submission after the presenting thread's copies of it is done
+    // (one of the next command buffer, opened for it).
+    GpuVk.Cmd;
     FreeAndNil(FSurface);
+  end;
   if FSurface = nil then
   begin
     FSurface := TGpuVkSurface.Create(AWidth, AHeight, nil, 0);
@@ -2379,8 +2709,7 @@ end;
 function TGpuVkWindow.Present: HResult;
 var
   C: TGpuVkContext;
-  S, Old: TGpuVkSurface;
-  Region: TVkImageCopy;
+  Old: TGpuVkSurface;
 begin
   Result := S_OK;
   if FLayered or (FSurface = nil) then
@@ -2393,6 +2722,7 @@ begin
     // No surface now (Android: no native window): the frame stays in the window's surface, not shown.
     C.Submit;
     FDrawn := True;
+    FLastShown := False;
     if C.Fast.Lost then
       Exit(DXGI_ERROR_DEVICE_REMOVED);
     Exit;
@@ -2406,49 +2736,71 @@ begin
     FPresenter.FStaleAsked := True;
     FPresenter.Unlock;
   end;
-  if (FShown = nil) or (FShown.Width <> FSurface.Width) or (FShown.Height <> FSurface.Height) then
-  begin
-    // A copy of the frame's size. The old one goes once the presenting thread has submitted what uses it (it does so
-    // holding the lock) and the GPU is done with that: the context's next submission is later on the queue, and the
-    // command buffer it retires with is open (the new surface was cleared in it).
-    S := TGpuVkSurface.Create(FSurface.Width, FSurface.Height, nil, 0);
-    FPresenter.Lock;
-    Old := FShown;
-    FShown := S;
-    Inc(FPresenter.FShownGen);
-    FPresenter.Unlock;
-    Old.Free;
-  end;
-  // The newest frame into the copy, which rests in TRANSFER_SRC_OPTIMAL for the presenting thread (its reads of the
-  // frame before are earlier on the queue).
+  // The frame rests in TRANSFER_SRC_OPTIMAL for the presenting thread, which shows it from now on (Post): it is not
+  // copied. The surface it showed before takes the next frame.
   FSurface.Use(TGpuVkUse.TransferSrc);
-  C.Transition(FShown.Image, FShown.FUse, TGpuVkUse.TransferDst, True);
-  FillChar(Region, SizeOf(Region), 0);
-  Region.srcSubresource := ColorLayers;
-  Region.dstSubresource := ColorLayers;
-  Region.extent.width := FSurface.Width;
-  Region.extent.height := FSurface.Height;
-  Region.extent.depth := 1;
-  C.Vk.CmdCopyImage(C.TransferCmd, FSurface.Image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, FShown.Image,
-    VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, @Region);
-  FShown.Use(TGpuVkUse.TransferSrc);
   C.WaitFor(FFrameValues[FFrameIndex mod FramesInFlight]);
   FFrameValues[FFrameIndex mod FramesInFlight] := C.Submit;
   Inc(FFrameIndex);
-  FDrawn := True;
   if C.Fast.Lost then
+  begin
+    FDrawn := True;
     Exit(DXGI_ERROR_DEVICE_REMOVED);
+  end;
+  if GTimeTarget <> '' then
+    TimingFrame;
 {$IFDEF ANDROID}
   // Phones: the frames keep the display's pace (FIFO), as when the render thread presented itself; the frame before
   // has to be taken first (bounded: a frame that cannot be shown does not hold the render thread).
   FPresenter.WaitTaken(100);
 {$ENDIF}
+  // The frame is shown from now on, and the surface shown before takes the next frame: the presenting thread takes
+  // the frame to show holding the lock and submits its copy before it lets go, so its copies of the old one are
+  // earlier on the queue than the next frame's draws into it.
+  FPresenter.Lock;
+  Old := FShown;
+  FShown := FSurface;
+  Inc(FPresenter.FShownGen);
+  FPresenter.Unlock;
   FPresenter.Post;
+  FDrawn := False;
+  FLastShown := True;
+  if (Old <> nil) and (Old.Width = FShown.Width) and (Old.Height = FShown.Height) then
+    FSurface := Old
+  else
+  begin
+    // Of another size: it goes once a submission after the presenting thread's last copy of it is done (one of the
+    // next command buffer, opened for it).
+    FSurface := nil;
+    C.Cmd;
+    Old.Free;
+  end;
 end;
 
 function TGpuVkWindow.RestoreLast: Boolean;
+var
+  C: TGpuVkContext;
+  Region: TVkImageCopy;
 begin
-  // The surface keeps the frame drawn last (also of a transparent window), unless it was made for this frame.
+  // The frame shown last into the surface (FShown stays in TRANSFER_SRC_OPTIMAL for the presenting thread, which
+  // only reads it too). The surface holds the frame drawn last itself when it was not shown (no swap chain now,
+  // transparent windows).
+  if (FSurface <> nil) and not FDrawn and FLastShown and (FShown <> nil) and (FShown.Width = FSurface.Width) and
+    (FShown.Height = FSurface.Height) then
+  begin
+    C := GpuVk;
+    C.Transition(FSurface.Image, FSurface.FUse, TGpuVkUse.TransferDst, True);
+    FillChar(Region, SizeOf(Region), 0);
+    Region.srcSubresource := ColorLayers;
+    Region.dstSubresource := ColorLayers;
+    Region.extent.width := FSurface.Width;
+    Region.extent.height := FSurface.Height;
+    Region.extent.depth := 1;
+    C.Vk.CmdCopyImage(C.TransferCmd, FShown.Image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, FSurface.Image,
+      VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, @Region);
+    FSurface.GpuWritten;
+    FDrawn := True;
+  end;
   Result := (FSurface <> nil) and FDrawn;
 end;
 
@@ -2461,7 +2813,9 @@ var
 begin
   ACapture := Default(TGpuCapture);
   Result := False;
-  if (FSurface = nil) or not FDrawn then
+  // The frame shown last, into the surface (whose content goes: the next frame draws all of it, or starts from the
+  // last one as well).
+  if not RestoreLast then
     Exit;
   W := FSurface.Width;
   H := FSurface.Height;
@@ -2695,6 +3049,10 @@ begin
     FVk.DestroySemaphore(FDevice, S, nil);
   if FCmds <> nil then
     FVk.FreeCommandBuffers(FDevice, FPool, Length(FCmds), @FCmds[0]);
+  if FTimePool <> VK_NULL_HANDLE then
+    FVk.DestroyQueryPool(FDevice, FTimePool, nil);
+  FTimePool := VK_NULL_HANDLE;
+  FTimed := nil;
   FPresentSems := nil;
   FImages := nil;
   FCmds := nil;
@@ -2725,6 +3083,7 @@ var
   Info: TVkSwapchainCreateInfoKHR;
   AllocInfo: TVkCommandBufferAllocateInfo;
   SemInfo: TVkSemaphoreCreateInfo;
+  PoolInfo: TVkQueryPoolCreateInfo;
   Old, Chain: TVkSwapchainKHR;
   Count: Cardinal;
   K: Integer;
@@ -2798,6 +3157,15 @@ begin
     FCmdGens[K] := -1;
     FCmdValues[K] := 0;
   end;
+  if GTimeTarget <> '' then
+  begin
+    FillChar(PoolInfo, SizeOf(PoolInfo), 0);
+    PoolInfo.sType := VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
+    PoolInfo.queryType := VK_QUERY_TYPE_TIMESTAMP;
+    PoolInfo.queryCount := 2 * Count;
+    FFast.Check(FVk.CreateQueryPool(FDevice, @PoolInfo, nil, @FTimePool), 'vkCreateQueryPool');
+    SetLength(FTimed, Count);
+  end;
   FExtent := Extent;
   FStale := False;
   Result := True;
@@ -2806,14 +3174,35 @@ end;
 procedure TGpuVkPresenter.Record_(const AIndex: Integer; const AShown: TGpuVkSurface);
 var
   Begin_: TVkCommandBufferBeginInfo;
+  Q: array[0..1] of UInt64;
 begin
   // The command buffer's last execution is done before it is recorded again.
   WaitValue(FCmdValues[AIndex]);
+  if (FTimePool <> VK_NULL_HANDLE) and FTimed[AIndex] and (FCmdValues[AIndex] <> 0) then
+  begin
+    FTimed[AIndex] := False;
+    if FVk.GetQueryPoolResults(FDevice, FTimePool, 2 * AIndex, 2, SizeOf(Q), @Q[0], SizeOf(UInt64),
+      Ord(VK_QUERY_RESULT_64_BIT)) = VK_SUCCESS then
+    begin
+      TInterlocked.Add(GTimeCopyNs, Round(((Q[1] - Q[0]) and GTimeMask) * GTimePeriod));
+      TInterlocked.Increment(GTimeCopies);
+    end;
+  end;
   FFast.Check(FVk.ResetCommandBuffer(FCmds[AIndex], 0), 'vkResetCommandBuffer');
   FillChar(Begin_, SizeOf(Begin_), 0);
   Begin_.sType := VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
   FFast.Check(FVk.BeginCommandBuffer(FCmds[AIndex], @Begin_), 'vkBeginCommandBuffer');
+  if FTimePool <> VK_NULL_HANDLE then
+  begin
+    FVk.CmdResetQueryPool(FCmds[AIndex], FTimePool, 2 * AIndex, 2);
+    FVk.CmdWriteTimestamp(FCmds[AIndex], VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, FTimePool, 2 * AIndex);
+  end;
   RecordChainCopy(FFast, FCmds[AIndex], AShown, FImages[AIndex], FFormat.format, FExtent);
+  if FTimePool <> VK_NULL_HANDLE then
+  begin
+    FVk.CmdWriteTimestamp(FCmds[AIndex], VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, FTimePool, 2 * AIndex + 1);
+    FTimed[AIndex] := True;
+  end;
   FFast.Check(FVk.EndCommandBuffer(FCmds[AIndex]), 'vkEndCommandBuffer');
   FCmdGens[AIndex] := FShownGen;
 end;
@@ -2962,11 +3351,21 @@ end;
 { TGpuVkRenderer }
 
 constructor TGpuVkRenderer.Create;
+var
+  Needs: Cardinal;
+  V: TGpuVkVariant;
 begin
   inherited Create;
   FBoundGen := -1;
   FConstGen := -1;
   FSetGen := -1;
+  for Needs := 0 to GpuNeedAll do
+  begin
+    GVariantOf[Needs] := TGpuVkVariant.Full;
+    for V := Low(TGpuVkVariant) to High(TGpuVkVariant) do
+      if ((Needs and not VariantNeeds[V]) = 0) and (VariantCost[V] < VariantCost[GVariantOf[Needs]]) then
+        GVariantOf[Needs] := V;
+  end;
   TFastDevice.Lock;
   try
     CreatePipeline;
@@ -2979,6 +3378,7 @@ destructor TGpuVkRenderer.Destroy;
 var
   C: TGpuVkContext;
   I: Integer;
+  V: TGpuVkVariant;
 begin
   C := GCtx;
   if C <> nil then
@@ -2987,6 +3387,12 @@ begin
     C.Retire(TGpuVkObject.Pipeline, FPipeBlend);
     C.Retire(TGpuVkObject.Pipeline, FPipeCopy);
     C.Retire(TGpuVkObject.Pipeline, FPipeDual);
+    for V := Low(TGpuVkVariant) to High(TGpuVkVariant) do
+    begin
+      C.Retire(TGpuVkObject.Pipeline, FVariantPipes[V]);
+      C.Retire(TGpuVkObject.ShaderModule, FVariantPS[V]);
+    end;
+    C.Retire(TGpuVkObject.ShaderModule, FVSFlat);
     C.Retire(TGpuVkObject.PipelineLayout, FLayout);
     C.Retire(TGpuVkObject.SetLayout, FSetLayout);
     for I := 0 to High(FSamplers) do
@@ -3058,7 +3464,8 @@ begin
   C.Vk.CmdFillBuffer(C.TransferCmd, Result.Buffer, 0, VK_WHOLE_SIZE, 0);
 end;
 
-function TGpuVkRenderer.NewPipeline(const AFormat: TVkFormat; const ABlend, ADual: Boolean): TVkPipeline;
+function TGpuVkRenderer.NewPipeline(const AFormat: TVkFormat; const ABlend, ADual: Boolean;
+  const APixel, AVertex: TVkShaderModule): TVkPipeline;
 const
   MainVS: PAnsiChar = 'VSMain';
   MainPS: PAnsiChar = 'PSMain';
@@ -3095,10 +3502,17 @@ begin
   Stages[0].sType := VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
   Stages[0].stage := VK_SHADER_STAGE_VERTEX_BIT;
   Stages[0].module := FVS;
+  if AVertex <> VK_NULL_HANDLE then
+    Stages[0].module := AVertex;
   Stages[0].pName := MainVS;
   Stages[1].sType := VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
   Stages[1].stage := VK_SHADER_STAGE_FRAGMENT_BIT;
-  if ADual then
+  if APixel <> VK_NULL_HANDLE then
+  begin
+    Stages[1].module := APixel;
+    Stages[1].pName := MainPS;
+  end
+  else if ADual then
   begin
     Stages[1].module := FPSDual;
     Stages[1].pName := MainDual;
@@ -3290,6 +3704,19 @@ begin
   FPS := NewModule(@FastCanvasVkPS[0], Length(FastCanvasVkPS));
   FPipeBlend := NewPipeline(VK_FORMAT_B8G8R8A8_UNORM, True, False);
   FPipeCopy := NewPipeline(VK_FORMAT_B8G8R8A8_UNORM, False, False);
+  // The variants: a phone (Mali-G57) shades large areas several times faster with them; a discrete GPU shades fast
+  // enough anyway, and their vertex shader and splits only cost it (2026-10-14, RX 9070 XT: paragraph light 1950
+  // against 1370 FPS).
+  FVariants := C.Fast.Properties.deviceType <> VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU;
+  if GetEnvironmentVariable(VariantVariable) = '0' then
+    FVariants := False
+  else if GetEnvironmentVariable(VariantVariable) = '1' then
+    FVariants := True;
+  // A draw costs a phone about what some ten thousand pixels of a cheaper variant save. Paths: bands of two pixels
+  // (a pixel of the wave of PortProbe goes through about a third of the edges of six-edge bands).
+  FSplitCost := 16384;
+  if FVariants then
+    FBandPixels := 2;
 
   FAtlas := NewTexture(VK_FORMAT_R8_UNORM, GpuAtlasSize, GpuAtlasSize);
   FRamps := NewTexture(VK_FORMAT_R8G8B8A8_UNORM, GpuRampWidth, GpuRampRows);
@@ -3317,6 +3744,127 @@ begin
     Result := FPipeCopy
   else
     Result := FPipeBlend;
+end;
+
+function TGpuVkRenderer.VariantPipeline(const AVariant: TGpuVkVariant): TVkPipeline;
+var
+  Code: Pointer;
+  Words: Integer;
+begin
+  Result := FVariantPipes[AVariant];
+  if Result <> VK_NULL_HANDLE then
+    Exit;
+  case AVariant of
+    TGpuVkVariant.Shapes:
+      begin
+        Code := @FastCanvasVkPSShapes[0];
+        Words := Length(FastCanvasVkPSShapes);
+      end;
+    TGpuVkVariant.ShapesClip:
+      begin
+        Code := @FastCanvasVkPSShapesClip[0];
+        Words := Length(FastCanvasVkPSShapesClip);
+      end;
+    TGpuVkVariant.Glyphs:
+      begin
+        Code := @FastCanvasVkPSGlyphs[0];
+        Words := Length(FastCanvasVkPSGlyphs);
+      end;
+    TGpuVkVariant.GlyphsClip:
+      begin
+        Code := @FastCanvasVkPSGlyphsClip[0];
+        Words := Length(FastCanvasVkPSGlyphsClip);
+      end;
+    TGpuVkVariant.Images:
+      begin
+        Code := @FastCanvasVkPSImages[0];
+        Words := Length(FastCanvasVkPSImages);
+      end;
+    TGpuVkVariant.ImagesClip:
+      begin
+        Code := @FastCanvasVkPSImagesClip[0];
+        Words := Length(FastCanvasVkPSImagesClip);
+      end;
+    TGpuVkVariant.Ui:
+      begin
+        Code := @FastCanvasVkPSUi[0];
+        Words := Length(FastCanvasVkPSUi);
+      end;
+    TGpuVkVariant.UiClip:
+      begin
+        Code := @FastCanvasVkPSUiClip[0];
+        Words := Length(FastCanvasVkPSUiClip);
+      end;
+    TGpuVkVariant.Paths:
+      begin
+        Code := @FastCanvasVkPSPaths[0];
+        Words := Length(FastCanvasVkPSPaths);
+      end;
+    TGpuVkVariant.PathsClip:
+      begin
+        Code := @FastCanvasVkPSPathsClip[0];
+        Words := Length(FastCanvasVkPSPathsClip);
+      end;
+  else
+    Code := @FastCanvasVkPSFlat[0];
+    Words := Length(FastCanvasVkPSFlat);
+  end;
+  if FVSFlat = VK_NULL_HANDLE then
+    FVSFlat := NewModule(@FastCanvasVkVSFlat[0], Length(FastCanvasVkVSFlat));
+  FVariantPS[AVariant] := NewModule(Code, Words);
+  Result := NewPipeline(VK_FORMAT_B8G8R8A8_UNORM, True, False, FVariantPS[AVariant], FVSFlat);
+  FVariantPipes[AVariant] := Result;
+end;
+
+/// <summary>Greedy: an instance joins the run when the run's variant draws it, or when the variant that draws both
+/// costs the pixels of the run and its own less than a draw more would (FSplitCost); a large instance that a cheaper
+/// variant draws starts a run of its own. The order of the instances is kept (they blend in it).</summary>
+function TGpuVkRenderer.Hollow(const AIndex: Integer; out ABands: TGpuBands; out ACount: Integer): Boolean;
+var
+  Area: Single;
+begin
+  // Four draws more pay for an inside of this many pixels of a small shader.
+  Result := ((FPending[AIndex].Flags and 15) = GpuKindStrokeRect) and HollowBands(@FPending[AIndex], ABands, ACount,
+    Area) and (Area * VariantCost[TGpuVkVariant.Shapes] > 4 * FSplitCost);
+end;
+
+function TGpuVkRenderer.NextRun(const AFirst: Integer; out AVariant: TGpuVkVariant): Integer;
+var
+  I, BandCount: Integer;
+  Needs, Run: Cardinal;
+  Area, RunArea: Single;
+  V, Own, Joint: TGpuVkVariant;
+  Bands: TGpuBands;
+begin
+  Run := InstanceNeeds(@FPending[AFirst], RunArea);
+  V := GVariantOf[Run];
+  I := AFirst + 1;
+  while I < FPendingCount do
+  begin
+    // An outline drawn around its inside (DrawPending) is a run of its own.
+    if Hollow(I, Bands, BandCount) then
+      Break;
+    Needs := InstanceNeeds(@FPending[I], Area);
+    Own := GVariantOf[Needs];
+    if (Needs and not VariantNeeds[V]) = 0 then
+    begin
+      if Area * (VariantCost[V] - VariantCost[Own]) > FSplitCost then
+        Break;
+    end
+    else
+    begin
+      Joint := GVariantOf[Run or Needs];
+      if RunArea * (VariantCost[Joint] - VariantCost[V]) + Area * (VariantCost[Joint] - VariantCost[Own]) >
+        FSplitCost then
+        Break;
+      Run := Run or Needs;
+      V := Joint;
+    end;
+    RunArea := RunArea + Area;
+    Inc(I);
+  end;
+  AVariant := V;
+  Result := I - AFirst;
 end;
 
 procedure TGpuVkRenderer.CreateEdgeTable(const ACapacity: Integer);
@@ -3466,7 +4014,11 @@ var
   Viewport: TVkViewport;
   Scissor: TVkRect2D;
   S: TGpuSurface;
-  I: Integer;
+  I, First, Count, BandCount: Integer;
+  Variant: TGpuVkVariant;
+  Variants: Boolean;
+  Bands: TGpuBands;
+  Area: Single;
 begin
   if (FPendingCount = 0) or (FTarget = nil) or (TGpuVkSurface(FTarget).Image = VK_NULL_HANDLE) then
   begin
@@ -3510,13 +4062,6 @@ begin
     FBoundPipe := VK_NULL_HANDLE;
     FBoundW := -1;
   end;
-  // By the kind of draw (blend, copy, dual-source).
-  Pipe := TargetPipeline;
-  if Pipe <> FBoundPipe then
-  begin
-    C.Vk.CmdBindPipeline(Cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, Pipe);
-    FBoundPipe := Pipe;
-  end;
   if (FBoundW <> FWidth) or (FBoundH <> FHeight) then
   begin
     // Negative height: y down, as the shaders' clip space expects (Direct3D's).
@@ -3537,8 +4082,60 @@ begin
   end;
   C.Vk.CmdBindDescriptorSets(Cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, FLayout, 0, 1, @Set_, 0, nil);
   C.Vk.CmdBindVertexBuffers(Cmd, 0, 1, @Buffer, @Offset);
-  C.Vk.CmdDraw(Cmd, 4, FPendingCount, 0, 0);
-  Inc(FDrawCalls);
+  Variants := FVariants and not FCopy and not (FDual and C.Fast.DualSource);
+  First := 0;
+  while First < FPendingCount do
+  begin
+    // Blending draws: runs of the variants of the pixel shader (the pipelines share the layout: the set stays
+    // bound). Copies and dual-source blending: one draw with the full shader.
+    BandCount := 0;
+    if Variants and Hollow(First, Bands, BandCount) then
+    begin
+      Count := 1;
+      Pipe := VariantPipeline(GVariantOf[InstanceNeeds(@FPending[First], Area)]);
+    end
+    else if Variants then
+    begin
+      Count := NextRun(First, Variant);
+      Pipe := VariantPipeline(Variant);
+    end
+    else
+    begin
+      Count := FPendingCount;
+      Pipe := TargetPipeline;
+    end;
+    if Pipe <> FBoundPipe then
+    begin
+      C.Vk.CmdBindPipeline(Cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, Pipe);
+      FBoundPipe := Pipe;
+    end;
+    if BandCount > 0 then
+    begin
+      // A large rectangle outline: the same triangles in the rectangles around its inside (scissors), where its
+      // pixels are; the inside, which it leaves as it is, is not shaded.
+      for I := 0 to BandCount - 1 do
+      begin
+        Scissor.offset.x := Bands[I].Left;
+        Scissor.offset.y := Bands[I].Top;
+        Scissor.extent.width := Bands[I].Width;
+        Scissor.extent.height := Bands[I].Height;
+        C.Vk.CmdSetScissor(Cmd, 0, 1, @Scissor);
+        C.Vk.CmdDraw(Cmd, 4, 1, 0, First);
+        Inc(FDrawCalls);
+      end;
+      Scissor.offset.x := 0;
+      Scissor.offset.y := 0;
+      Scissor.extent.width := Max(0, Min(FWidth, Target.Width));
+      Scissor.extent.height := Max(0, Min(FHeight, Target.Height));
+      C.Vk.CmdSetScissor(Cmd, 0, 1, @Scissor);
+    end
+    else
+    begin
+      C.Vk.CmdDraw(Cmd, 4, Count, 0, First);
+      Inc(FDrawCalls);
+    end;
+    Inc(First, Count);
+  end;
   FPendingCount := 0;
 end;
 

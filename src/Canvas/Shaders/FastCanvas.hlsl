@@ -7,6 +7,47 @@
 //
 // Compiled by tools/compile-shaders.ps1 (fxc, vs_4_0 / ps_4_0: Direct3D feature level 10_0 and up) into
 // src/Canvas/FastCanvas.Shaders.inc. Keep the instance layout in sync with TGpuInstance (FastCanvas.Gpu.pas).
+//
+// Variants of the pixel shader (Vulkan, FastCanvas.VkShaders.inc): PSMain compiled with some of the WITH_ switches
+// below set to 0 leaves out the primitives, paints and clips a draw does not have (TGpuRenderer.DrawPending picks the
+// variant of each draw from its instances: TGpuVkRenderer.NextRun). What a variant keeps computes exactly as the full
+// shader: a variant only drops branches that its draws never take. Without switches (Direct3D, PSMainDual,
+// PSMainLinear) the shader is the full one. Small variants keep the registers of a pixel few, which phone GPUs (Mali)
+// run several times faster.
+
+#ifndef WITH_SHAPES
+#define WITH_SHAPES 1      // rectangles, rectangle outlines, ellipses, ellipse outlines, solid lines, solid quads
+#endif
+#ifndef WITH_DASHES
+#define WITH_DASHES 1      // dashed lines (with WITH_SHAPES)
+#endif
+#ifndef WITH_IMAGES
+#define WITH_IMAGES 1
+#endif
+#ifndef WITH_GLYPHS
+#define WITH_GLYPHS 1      // grayscale glyphs
+#endif
+#ifndef WITH_CLEARTYPE
+#define WITH_CLEARTYPE 1   // ClearType glyphs
+#endif
+#ifndef WITH_PATHS
+#define WITH_PATHS 1
+#endif
+#ifndef WITH_GRADIENTS
+#define WITH_GRADIENTS 1   // gradient paints (of shapes and paths)
+#endif
+#ifndef WITH_BRUSHES
+#define WITH_BRUSHES 1     // bitmap brushes
+#endif
+#ifndef WITH_CLIPS
+#define WITH_CLIPS 1       // 0: every pixel of the draw's instances is inside their clip (ClipFactor would be 1)
+#endif
+// 1 (the Vulkan variants): the vertex shader loads the paint and clip table entries of the instance and hands them to
+// the pixel shader as flat varyings (the same values: the results do not change), so that pixels do not load them,
+// which costs Mali GPUs more than all the arithmetic of a small variant.
+#ifndef FLAT_TABLES
+#define FLAT_TABLES 0
+#endif
 
 cbuffer Frame : register(b0)
 {
@@ -79,8 +120,37 @@ struct Varyings
     nointerpolation float4 Shape : SHAPE;      // radii, half stroke, segment length
     nointerpolation float4 UvRect : UVRECT;
     nointerpolation uint4 Data : DATA;
+#if FLAT_TABLES
+    nointerpolation float4 Paint0 : PAINT0;    // the paint table entry (0 without a paint)
+    nointerpolation float4 Paint1 : PAINT1;
+    nointerpolation float4 Paint2 : PAINT2;
+    nointerpolation float4 Clip0 : CLIP0;      // the clip table entry
+    nointerpolation float4 Clip1 : CLIP1;
+    nointerpolation float4 Clip2 : CLIP2;
+    nointerpolation float4 Clip3 : CLIP3;
+    nointerpolation float4 Clip4 : CLIP4;
+#endif
 };
 
+// Float4 k of entry index of the paint (3 per entry) and clip (5 per entry) tables, for the pixel of i: with
+// FLAT_TABLES from its varyings (read where they are used: a linear gradient does not read the row of radial ones).
+float4 PaintEntry(Varyings i, uint index, uint k)
+{
+#if FLAT_TABLES
+    return k == 0 ? i.Paint0 : (k == 1 ? i.Paint1 : i.Paint2);
+#else
+    return Paints.Load(index * 3 + k);
+#endif
+}
+
+float4 ClipEntry(Varyings i, uint index, uint k)
+{
+#if FLAT_TABLES
+    return k == 0 ? i.Clip0 : (k == 1 ? i.Clip1 : (k == 2 ? i.Clip2 : (k == 3 ? i.Clip3 : i.Clip4)));
+#else
+    return Clips.Load(index * 5 + k);
+#endif
+}
 Varyings VSMain(Instance inst, uint vid : SV_VertexID)
 {
     Varyings o;
@@ -127,6 +197,24 @@ Varyings VSMain(Instance inst, uint vid : SV_VertexID)
                         local.x * inst.M.y + local.y * inst.M.w + inst.TR.y);
     o.Pos = float4(dev.x * ViewScale.x - 1, dev.y * ViewScale.y + 1, 0, 1);
     o.Data = inst.Data;
+#if FLAT_TABLES
+    o.Paint0 = 0;
+    o.Paint1 = 0;
+    o.Paint2 = 0;
+    if (inst.Data.w != 0)
+    {
+        uint p = inst.Data.w - 1;
+        o.Paint0 = Paints.Load(p * 3);
+        o.Paint1 = Paints.Load(p * 3 + 1);
+        o.Paint2 = Paints.Load(p * 3 + 2);
+    }
+    uint c = inst.Data.z * 5;
+    o.Clip0 = Clips.Load(c);
+    o.Clip1 = Clips.Load(c + 1);
+    o.Clip2 = Clips.Load(c + 2);
+    o.Clip3 = Clips.Load(c + 3);
+    o.Clip4 = Clips.Load(c + 4);
+#endif
     return o;
 }
 
@@ -168,11 +256,11 @@ float RoundBoxDistance(float2 q, float2 b, float2 r, uint mask)
 // Distance to the dashes of a line. u, v: along and across the segment [0, len]; h: half the stroke width.
 // Pattern (paint table entry): dash and gap lengths in stroke widths, their count, the offset and the period.
 // Every dash piece inside the segment gets the cap, as Direct2D draws dashes with the dash cap.
-float DashedLineDistance(float u, float v, float len, float h, uint cap, uint index)
+float DashedLineDistance(Varyings i, float u, float v, float len, float h, uint cap, uint index)
 {
-    float4 g0 = Paints.Load(index * 3);
-    float4 g1 = Paints.Load(index * 3 + 1);
-    float4 g2 = Paints.Load(index * 3 + 2);
+    float4 g0 = PaintEntry(i, index, 0);
+    float4 g1 = PaintEntry(i, index, 1);
+    float4 g2 = PaintEntry(i, index, 2);
     float w = 2 * h;
     float dashes[6] = { g0.x, g0.y, g0.z, g0.w, g1.x, g1.y };
     uint count = (uint)g1.z;
@@ -208,10 +296,9 @@ float DashedLineDistance(float u, float v, float len, float h, uint cap, uint in
     return d;
 }
 
-float ClipFactor(float2 p, uint index)
+float ClipFactor(Varyings i, float2 p, uint index)
 {
-    uint base = index * 5;
-    float4 box = Clips.Load(base);
+    float4 box = ClipEntry(i, index, 0);
     if (p.x < box.x || p.y < box.y || p.x >= box.z || p.y >= box.w)
         return 0;
     if (RegionCount > 0)
@@ -230,8 +317,8 @@ float ClipFactor(float2 p, uint index)
     {
         // Oriented rectangle: inverse matrix (a, b, c, d), (tx, ty, width, height); width < 0: unused;
         // height < 0: the area outside the rectangle (ExcludeClipRect), height = -1 - h.
-        float4 inv = Clips.Load(base + 1 + 2 * k);
-        float4 rc = Clips.Load(base + 2 + 2 * k);
+        float4 inv = ClipEntry(i, index, 1 + 2 * k);
+        float4 rc = ClipEntry(i, index, 2 + 2 * k);
         if (rc.z >= 0)
         {
             float2 l = float2(p.x * inv.x + p.y * inv.z + rc.x, p.x * inv.y + p.y * inv.w + rc.y);
@@ -246,12 +333,11 @@ float ClipFactor(float2 p, uint index)
 }
 
 // Straight (not premultiplied) color of a gradient paint at a local position.
-float4 PaintColor(uint index, float2 local)
+float4 PaintColor(Varyings i, uint index, float2 local)
 {
-    uint base = index * 3;
-    float4 g0 = Paints.Load(base);
-    float4 g1 = Paints.Load(base + 1);
-    float4 g2 = Paints.Load(base + 2);
+    float4 g0 = PaintEntry(i, index, 0);
+    float4 g1 = PaintEntry(i, index, 1);
+    float4 g2 = PaintEntry(i, index, 2);
     float t;
     if (g2.w < 1.5)
     {
@@ -272,10 +358,10 @@ float4 PaintColor(uint index, float2 local)
 // Premultiplied color of a bitmap brush (paint kind 3) at a local position. g0, g1.xy: local to texture
 // coordinates (0..1 over the bitmap); g1.z: 1 = repeat (TWrapMode.Tile), 0 = clamp to the edge pixels; the texture
 // is in the slot of the instance.
-float4 ImagePaint(uint index, uint slot, float2 local)
+float4 ImagePaint(Varyings i, uint index, uint slot, float2 local)
 {
-    float4 g0 = Paints.Load(index * 3);
-    float4 g1 = Paints.Load(index * 3 + 1);
+    float4 g0 = PaintEntry(i, index, 0);
+    float4 g1 = PaintEntry(i, index, 1);
     float2 uv = float2(local.x * g0.x + local.y * g0.z + g1.x, local.x * g0.y + local.y * g0.w + g1.y);
     float4 c = 0;
     if (g1.z > 0.5)
@@ -459,6 +545,7 @@ float4 Shade(Varyings i, out float3 weights)
     float h = i.Shape.z;
     float d = -1;
 
+#if WITH_SHAPES
     if (kind == KIND_FILL_RECT)
     {
         d = RoundBoxDistance(q, b, i.Shape.xy, (flags >> 12) & 15);
@@ -497,9 +584,12 @@ float4 Shade(Varyings i, out float3 weights)
         float u = i.Local.x;
         float v = i.Local.y;
         uint cap = (flags >> 10) & 3;
+#if WITH_DASHES
         if ((flags & FLAG_DASHED) != 0)
-            d = DashedLineDistance(u, v, len, h, cap, i.Data.w - 1);
-        else if (cap == CAP_ROUND)
+            d = DashedLineDistance(i, u, v, len, h, cap, i.Data.w - 1);
+        else
+#endif
+        if (cap == CAP_ROUND)
             d = length(float2(u - clamp(u, 0, len), v)) - h;
         else
         {
@@ -507,68 +597,102 @@ float4 Shade(Varyings i, out float3 weights)
             d = max(abs(u - len * 0.5) - (len * 0.5 + ext), abs(v) - h);
         }
     }
-    else if (kind == KIND_IMAGE)
+#if WITH_IMAGES
+    else
+#endif
+#endif
+#if WITH_IMAGES
+    if (kind == KIND_IMAGE)
     {
         d = BoxDistance(q, b);
     }
+#endif
 
+    float coverage;
+#if WITH_SHAPES || WITH_IMAGES || WITH_PATHS
     // Size of a pixel in local units, from the derivatives of the local position (not of d: strokes take abs()
     // of a distance, whose derivative vanishes on the centre line and would make thin strokes hard-edged).
     float2 lx = ddx(i.Local);
     float2 ly = ddy(i.Local);
     float w = sqrt(0.5 * (dot(lx, lx) + dot(ly, ly)));
-    float coverage;
+#if WITH_PATHS
     if (kind == KIND_PATH)
     {
         coverage = PathCoverage(i.Local, w, i.Rect, asuint(i.UvRect.x), asuint(i.UvRect.y), asuint(i.UvRect.z) != 0);
         if (Aliased > 0.5 || (flags & FLAG_ALIASED) != 0)
             coverage = coverage >= 0.5 ? 1 : 0;
     }
-    else if (kind == KIND_GLYPH || kind == KIND_SOLID || Aliased > 0.5)
+    else
+#endif
+    if (kind == KIND_GLYPH || kind == KIND_SOLID || Aliased > 0.5)
         coverage = d <= 0 ? 1 : 0;
     else
         coverage = saturate(0.5 - d / max(w, 1e-6));
-    coverage *= ClipFactor(i.Pos.xy, i.Data.z);
+#else
+    // Glyphs only: d is -1.
+    coverage = 1;
+#endif
+#if WITH_CLIPS
+    coverage *= ClipFactor(i, i.Pos.xy, i.Data.z);
+#endif
 
     float4 color;
     float4 tint = UnpackColor(i.Data.x);
     bool perChannel = false;
     weights = 0;
+#if WITH_IMAGES
     if (kind == KIND_IMAGE)
     {
         // Textures hold premultiplied alpha; the instance color carries the opacity in alpha.
         color = SampleSlot((flags >> 4) & 7, i.Uv, i.UvRect, ((flags >> 7) & 1) != 0) * tint.a;
     }
-    else if (kind == KIND_GLYPH && (flags & FLAG_CLEARTYPE) != 0)
+    else
+#endif
+#if WITH_CLEARTYPE
+    if (kind == KIND_GLYPH && (flags & FLAG_CLEARTYPE) != 0)
     {
         weights = ClearTypeAlpha(GlyphRgb(i.Uv), tint.rgb) * tint.a;
         color = float4(tint.rgb * weights, dot(weights, 1.0 / 3.0));
         perChannel = true;
     }
-    else if (kind == KIND_GLYPH)
+    else
+#endif
+#if WITH_GLYPHS
+    if (kind == KIND_GLYPH)
     {
         float a = TextAlpha(GlyphAtlas.SampleLevel(PointSampler, i.Uv, 0), tint.rgb);
         color = float4(tint.rgb * tint.a, tint.a) * a;
     }
     else
+#endif
     {
         float4 s = tint;
         float4 imageColor = 0;
         bool image = false;
+#if WITH_GRADIENTS || WITH_BRUSHES
         if (i.Data.w != 0 && kind != KIND_LINE)
         {
             uint p = i.Data.w - 1;
-            if (Paints.Load(p * 3 + 2).w > 2.5)
+#if WITH_BRUSHES && WITH_GRADIENTS
+            if (PaintEntry(i, p, 2).w > 2.5)
+#endif
+#if WITH_BRUSHES
             {
-                imageColor = ImagePaint(p, (flags >> 4) & 7, i.Local) * tint.a;
+                imageColor = ImagePaint(i, p, (flags >> 4) & 7, i.Local) * tint.a;
                 image = true;
             }
+#endif
+#if WITH_BRUSHES && WITH_GRADIENTS
             else
+#endif
+#if WITH_GRADIENTS
             {
-                s = PaintColor(p, i.Local);
+                s = PaintColor(i, p, i.Local);
                 s.a *= tint.a;
             }
+#endif
         }
+#endif
         color = image ? imageColor : float4(s.rgb * s.a, s.a);
     }
     color *= coverage;

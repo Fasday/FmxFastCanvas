@@ -99,9 +99,20 @@ try {
   # Canvas shaders for Vulkan (dxc, SPIR-V 1.3: Vulkan 1.1 and up). Bindings: b0.. at 0, t0.. at 16, s0.. at 32 (one
   # descriptor set); constant buffers in the Direct3D layout, so the records of the back ends are shared. HLSL 2018:
   # the sRGB curves select per component with the ternary operator. The clip-space y is flipped by the viewport.
+  # The variants of PSMain for blending draws (TGpuVkVariant in FastCanvas.GpuVk): only the WITH_ switches listed are
+  # on; they and the ...Flat shaders are compiled with FLAT_TABLES (the vertex shader hands the instance's paint and
+  # clip table entries to the pixel shader), the others without.
   $vkSdk = [Environment]::GetEnvironmentVariable('VULKAN_SDK', 'Machine')
   if (-not $DxcSpirv -and $vkSdk) { $DxcSpirv = Join-Path $vkSdk 'Bin\dxc.exe' }
   if (-not $SpirvVal -and $vkSdk) { $SpirvVal = Join-Path $vkSdk 'Bin\spirv-val.exe' }
+  $switches = @('WITH_SHAPES', 'WITH_DASHES', 'WITH_IMAGES', 'WITH_GLYPHS', 'WITH_CLEARTYPE', 'WITH_PATHS',
+    'WITH_GRADIENTS', 'WITH_BRUSHES', 'WITH_CLIPS')
+  function Variant([string[]] $On) {
+    $d = @()
+    foreach ($s in $switches) { $d += @('-D', ('{0}={1}' -f $s, [int]($On -contains $s))) }
+    $d += @('-D', 'FLAT_TABLES=1')
+    , $d
+  }
   if ($DxcSpirv -and (Test-Path $DxcSpirv)) {
     $out = Join-Path $root 'src\Canvas\FastCanvas.VkShaders.inc'
     $sb = [Text.StringBuilder]::new()
@@ -109,16 +120,37 @@ try {
     [void]$sb.AppendLine('  (SPIR-V for the Vulkan back end). Do not edit. }')
     [void]$sb.AppendLine('')
     [void]$sb.AppendLine('const')
+    $shapes = @('WITH_SHAPES', 'WITH_GRADIENTS')
+    $ui = @('WITH_SHAPES', 'WITH_GRADIENTS', 'WITH_GLYPHS', 'WITH_IMAGES')
+    $paths = @('WITH_SHAPES', 'WITH_GRADIENTS', 'WITH_PATHS')
     foreach ($e in @(
-      @{ Name = 'FastCanvasVkVS'; Entry = 'VSMain'; Profile = 'vs_6_0'; Src = $src },
-      @{ Name = 'FastCanvasVkPS'; Entry = 'PSMain'; Profile = 'ps_6_0'; Src = $src },
-      @{ Name = 'FastCanvasVkPSLinear'; Entry = 'PSMainLinear'; Profile = 'ps_6_0'; Src = $src },
-      @{ Name = 'FastCanvasVkPSDual'; Entry = 'PSMainDual'; Profile = 'ps_6_0'; Src = $src },
-      @{ Name = 'FastOutputVkVS'; Entry = 'VSOutput'; Profile = 'vs_6_0'; Src = $outputSrc },
-      @{ Name = 'FastOutputVkPS'; Entry = 'PSOutput'; Profile = 'ps_6_0'; Src = $outputSrc })) {
+      @{ Name = 'FastCanvasVkVS'; Entry = 'VSMain'; Profile = 'vs_6_0'; Src = $src; Defines = @() },
+      @{ Name = 'FastCanvasVkPS'; Entry = 'PSMain'; Profile = 'ps_6_0'; Src = $src; Defines = @() },
+      @{ Name = 'FastCanvasVkVSFlat'; Entry = 'VSMain'; Profile = 'vs_6_0'; Src = $src; Defines = @('-D', 'FLAT_TABLES=1') },
+      @{ Name = 'FastCanvasVkPSFlat'; Entry = 'PSMain'; Profile = 'ps_6_0'; Src = $src; Defines = @('-D', 'FLAT_TABLES=1') },
+      @{ Name = 'FastCanvasVkPSShapes'; Entry = 'PSMain'; Profile = 'ps_6_0'; Src = $src; Defines = (Variant $shapes) },
+      @{ Name = 'FastCanvasVkPSShapesClip'; Entry = 'PSMain'; Profile = 'ps_6_0'; Src = $src;
+        Defines = (Variant ($shapes + 'WITH_CLIPS')) },
+      @{ Name = 'FastCanvasVkPSGlyphs'; Entry = 'PSMain'; Profile = 'ps_6_0'; Src = $src; Defines = (Variant 'WITH_GLYPHS') },
+      @{ Name = 'FastCanvasVkPSGlyphsClip'; Entry = 'PSMain'; Profile = 'ps_6_0'; Src = $src;
+        Defines = (Variant 'WITH_GLYPHS', 'WITH_CLIPS') },
+      @{ Name = 'FastCanvasVkPSImages'; Entry = 'PSMain'; Profile = 'ps_6_0'; Src = $src; Defines = (Variant 'WITH_IMAGES') },
+      @{ Name = 'FastCanvasVkPSImagesClip'; Entry = 'PSMain'; Profile = 'ps_6_0'; Src = $src;
+        Defines = (Variant 'WITH_IMAGES', 'WITH_CLIPS') },
+      @{ Name = 'FastCanvasVkPSUi'; Entry = 'PSMain'; Profile = 'ps_6_0'; Src = $src; Defines = (Variant $ui) },
+      @{ Name = 'FastCanvasVkPSUiClip'; Entry = 'PSMain'; Profile = 'ps_6_0'; Src = $src;
+        Defines = (Variant ($ui + 'WITH_CLIPS')) },
+      @{ Name = 'FastCanvasVkPSPaths'; Entry = 'PSMain'; Profile = 'ps_6_0'; Src = $src; Defines = (Variant $paths) },
+      @{ Name = 'FastCanvasVkPSPathsClip'; Entry = 'PSMain'; Profile = 'ps_6_0'; Src = $src;
+        Defines = (Variant ($paths + 'WITH_CLIPS')) },
+      @{ Name = 'FastCanvasVkPSLinear'; Entry = 'PSMainLinear'; Profile = 'ps_6_0'; Src = $src; Defines = @() },
+      @{ Name = 'FastCanvasVkPSDual'; Entry = 'PSMainDual'; Profile = 'ps_6_0'; Src = $src; Defines = @() },
+      @{ Name = 'FastOutputVkVS'; Entry = 'VSOutput'; Profile = 'vs_6_0'; Src = $outputSrc; Defines = @() },
+      @{ Name = 'FastOutputVkPS'; Entry = 'PSOutput'; Profile = 'ps_6_0'; Src = $outputSrc; Defines = @() })) {
       $spv = Join-Path $tmp ($e.Name + '.spv')
       & $DxcSpirv -nologo -spirv -HV 2018 '-fspv-target-env=vulkan1.1' -fvk-use-dx-layout -fvk-b-shift 0 0 `
-        -fvk-t-shift 16 0 -fvk-s-shift 32 0 -fvk-u-shift 48 0 -T $e.Profile -E $e.Entry -O3 -WX -Fo $spv $e.Src
+        -fvk-t-shift 16 0 -fvk-s-shift 32 0 -fvk-u-shift 48 0 -T $e.Profile -E $e.Entry -O3 -WX @($e.Defines) -Fo $spv `
+        $e.Src
       if ($LASTEXITCODE -ne 0) { throw "dxc (SPIR-V) failed for $($e.Name)" }
       if ($SpirvVal -and (Test-Path $SpirvVal)) {
         & $SpirvVal --target-env vulkan1.1 $spv

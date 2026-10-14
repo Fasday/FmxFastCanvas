@@ -59,6 +59,20 @@ const
   GpuEdgesInitial = 256 * 1024;
   GpuEdgesLimit = 4 * 1024 * 1024;
 
+  /// <summary>What the pixel shader needs for an instance (TGpuRenderer.InstanceNeeds), as the WITH_ switches of
+  /// Shaders\FastCanvas.hlsl: a variant of the shader without some of them draws the instances that need none.
+  /// </summary>
+  GpuNeedShapes = $1;
+  GpuNeedDashes = $2;
+  GpuNeedImages = $4;
+  GpuNeedGlyphs = $8;
+  GpuNeedClearType = $10;
+  GpuNeedPaths = $20;
+  GpuNeedGradients = $40;
+  GpuNeedBrushes = $80;
+  GpuNeedClips = $100;
+  GpuNeedAll = $1FF;
+
   GpuSlotCount = 8;
   GpuClipFloat4s = 5;
   GpuPaintFloat4s = 3;
@@ -131,6 +145,9 @@ type
     Oriented: array[0..1] of TGpuOrientedRect;
   end;
   PGpuClip = ^TGpuClip;
+
+  /// <summary>Rectangles of target pixels (right and bottom exclusive), see TGpuRenderer.HollowBands.</summary>
+  TGpuBands = array[0..3] of TRect;
 
   /// <summary>A paint (shader PaintColor, ImagePaint, DashedLineDistance): 12 floats, see the shader.</summary>
   TGpuPaint = record
@@ -292,6 +309,7 @@ type
     FRegionFirst, FRegionCount: Cardinal;
     // Shader data of the changed clip entries (reused: the render thread must not allocate per draw).
     FClipStage: TArray<Single>;
+    FBandPixels: Single;
     procedure ReadTextParameters;
     function TextureSlot(const ATexture: Pointer): Integer;
     function FrameConstants: TGpuFrameConstants;
@@ -300,6 +318,16 @@ type
     function TakeClips(out AFirst, ACount: Integer): PSingle;
     /// <summary>The changed range of the paint table (AFirst..AFirst + ACount - 1); resets it.</summary>
     function TakePaints(out AFirst, ACount: Integer): Boolean;
+    /// <summary>What the pixel shader needs to draw a pending instance (GpuNeed*), with the tables as the draw sees
+    /// them; AArea: about how many pixels its quad covers. GpuNeedClips is left out when no pixel of the quad can be
+    /// outside the clip (ClipFactor would be 1 everywhere).</summary>
+    function InstanceNeeds(const AInstance: PGpuInstance; out AArea: Single): Cardinal;
+    /// <summary>A rectangle outline (axis-aligned on the target) with an inside where the shader computes no coverage
+    /// at all: up to four disjoint rectangles of the target around that inside (ACount), so that the draws of the
+    /// instance in each (scissors: the same triangles, the same values at every pixel) leave out pixels that would
+    /// not change; AArea: how many. False for other instances and outlines without such an inside.</summary>
+    function HollowBands(const AInstance: PGpuInstance; out ABands: TGpuBands; out ACount: Integer;
+      out AArea: Single): Boolean;
     /// <summary>Device: draws the pending instances with the bound slot textures (uploads the tables first).</summary>
     procedure DrawPending; virtual; abstract;
     /// <summary>Device: the staged edges (FEdgeLo..FEdgeHi from FEdgeData[0]) into the edge table; then resets the
@@ -349,6 +377,9 @@ type
     /// <summary>Replaces the edge table with an empty one of another size (draws what is pending first).</summary>
     procedure ResizeEdges(const ACapacity: Integer);
     property EdgeCapacity: Integer read FEdgeCapacity;
+    /// <summary>Paths: bands of the edge table at most this many pixels tall (0: a band per six edges), where the
+    /// back end shades a path's pixels slowly (phones): fewer edges per pixel, more entries in the table.</summary>
+    property BandPixels: Single read FBandPixels;
     property Target: TGpuSurface read FTarget;
     property DrawCalls: Integer read FDrawCalls write FDrawCalls;
   end;
@@ -843,6 +874,141 @@ begin
   ACount := FPaintHi - FPaintLo;
   FPaintLo := MaxInt;
   FPaintHi := 0;
+end;
+
+function TGpuRenderer.InstanceNeeds(const AInstance: PGpuInstance; out AArea: Single): Cardinal;
+var
+  P: PGpuInstance;
+  Kind: Cardinal;
+  C: PGpuClip;
+  W, H, A11, A12, A21, A22, S, Det, Hx, Hy, E, X, Y: Single;
+begin
+  P := AInstance;
+  Kind := P.Flags and 15;
+  case Kind of
+    GpuKindFillRect, GpuKindStrokeRect, GpuKindFillEllipse, GpuKindStrokeEllipse, GpuKindSolid:
+      Result := GpuNeedShapes;
+    GpuKindLine:
+      if (P.Flags and GpuDashed) <> 0 then
+        Result := GpuNeedShapes or GpuNeedDashes
+      else
+        Result := GpuNeedShapes;
+    GpuKindImage:
+      Result := GpuNeedImages;
+    GpuKindGlyph:
+      if (P.Flags and GpuClearType) <> 0 then
+        Result := GpuNeedClearType
+      else
+        Result := GpuNeedGlyphs;
+    GpuKindPath:
+      Result := GpuNeedPaths;
+  else
+    Result := GpuNeedAll;
+  end;
+  // The paint of shapes and paths (of lines it is a dash pattern; images and glyphs have none), of the kind the
+  // shader tells by its last float.
+  if (P.Paint <> 0) and (Kind <> GpuKindLine) and (Kind <> GpuKindImage) and (Kind <> GpuKindGlyph) then
+    if P.Paint > Cardinal(Length(FPaintData)) then
+      Result := GpuNeedAll
+    else if FPaintData[P.Paint - 1].Data[11] > 2.5 then
+      Result := Result or GpuNeedBrushes
+    else
+      Result := Result or GpuNeedGradients;
+  // Device bounds of the shape's rectangle (of a line: of its segment), and a margin beyond them that the quad does
+  // not reach: the stroke, the antialiasing ring of a pixel in local units, a line's caps. S is at least the larger
+  // scale of the matrix, S / Det at least one over the smaller one.
+  A11 := Abs(P.M11);
+  A12 := Abs(P.M12);
+  A21 := Abs(P.M21);
+  A22 := Abs(P.M22);
+  W := Abs(P.X1 - P.X0);
+  H := Abs(P.Y1 - P.Y0);
+  Hx := (A11 * W + A21 * H) * 0.5;
+  Hy := (A12 * W + A22 * H) * 0.5;
+  S := Max(A11 + A12, A21 + A22);
+  Det := Abs(P.M11 * P.M22 - P.M12 * P.M21);
+  if Kind = GpuKindLine then
+  begin
+    E := 2 * S * (Abs(P.Stroke) + 2 * S / Max(Det, 1E-12)) + 2;
+    AArea := 2 * (Hx + Hy) * (Abs(P.Stroke) * S + 2);
+  end
+  else
+  begin
+    E := Abs(P.Stroke) * S + 3;
+    AArea := Det * W * H;
+  end;
+  // The clip test passes for every pixel of the quad: in its box, which has no rectangles in it, in a frame of the
+  // whole target. (NaN bounds take the test.)
+  if FRegionCount <> 0 then
+    Exit(Result or GpuNeedClips);
+  if P.Clip >= Cardinal(Length(FClipData)) then
+    Exit(Result or GpuNeedClips);
+  C := @FClipData[P.Clip];
+  if C.Count <> 0 then
+    Exit(Result or GpuNeedClips);
+  X := (P.X0 + P.X1) * 0.5;
+  Y := (P.Y0 + P.Y1) * 0.5;
+  W := X * P.M11 + Y * P.M21 + P.Dx;
+  H := X * P.M12 + Y * P.M22 + P.Dy;
+  if not ((W - Hx - E >= C.Box.Left) and (W + Hx + E < C.Box.Right) and (H - Hy - E >= C.Box.Top) and
+    (H + Hy + E < C.Box.Bottom)) then
+    Result := Result or GpuNeedClips;
+end;
+
+function TGpuRenderer.HollowBands(const AInstance: PGpuInstance; out ABands: TGpuBands; out ACount: Integer;
+  out AArea: Single): Boolean;
+var
+  P: PGpuInstance;
+  Sx, Sy, G, Hs, Bx, By, Ox, Oy, X, Y: Single;
+  Outer, Inner: TRect;
+
+  procedure Band(const ALeft, ATop, ARight, ABottom: Integer);
+  begin
+    if (ARight > ALeft) and (ABottom > ATop) then
+    begin
+      ABands[ACount] := TRect.Create(ALeft, ATop, ARight, ABottom);
+      Inc(ACount);
+    end;
+  end;
+
+begin
+  Result := False;
+  ACount := 0;
+  AArea := 0;
+  P := AInstance;
+  if ((P.Flags and 15) <> GpuKindStrokeRect) or (P.M12 <> 0) or (P.M21 <> 0) then
+    Exit;
+  Sx := Abs(P.M11);
+  Sy := Abs(P.M22);
+  if not ((Sx > 1E-3) and (Sy > 1E-3)) then
+    Exit;
+  // In local units: inside the outline's inner edge by the half stroke, the corner radii (no corner arcs there) and
+  // more than half a pixel (the shader's antialiasing width: the size of a pixel), the shader's distance is more
+  // than half a pixel: coverage 0, the target's pixel stays as it is.
+  Hs := Abs(P.Stroke) * 0.5;
+  G := Hs + Max(Abs(P.Rx), Abs(P.Ry)) + 2 / Min(Sx, Sy);
+  Bx := (P.X1 - P.X0) * 0.5 - G;
+  By := (P.Y1 - P.Y0) * 0.5 - G;
+  Ox := ((P.X1 - P.X0) * 0.5 + Hs) * Sx + 1;
+  Oy := ((P.Y1 - P.Y0) * 0.5 + Hs) * Sy + 1;
+  X := (P.X0 + P.X1) * 0.5 * P.M11 + P.Dx;
+  Y := (P.Y0 + P.Y1) * 0.5 * P.M22 + P.Dy;
+  if not ((Bx > 0) and (By > 0) and (Abs(X) < 1E7) and (Abs(Y) < 1E7) and (Ox < 1E7) and (Oy < 1E7)) then
+    Exit;
+  // In pixels (whose centers are half a pixel in): the inner rectangle a pixel smaller on each side, and the quad's
+  // bounds a pixel larger, within the target.
+  Inner := TRect.Create(Ceil(X - Bx * Sx) + 1, Ceil(Y - By * Sy) + 1, Floor(X + Bx * Sx) - 1, Floor(Y + By * Sy) - 1);
+  Outer := TRect.Create(Max(Floor(X - Ox) - 1, 0), Max(Floor(Y - Oy) - 1, 0), Min(Ceil(X + Ox) + 1, FWidth),
+    Min(Ceil(Y + Oy) + 1, FHeight));
+  Inner.Intersect(Outer);
+  if (Inner.Right <= Inner.Left) or (Inner.Bottom <= Inner.Top) then
+    Exit;
+  Band(Outer.Left, Outer.Top, Outer.Right, Inner.Top);
+  Band(Outer.Left, Inner.Bottom, Outer.Right, Outer.Bottom);
+  Band(Outer.Left, Inner.Top, Inner.Left, Inner.Bottom);
+  Band(Inner.Right, Inner.Top, Outer.Right, Inner.Bottom);
+  AArea := Inner.Width * Inner.Height;
+  Result := ACount > 0;
 end;
 
 procedure TGpuRenderer.UploadEdges(const AStart, ACount: Integer; const AData: Pointer);
