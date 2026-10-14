@@ -8,7 +8,9 @@
 - Windows 10 or 11; Android 7.0 (API 24) or later on arm64 (Vulkan back end only, see "Android and Linux"); Linux
   x64 with glibc 2.35 or later (programs linked against the default SDK, Ubuntu 22.04's) and GTK 3 on X11 (Vulkan
   back end; tested on Ubuntu 26.04 in WSL2 with WSLg and on Ubuntu 22.04, Debian 12 and Fedora 44 in containers, on
-  Mesa's lavapipe).
+  Mesa's lavapipe), or natively on Wayland with [FMXWayland](https://github.com/Fasday/FMXWayland) instead of FMX's
+  GTK platform (no GTK, no X11; tested on headless Weston, sway, KWin and GNOME Shell with lavapipe, see "Linux on
+  FMXWayland").
 - Direct3D 11 back end: a GPU with feature level 10_0 or higher (WARP when there is none).
 - Direct3D 12 back end: a GPU with feature level 11_0 or higher.
 - Vulkan back end: Vulkan 1.1 with `VK_KHR_swapchain` and a queue that draws and presents. Dynamic rendering,
@@ -570,7 +572,8 @@ Linux:
 - FMX's Linux platform (FMUX, a GTK 3 library embedded in the program, written to `~/.fmxlinux` at the first start)
   runs GTK on X11: `FMX.Platform.Linux` calls `FmuxInit(FMUX_INIT_NOWAYLAND)`, so in a Wayland session the program
   runs through XWayland without `GDK_BACKEND=x11`. The canvas makes the form's drawing area a native window and
-  presents to its X11 window (`VK_KHR_xlib_surface`, the XID and the display through GDK, loaded at run time).
+  presents to its X11 window (`VK_KHR_xlib_surface`, the XID and the display through GDK, loaded at run time). On
+  FMXWayland instead of FMX's GTK platform it presents to the windows' Wayland surfaces (see "Linux on FMXWayland").
 - Running it needs `libvulkan.so.1` and a Vulkan 1.1 driver with the extensions under "Requirements" (Mesa: radv,
   anv, nvk; lavapipe on the CPU) and GTK 3 (`libgtk-3.so.0`), which brings the libraries of the text engine:
   `libpango-1.0.so.0` and `libpangoft2-1.0.so.0` (Pango 1.44 or later), `libharfbuzz.so.0`, `libfontconfig.so.1`,
@@ -644,6 +647,93 @@ Linux:
   fraction of a pixel taller); `src\Probe\TextProbe.dpr` (`tools\run-textprobe-linux.sh`) draws every case above with
   either engine (see "Debugging").
 
+### Linux on FMXWayland
+
+[FMXWayland](https://github.com/Fasday/FMXWayland) is a native Wayland platform for FMX on Linux: it replaces
+Embarcadero's `libfmux` (GTK 3 on X11) through FMX's own `FMUX.Api` interface, so a program talks to the Wayland
+compositor directly. FastCanvas runs on it unchanged, without GTK, X11 or Skia: FMXWayland registers the FMX platform
+service `IFMXWaylandNativeWindow` (`{B04A2FBC-1322-42BC-98A6-D526A7854F2C}`), which `FastCanvas.Platform` declares
+again (same GUID, methods and signatures: neither project depends on the other at compile time), and when the service
+is there the canvas takes its windows from it. Without it (FMX's GTK platform) nothing changes.
+
+- **Toplevel windows** (forms, `TForm3D`, dialogs, modal forms) present through `VK_KHR_wayland_surface`: the
+  Vulkan surface is made from the form's `wl_surface` on FMXWayland's `wl_display`, FMXWayland's own frames are off
+  while the canvas holds the window (`SetExternalPresentation`), and the frame size is the buffer size FMXWayland
+  reports (logical size x scale; at a fractional scale FMXWayland's viewport maps it to the window). The Vulkan
+  instance enables `VK_KHR_xlib_surface` and `VK_KHR_wayland_surface`, whichever the loader has. The presenting
+  thread talks to the compositor through Mesa's WSI, on an event queue of its own beside FMXWayland's main thread
+  (libwayland-client is thread-safe; both read the display with `wl_display_prepare_read`). The present mode is
+  `MAILBOX`, else `IMMEDIATE`: Wayland's `FIFO` waits for frame callbacks inside the present while the queue lock is
+  held, and a hidden or minimized window gets none (the render thread, then the main thread would wait). FMX paints
+  when it invalidates (FMXWayland requests no frame callbacks for such a window), so frames come at FMX's pace, as on
+  Windows.
+- **Popups** (combo box lists, menus: FMX forms that FMXWayland makes `xdg_popup`s of) and **transparent forms** are
+  not presented by the canvas: FMXWayland makes a popup's `xdg_popup` again at every show and move, which a presenting
+  thread cannot follow. Their frames are drawn on the GPU as usual, read back, and handed to FMXWayland's frame with
+  `FmuxCanvasDrawBitmap`, as FMX's Skia raster canvas does (premultiplied alpha kept: a popup's shadow and rounded
+  corners stay transparent).
+- **Hide and show**: before FMXWayland unmaps a window (FMX hides the form; a buffer committed to an unmapped
+  `xdg_surface` is a protocol error) the canvas runs what was recorded, ends the window's presenting thread with its
+  swap chain and presents nothing until the next frame, which FMXWayland paints only once the compositor has
+  configured the window again (`InstallFastCanvas` wraps FMX's window service for this). The first frame after a
+  window is made or shown again is waited for until it is presented, so that the window is mapped when FMX's paint
+  returns (FMXWayland makes the popups of a window once it is mapped). A window's swap chain and surface go before FMX
+  frees the window (FMX frees a form's canvas and 3D context first).
+- Building: FMXWayland generates its `FMUX.Api.pas` from the Delphi installation; that folder and FMXWayland's `src`
+  and `src\Protocols` come first on the unit path, then FastCanvas's folders as usual.
+  `tools\build-linux.ps1 -Wayland <FMXWayland folder>` does this for the probes (`-Define FASTCANVAS_NOSKIA`: no
+  `libsk4d.so`):
+
+  ```
+  .\tools\build-linux.ps1 -Project src\Probe\PortProbe.dpr -SearchPath src\Common,src\Canvas,src\Bench `
+    -Define FASTCANVAS_NOSKIA -Wayland F:\Projects\FMXWayland -OutRoot D:\Work\FastCanvas-wayland
+  ```
+
+  FMXWayland's sample builds with FastCanvas through its own script: `tools\build.ps1 -Project
+  samples\Hello\Hello.dpr -Define FASTCANVAS -SearchPath
+  <FastCanvas>\src\Canvas,<FastCanvas>\third_party\pasvulkan\src`.
+  The program installs FastCanvas as on X11 (`FastCanvasBackend := Vulkan`, `InstallFastCanvas`,
+  `InstallFastContext3DVk`, before `Application.Initialize`).
+- Running it needs a Wayland compositor with `wp_viewporter` (all current ones; FMXWayland's own requirements:
+  `libwayland-client0`, `libxkbcommon0`), `libvulkan.so.1` with a driver that has `VK_KHR_wayland_surface` (Mesa's
+  drivers; lavapipe presents through `wl_shm`), and the libraries of the Pango text engine (Pango, HarfBuzz,
+  fontconfig, FreeType, GLib; no GTK).
+- Frame rate and CPU against FMX's canvases on FMXWayland (2026-10-14, WSL 2 with Ubuntu 26.04, headless Weston 14
+  at scale 1, lavapipe of Mesa 26.0.8, which draws on the CPU with several threads: only relative numbers mean
+  something): PortProbe's scene without the cube (FMX's own 3D context has no OpenGL there), 480x840, 20 seconds,
+  `--status`, CPU time of the process (Weston's composition apart, 0.01-0.03 s/s for each):
+
+  | Canvas | Repainted at once (`--interval=1`) | With a 16 ms timer |
+  |---|---|---|
+  | FastCanvas (`TFastCanvas`, Vulkan, presents itself) | 123.5 FPS, 2.44 CPU s/s, 19.8 ms CPU per frame | 62.0 FPS, 1.28 CPU s/s, 20.6 ms per frame |
+  | FMX's cairo canvas (`TLinuxCanvas`, wl_shm frames) | 39.5 FPS, 0.17 CPU s/s, 4.3 ms per frame | 39.4 FPS, 0.15 CPU s/s, 3.9 ms per frame |
+  | FMX's Skia raster canvas (`TSkRasterCanvas`, wl_shm) | 24.4 FPS, 0.79 CPU s/s, 32.5 ms per frame | 23.9 FPS, 0.79 CPU s/s, 32.8 ms per frame |
+
+  FMXWayland paces its own wl_shm frames by the compositor's frame callbacks, which keeps the cairo canvas at about
+  40 FPS here with little CPU; Skia's raster canvas is bound by its single thread. FastCanvas's frames are rendered by
+  lavapipe on the CPU (the recording takes 0.3 ms of the main thread a frame; with a GPU the 20 ms would be GPU
+  time), and since FMXWayland requests no frame callbacks for a window presented by someone else, it draws as often as
+  FMX paints (123 FPS on a 60 Hz output with `MAILBOX`, which shows the newest).
+- Tested (2026-10-14, WSL 2 with Ubuntu 26.04, lavapipe, FMXWayland's tests with its sample built with FastCanvas):
+  headless Weston 14 at scale 1 and 2 (`tests\weston-headless.ps1 -Canvas TFastCanvas`: 157 checks: windows, the
+  combo box's drop-down drawn through the read-back path, a second form hidden and shown again, maximize and restore,
+  modal forms, message boxes, FMX's file dialogs, popups opened before their window is mapped, a program's own title
+  bar), and Weston 1 and 2, sway 1 and 1.5, KWin 1 and 1.5, GNOME Shell 1 and 1.5 with input, the clipboard and the
+  portal's dialogs (`tests\compositors.ps1 -Canvas TFastCanvas`: 1028 checks, 22 not applicable, none failed).
+  PortProbe on Weston draws its scene, Pango's text with Cyrillic and color emoji, and the Vulkan 3D context's cube
+  with ray-traced shadows, ambient occlusion and reflections (lavapipe has ray queries); Form3DProbe (now built for
+  Linux too, the Vulkan context) shows a `TForm3D` with its own swap chain. The validation layer, with
+  synchronization validation, reports nothing for these runs, for 42 resizes from code at scale 2 and for 23 scale
+  changes on sway at 1.5 (FMXWayland makes the form's canvas again then). The programs end with exit code 0. Windows
+  and the X11 path are unchanged: the benchmark's `rects`, `text`, `paths`, `strokes`, `gradients` and `controls` on
+  `fcvk` (RX 9070 XT) give the same pixels as before, and PortProbe on Xvfb (`tools\linux-compat.ps1 -Images @()`)
+  draws its scene as before.
+- Not done there: frame callbacks do not pace a window's frames (see above); popups and transparent forms cost a read
+  back of their frames; tested on lavapipe only (WSL has no GPU driver with Wayland presentation). At exit on Linux
+  the windows' swap chains and surfaces go with their forms (before FMXWayland disconnects), but the canvas service's
+  shutdown does not run (`FASTCANVAS_VK_STATS` writes nothing; FMX.Platform calls `UnregisterCanvasClasses` from its
+  finalization on Windows only), so the Vulkan device is left to the process's end, as with FMX's GTK platform.
+
 ## Threads
 
 - Draw with a canvas only between `BeginScene` and `EndScene`, as FMX requires. `TBitmap.Canvas` can be used on any
@@ -693,7 +783,8 @@ Linux:
 
 ## Limitations
 
-- Windows (Win64, Win32), Android (arm64) and Linux (x64, X11). On Android and Linux: the canvas and the 3D context on
+- Windows (Win64, Win32), Android (arm64) and Linux (x64: X11 through FMX's GTK platform, or Wayland through
+  FMXWayland, "Linux on FMXWayland"). On Android and Linux: the canvas and the 3D context on
   Vulkan only, no ClearType, no HDR output, no Direct2D fallbacks (`D2DText`).
 - Printing (`TPrinter` canvases) is not supported.
 - Text is grayscale antialiased by default (as FMX's stock Direct2D canvas draws it); ClearType

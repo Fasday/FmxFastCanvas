@@ -15,7 +15,7 @@ FMX itself (forms, controls, styles, layout, animations) is unchanged.
 | `FastCanvas.Text` | The text that does not depend on the engine: `TFastTextLayout` and its data (glyph runs, overhang, decorations), the layout cache, the glyph atlas, the engine registry (`FastCanvasTextEngine`). |
 | `FastCanvas.TextDWrite`, `FastCanvas.TextPango`, `FastCanvas.TextSkia` | The text engines: DirectWrite (Windows), Pango with FreeType (Linux, the default there) and Skia paragraphs (every platform; the only one on Android): layouts, glyph coverage, glyph outlines, layouts with color glyphs rasterized on the CPU. |
 | `FastCanvas.Geometry`, `FastCanvas.GeometryD2D`, `FastCanvas.GeometryOwn`, `FastCanvas.GeometrySkia` | The CPU geometry (paths, their fill edges and stroke outlines, hit tests) and its engines: Direct2D (Windows), FastCanvas's own (Android, Linux) and Skia (`FastCanvasGeometryEngine`). |
-| `FastCanvas.Platform` | The window of a form for the back end on Windows (HWND), Android (`ANativeWindow`) and Linux (X11 window of the GTK drawing area), and its size in pixels. |
+| `FastCanvas.Platform` | The window of a form for the back end on Windows (HWND), Android (`ANativeWindow`) and Linux (X11 window of the GTK drawing area; on FMXWayland the form's `wl_surface`, found through FMXWayland's `IFMXWaylandNativeWindow`, declared here again), and its size in pixels; the windows whose frames go to the platform as pixels (FMXWayland's popups); the window service wrapped where the canvas must hear of a window first (Android: the invalidated rectangles; FMXWayland: a window about to be hidden). |
 | `FastCanvas.Device` | The device of the process (Direct3D 11 or 12), DXGI, Direct2D factory (CPU geometry), DirectWrite. |
 | `FastCanvas.Hdr`, `Shaders/FastOutput.hlsl` | HDR output: the setting, what the display of a window can show (DXGI outputs, SDR white level), the pass that turns a window's frame into scRGB. |
 | `FastCanvas.Service` | Installs the canvas class and the 3D context class into FMX (`IFMXCanvasService`, `IFMXContextService`). |
@@ -24,7 +24,7 @@ FMX itself (forms, controls, styles, layout, animations) is unchanged.
 | `FastCanvas.Context3D11`, `FastCanvas.Context3D12`, `FastCanvas.Context3DVk` | The 3D contexts (`TContext3D`) for `TViewport3D`, `TForm3D` and the effects. |
 | `FastCanvas.Context3D12.Ray.inc`, `Shaders/FastRay.hlsl` → `FastCanvas.RayShaders.inc` | Ray-traced effects (DXR 1.1, shader model 6.5). |
 | `FastCanvas.DeviceVk` | The Vulkan device (1.1 and up; dynamic rendering, synchronization2 and timeline semaphores where it has them, core or extension): the loader and surface extension of the platform, instance, physical and logical device and their optional features, the render passes of devices without dynamic rendering, the memory suballocator, the queue lock. |
-| `FastCanvas.GpuVk` | The Vulkan back end of the renderer: the recording context, surfaces, windows (Win32, Android and Xlib surfaces) and the threads that present them, pipelines; on phones the shader variants, opaque interiors and paths as pieces. |
+| `FastCanvas.GpuVk` | The Vulkan back end of the renderer: the recording context, surfaces, windows (Win32, Android, Xlib and Wayland surfaces) and the threads that present them, pipelines; on phones the shader variants, opaque interiors and paths as pieces. |
 | `FastCanvas.PathMesh` | The pieces of a path's polygon that the Vulkan back end draws on phones instead of a quad over its bounds (see "The Vulkan back end"). |
 | `FastCanvas.VkShaders.inc`, `FastCanvas.VkRayShaders.inc`, `FastCanvas.VkFmxShaders.inc` | SPIR-V: `FastCanvas.hlsl`, `FastOutput.hlsl` and `FastRay.hlsl` (dxc), FMX's own shaders (from their GLSL, `tools/compile-fmx-shaders-vk.ps1`). |
 | `FastCanvas.Context3DVk.Ray.inc` | Ray-traced effects on Vulkan (ray queries). |
@@ -53,7 +53,15 @@ seams, so the same recording, player and renderer run on Android and Linux on th
 - **Windows** (`FastCanvas.Platform`, `TGpuWindowHandle`): the native window and display a form presents to, whether
   it can be drawn now, its pixel size. Android: the `ANativeWindow` of the form's surface holder, held while the
   canvas lives (FMX makes the canvas again on `surfaceCreated`/`surfaceChanged`). Linux: the X11 window of the GTK
-  drawing area through GDK, loaded at run time.
+  drawing area through GDK, loaded at run time; on FMXWayland (a native Wayland platform that replaces `libfmux`
+  through FMX's `FMUX.Api`) the form's `wl_surface` and the `wl_display`, from FMXWayland's platform service
+  `IFMXWaylandNativeWindow`, which `FastCanvas.Platform` declares again (same GUID and methods: no compile-time
+  dependency either way). While the canvas holds such a window FMXWayland shows no frames of its own in it
+  (`SetExternalPresentation`); the size in pixels is the buffer size it reports. Its popups (`xdg_popup`s, made again
+  at every show and move) and transparent forms are drawn on the GPU, read back and handed to FMXWayland's paint
+  context with `FmuxCanvasDrawBitmap` (the target kind of Windows' layered windows). The window service is wrapped
+  there too: before FMXWayland unmaps a window (`HideWindow`, `ReleaseWindow`) the canvas syncs the render thread and
+  suspends the window's Vulkan output (`TGpuWindow.Suspend`).
 
 Off Windows the render queue waits on `TEvent`s, the device lock, the queue lock and the locks of the memory
 allocator, of the presenting threads and of the 3D context are monitors, thread ids come from `pthread_self`. The
@@ -381,7 +389,18 @@ ray-traced effect and `Form3DProbe` draw the same pixels that way, with no messa
   presents; it takes the queue lock only, never the device lock. The render thread waits for neither the display nor
   the driver's acquire, and waits for the GPU only to stay three frames ahead. The present mode is `IMMEDIATE` when
   tearing is allowed, else `MAILBOX`, `FIFO_LATEST_READY` (the AMD driver has no `MAILBOX`) or `FIFO`: frames come as
-  fast as with Direct3D 12 presenting with sync interval 0. **Direct** (`FASTCANVAS_VK_DIRECT=1`, a measurement aid):
+  fast as with Direct3D 12 presenting with sync interval 0. **Wayland** (FMXWayland): the presenting thread's
+  `vkQueuePresentKHR` and acquires make Mesa's WSI attach and commit the window's `wl_surface` and read its own event
+  queue on that thread, while FMXWayland's main thread reads the default queue (`wl_display_prepare_read` on both
+  sides; libwayland-client serializes the requests). The present mode there is `MAILBOX`, else `IMMEDIATE`, never
+  `FIFO` while another is offered (Wayland's FIFO waits for a frame callback inside the present, holding the queue
+  lock; a hidden window gets none). `Suspend` (the platform will unmap the window) stops the presenting thread with
+  its swap chain; a suspended window's frames are not presented until a frame is prepared again (the platform paints
+  the window only once the compositor has configured it again), and the first frame after a window is made or
+  suspended is waited for until its present has returned (`TGpuVkPresenter.WaitShown`; the canvas waits for that frame
+  in `EndScene`). The surface state that goes with a size (viewport, window geometry, decorations) is FMXWayland's: it
+  sends it before the presenter's next commit, whichever frame that carries (its README, "IFMXWaylandNativeWindow").
+  **Direct** (`FASTCANVAS_VK_DIRECT=1`, a measurement aid):
   the render thread draws the frame into an image of a swap chain of its own (pipelines for `R8G8B8A8` too), acquired
   when the frame begins (the acquire's semaphore goes with the next submission; the image's old content is discarded
   after that wait) and presented when it ends; no partial frames. It saves the copy but does not pay on the Mali-G57
