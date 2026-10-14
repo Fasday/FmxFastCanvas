@@ -120,6 +120,12 @@ type
     class procedure Shutdown; override;
   end;
 
+var
+  /// <summary>Glyph coverage hinted lightly: FreeType's light hinting (vertically only, stems and the x-height on the
+  /// pixel grid; the look of GTK's text with fontconfig's default hintslight). False: unhinted outlines, as
+  /// FastCanvas.TextSkia rasterizes. Set before the first text is drawn (glyphs stay in the atlas).</summary>
+  FastPangoLightHinting: Boolean = False;
+
 /// <summary>The versions of Pango and FreeType the engine runs on ('Pango 1.57.0, FreeType 2.14.2'), loading the
 /// libraries; the reason when it cannot.</summary>
 function FastPangoVersion: string;
@@ -151,13 +157,16 @@ const
   PANGO_STYLE_OBLIQUE = 1;
   PANGO_STYLE_ITALIC = 2;
   PANGO_UNDERLINE_SINGLE = 1;
-  /// <summary>PangoLogAttr bits: a line may break before the character; the character is white space.</summary>
+  /// <summary>PangoLogAttr bits: a line may break before the character; the character is white space; a cursor may
+  /// stand before it (a grapheme starts).</summary>
   LogAttrLineBreak = $1;
   LogAttrWhite = $8;
+  LogAttrCursorPosition = $10;
 
   FT_LOAD_DEFAULT = 0;
   FT_LOAD_NO_HINTING = $2;
   FT_LOAD_NO_BITMAP = $8;
+  FT_LOAD_TARGET_LIGHT = $10000;
   FT_LOAD_COLOR = $100000;
   FT_RENDER_MODE_NORMAL = 0;
   FT_RENDER_MODE_MONO = 2;
@@ -218,10 +227,17 @@ type
   end;
   PPangoGlyphItem = ^TPangoGlyphItem;
 
+  PGSList = ^TGSList;
+  TGSList = record
+    Data: Pointer;
+    Next: PGSList;
+  end;
+
   TPangoLayoutLine = record
     Layout: Pointer;
     StartIndex, Length: Integer;
-    Runs: Pointer;
+    /// <summary>The runs (PPangoGlyphItem) in visual order, left to right.</summary>
+    Runs: PGSList;
     /// <summary>is_paragraph_start (bit 0), resolved_dir (bits 1 to 3).</summary>
     Bits: Cardinal;
   end;
@@ -354,6 +370,7 @@ var
   pango_layout_iter_get_line_readonly: function(AIter: Pointer): PPangoLayoutLine; cdecl;
   pango_layout_iter_get_run_extents: procedure(AIter: Pointer; AInk, ALogical: PPangoRectangle); cdecl;
   pango_layout_iter_get_baseline: function(AIter: Pointer): Integer; cdecl;
+  pango_layout_iter_get_line_extents: procedure(AIter: Pointer; AInk, ALogical: PPangoRectangle); cdecl;
   pango_layout_iter_get_line_yrange: procedure(AIter: Pointer; out AY0, AY1: Integer); cdecl;
   pango_layout_xy_to_index: function(ALayout: Pointer; AX, AY: Integer; out AIndex, ATrailing: Integer): Integer;
     cdecl;
@@ -388,6 +405,7 @@ var
   pango_font_get_hb_font: function(AFont: Pointer): Pointer; cdecl;
   // HarfBuzz.
   hb_font_get_scale: procedure(AFont: Pointer; out AXScale, AYScale: Integer); cdecl;
+  hb_font_get_glyph_h_advance: function(AFont: Pointer; AGlyph: Cardinal): Integer; cdecl;
   // fontconfig.
   FcPatternGetString: function(APattern: Pointer; AObject: PAnsiChar; AN: Integer; out AValue: PAnsiChar): Integer;
     cdecl;
@@ -530,6 +548,7 @@ begin
   @pango_layout_iter_get_line_readonly := Sym(Pango, 'pango_layout_iter_get_line_readonly');
   @pango_layout_iter_get_run_extents := Sym(Pango, 'pango_layout_iter_get_run_extents');
   @pango_layout_iter_get_baseline := Sym(Pango, 'pango_layout_iter_get_baseline');
+  @pango_layout_iter_get_line_extents := Sym(Pango, 'pango_layout_iter_get_line_extents');
   @pango_layout_iter_get_line_yrange := Sym(Pango, 'pango_layout_iter_get_line_yrange');
   @pango_layout_xy_to_index := Sym(Pango, 'pango_layout_xy_to_index');
   @pango_layout_index_to_pos := Sym(Pango, 'pango_layout_index_to_pos');
@@ -561,6 +580,7 @@ begin
   @pango_font_metrics_get_strikethrough_thickness := Sym(Pango, 'pango_font_metrics_get_strikethrough_thickness');
   @pango_font_get_hb_font := Sym(Pango, 'pango_font_get_hb_font');
   @hb_font_get_scale := Sym(HarfBuzz, 'hb_font_get_scale');
+  @hb_font_get_glyph_h_advance := Sym(HarfBuzz, 'hb_font_get_glyph_h_advance');
   @FcPatternGetString := Sym(Fc, 'FcPatternGetString');
   @FcPatternGetInteger := Sym(Fc, 'FcPatternGetInteger');
   @FcPatternGetBool := Sym(Fc, 'FcPatternGetBool');
@@ -1155,9 +1175,13 @@ begin
       P := Cut.CutStart;
       while (P > Cut.LineStart) and ((Attr(P) and LogAttrLineBreak = 0) or IsLowSurrogate(FText.Chars[P])) do
         Dec(P);
-      // A line of one word: Pango's cut.
       if P <= Cut.LineStart then
-        P := Cut.CutStart;
+      begin
+        // No word fits: the line's first character (grapheme) stays, as DirectWrite trims.
+        P := Cut.LineStart + 1;
+        while (P < Length(FText)) and ((Attr(P) and LogAttrCursorPosition = 0) or IsLowSurrogate(FText.Chars[P])) do
+          Inc(P);
+      end;
       while (P > Cut.LineStart) and (Attr(P - 1) and LogAttrWhite <> 0) do
         Dec(P);
       P := Max(P, Prev);
@@ -1182,6 +1206,34 @@ begin
   end;
 end;
 
+/// <summary>The width Pango added to an ellipsis at the end of a line (it fills the line to the box's edge), in
+/// Pango units; 0 without one.</summary>
+function EllipsisExtra(const ALine: PPangoLayoutLine): Integer;
+var
+  Node: PGSList;
+  Run: PPangoGlyphItem;
+  G: PPangoGlyphInfo;
+  Hb: Pointer;
+begin
+  Result := 0;
+  if (ALine = nil) or (ALine.Runs = nil) then
+    Exit;
+  Node := ALine.Runs;
+  while Node.Next <> nil do
+    Node := Node.Next;
+  Run := Node.Data;
+  if (Run = nil) or (Run.Item.Analysis.Flags and PANGO_ANALYSIS_FLAG_IS_ELLIPSIS = 0) or
+    (Run.Glyphs.NumGlyphs <= 0) then
+    Exit;
+  G := Run.Glyphs.Glyphs + Run.Glyphs.NumGlyphs - 1;
+  if G.Glyph and PANGO_GLYPH_UNKNOWN_FLAG <> 0 then
+    Exit;
+  Hb := pango_font_get_hb_font(Run.Item.Analysis.Font);
+  // The font's scale is Pango units per em: the advance comes in Pango units.
+  if Hb <> nil then
+    Result := Max(G.Width - hb_font_get_glyph_h_advance(Hb, G.Glyph), 0);
+end;
+
 procedure TFastPangoLayoutData.CollectRuns;
 begin
   // Collected when the layout is made (Analyse).
@@ -1200,7 +1252,7 @@ var
   Info: TPangoFontInfo;
   Style: TFastPangoStyle;
   Logical, LayoutInk, LayoutLogical: TPangoRectangle;
-  Pen, I, N, Index: Integer;
+  Pen, I, N, Index, Left, Right: Integer;
   X0, X1, Pos, Thickness: Single;
   Ink: TRectF;
   HasInk: Boolean;
@@ -1304,9 +1356,26 @@ begin
     DecoList.Free;
   end;
 
+  // The text: the lines' extent, an ellipsis at the end of a line as wide as its glyph (Pango widens it to the
+  // box's edge), the layout's height.
   pango_layout_get_extents(FLayout, @LayoutInk, @LayoutLogical);
-  TextRect := TRectF.Create(Dx + LayoutLogical.X / PANGO_SCALE, Dy + LayoutLogical.Y / PANGO_SCALE,
-    Dx + (LayoutLogical.X + LayoutLogical.Width) / PANGO_SCALE,
+  Left := MaxInt;
+  Right := -MaxInt;
+  Iter := pango_layout_get_iter(FLayout);
+  repeat
+    pango_layout_iter_get_line_extents(Iter, nil, @Logical);
+    if Logical.Width <= 0 then
+      Continue;
+    Left := Min(Left, Logical.X);
+    Right := Max(Right, Logical.X + Logical.Width - EllipsisExtra(pango_layout_iter_get_line_readonly(Iter)));
+  until pango_layout_iter_next_line(Iter) = 0;
+  pango_layout_iter_free(Iter);
+  if Left > Right then
+  begin
+    Left := LayoutLogical.X;
+    Right := LayoutLogical.X;
+  end;
+  TextRect := TRectF.Create(Dx + Left / PANGO_SCALE, Dy + LayoutLogical.Y / PANGO_SCALE, Dx + Right / PANGO_SCALE,
     Dy + (LayoutLogical.Y + LayoutLogical.Height) / PANGO_SCALE);
   HasInk := (LayoutInk.Width > 0) and (LayoutInk.Height > 0);
   if HasInk then
@@ -1468,7 +1537,7 @@ var
   Deco: TFastTextDecoration;
   Color: TAlphaColor;
   Em, Gx, Gy, S: Single;
-  I, Ix, Iy, Stride: Integer;
+  I, Ix, Iy, Stride, Flags: Integer;
 begin
   Result := False;
   APixels := nil;
@@ -1523,7 +1592,11 @@ begin
         // Coverage at the glyph's subpixel position, the baseline on a whole pixel (as the canvas draws).
         Ix := Floor(Gx);
         Iy := Round(Gy);
-        if not Face.Load(Run.Glyphs[I], Em, Gx - Ix, FT_LOAD_NO_HINTING or FT_LOAD_NO_BITMAP) then
+        if FastPangoLightHinting then
+          Flags := FT_LOAD_TARGET_LIGHT or FT_LOAD_NO_BITMAP
+        else
+          Flags := FT_LOAD_NO_HINTING or FT_LOAD_NO_BITMAP;
+        if not Face.Load(Run.Glyphs[I], Em, Gx - Ix, Flags) then
           Continue;
         Slot := Face.Slot;
         if (Slot.Format = FT_GLYPH_FORMAT_OUTLINE) and (FT_Render_Glyph(Slot, FT_RENDER_MODE_NORMAL) <> 0) then
@@ -1962,11 +2035,14 @@ begin
     Exit;
   TMonitor.Enter(GFtLock);
   try
-    // Unhinted outlines at the subpixel position, as FastCanvas.TextSkia rasterizes (plain coverage).
-    if Face.FScalable then
-      Flags := FT_LOAD_NO_HINTING or FT_LOAD_NO_BITMAP
+    // Outlines at the subpixel position (plain coverage), unhinted as FastCanvas.TextSkia rasterizes, or hinted
+    // vertically only (the subpixel translation comes after the hinting).
+    if not Face.FScalable then
+      Flags := FT_LOAD_DEFAULT
+    else if FastPangoLightHinting and (AKind <> TFastGlyphKind.Aliased) then
+      Flags := FT_LOAD_TARGET_LIGHT or FT_LOAD_NO_BITMAP
     else
-      Flags := FT_LOAD_DEFAULT;
+      Flags := FT_LOAD_NO_HINTING or FT_LOAD_NO_BITMAP;
     if not Face.Load(AGlyph, AEmSize, ASubX, Flags) then
       Exit;
     Slot := Face.Slot;
