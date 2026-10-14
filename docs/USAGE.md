@@ -303,11 +303,26 @@ Limitations:
   (`TControl3D.GetMaterialForSorting`), so a screen-projected layer may come before 3D objects: `HelloForm3D` gives its
   panel a sorting material that puts it last.
 - Motion vectors come from FMX's `MVPMatrix` of each opaque object (depth test and write); vertices animated by the
-  CPU move without them, transparent objects have none.
+  CPU move without them, transparent objects have none. Every other pixel (the background, objects without depth
+  write) gets the camera's motion, reprojected from the depth buffer (the background as seen at infinity), as DLSS
+  needs vectors for all pixels.
+- Ray-traced shadows, ambient occlusion and reflections are part of the colors DLSS gets, and their pixels move with
+  the surfaces they fall on: a shadow or a reflection that moves over a still floor has the floor's vectors, and DLSS
+  may leave a short trail behind it. NVIDIA's mask for such pixels (`BiasCurrentColor`) is not to be used with
+  NVIDIA's current models.
+- Textures in the scene are sampled with a mip-map LOD bias of log2(render width / output width) - 1, as NVIDIA's
+  guide recommends (textures as sharp as at the output size).
 - Starting NGX for a device takes a moment: on an RTX 3090 the first DLSS frame came about 1.5 s after the window, the
   first after a device loss about 2 s after it (the session of the new device is made again).
+- Settings, read when the feature is made: `FastDlssPreset` (NVIDIA's model of every mode: `Default` or `J`, `K`, `L`,
+  `M`), `FastDlssAutoExposure` (default True; False gives DLSS a fixed exposure of 1).
 - Diagnostics: `FastDlssJitterTest` turns the subpixel jitter off or negates what DLSS is told; `FastDlssView`
-  shows the scene DLSS gets (`Input`) or its motion vectors (`Motion`: grey where none) instead of the result.
+  shows the scene DLSS gets (`Input`) or its motion vectors (`Motion`: grey where still) instead of the result;
+  `FastDlssCameraMotion := False` leaves the pixels without an object's vector still. `FastDlssEmulate` runs the
+  whole DLSS phase on any Direct3D 12 card with a simple temporal shader instead of NGX (`Temporal`: as temporal
+  antialiasing; `Accumulate`: unclamped, so that wrong motion vectors leave trails): with `FastDlssView` it shows the
+  motion vectors on cards without DLSS. `HelloForm3D` takes these switches from environment variables (see
+  `example/HelloForm3D.dpr`).
 
 ## Threads
 

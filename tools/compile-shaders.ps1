@@ -110,7 +110,10 @@ try {
     @{ Name = 'DlssPSMotion'; Entry = 'PSMotion'; Profile = 'ps_5_0' },
     @{ Name = 'DlssVSFull'; Entry = 'VSFull'; Profile = 'vs_5_0' },
     @{ Name = 'DlssPSCopy'; Entry = 'PSCopy'; Profile = 'ps_5_0' },
-    @{ Name = 'DlssPSDepth'; Entry = 'PSDepth'; Profile = 'ps_5_0' })) {
+    @{ Name = 'DlssPSDepth'; Entry = 'PSDepth'; Profile = 'ps_5_0' },
+    @{ Name = 'DlssPSResolve'; Entry = 'PSResolve'; Profile = 'ps_5_0' },
+    @{ Name = 'DlssPSEmulate'; Entry = 'PSEmulate'; Profile = 'ps_5_0' },
+    @{ Name = 'DlssPSFill'; Entry = 'PSFill'; Profile = 'ps_5_0' })) {
     $cso = Join-Path $tmp ($e.Name + '.cso')
     & $Fxc /nologo /T $e.Profile /E $e.Entry /O3 /WX /Fo $cso $src
     if ($LASTEXITCODE -ne 0) { throw "fxc failed for $($e.Entry)" }

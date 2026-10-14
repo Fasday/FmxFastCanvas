@@ -23,6 +23,10 @@ type
   TFastDlssJitterTest = (Normal, Off, NegateX, NegateY, NegateXY);
   /// <summary>Diagnostics: what a window with DLSS shows (FastDlssView).</summary>
   TFastDlssView = (Output, Input, Motion);
+  /// <summary>Diagnostics without NGX (FastDlssEmulate).</summary>
+  TFastDlssEmulation = (Off, Temporal, Accumulate);
+  /// <summary>NVIDIA's DLSS models (render presets, FastDlssPreset); Default: NVIDIA's choice for each mode.</summary>
+  TFastDlssPreset = (Default, J, K, L, M);
   {$SCOPEDENUMS OFF}
 
   /// <summary>The NGX session of a device, reference counted: held by the DLSS states of the 3D contexts and by the
@@ -70,19 +74,23 @@ type
     FHandle: Pointer;
     FInput, FOutput: TSize;
     FMode: TFastDlssMode;
-    FHdr: Boolean;
+    FHdr, FAutoExposure: Boolean;
+    FPreset: TFastDlssPreset;
     FFrames: Int64;
     FError: string;
     function Check(const AResult: Cardinal; const AOperation: string): Boolean;
   public
     constructor Create(const ASession: TFastDlss);
     destructor Destroy; override;
-    /// <summary>The feature for these sizes and mode, made again when they changed (the context waited for the GPU
-    /// before it changed them).</summary>
+    /// <summary>The feature for these sizes, mode and settings, made again when they changed (the context waited for
+    /// the GPU before it changed them). AAutoExposure: DLSS measures the exposure (else Evaluate gets an exposure
+    /// texture); APreset: the model of the mode.</summary>
     function Configure(const AList: ID3D12GraphicsCommandList; const AInput, AOutput: TSize;
-      const AMode: TFastDlssMode; const AHdr: Boolean): Boolean;
-    function Evaluate(const AList: ID3D12GraphicsCommandList; const AColor, ADepth, AMotion, AOutput: ID3D12Resource;
-      const AJitter: TPointF; const AReset: Boolean; const AFrameTimeMs: Single): Boolean;
+      const AMode: TFastDlssMode; const AHdr, AAutoExposure: Boolean; const APreset: TFastDlssPreset): Boolean;
+    /// <summary>AExposure: a 1x1 texture of the exposure without auto exposure, nil with it.</summary>
+    function Evaluate(const AList: ID3D12GraphicsCommandList;
+      const AColor, ADepth, AMotion, AOutput, AExposure: ID3D12Resource; const AJitter: TPointF;
+      const AReset: Boolean; const AFrameTimeMs: Single): Boolean;
     procedure Release;
     property Session: TFastDlss read FSession;
     /// <summary>The last NGX error of Configure or Evaluate, '' when they worked. Any thread.</summary>
@@ -103,10 +111,30 @@ var
   /// scene tells the convention DLSS expects. Read at every frame.</summary>
   FastDlssJitterTest: TFastDlssJitterTest = TFastDlssJitterTest.Normal;
   /// <summary>Diagnostics: Input shows the scene DLSS gets (render size, jittered), Motion its motion vectors (grey:
-  /// none; red and green: towards the previous position, 0.1 per pixel). Read at every frame.</summary>
+  /// still; red and green: towards the previous position, 0.1 per pixel). Read at every frame.</summary>
   FastDlssView: TFastDlssView = TFastDlssView.Output;
+  /// <summary>Diagnostics on any graphics card with Direct3D 12: the whole DLSS phase runs (the render size of the
+  /// mode, the jitter, the motion vectors, the depth) and a simple shader stands in for NGX. Temporal: the frames
+  /// accumulate along the motion vectors, the history clamped to the colors around each pixel (as temporal
+  /// antialiasing does); Accumulate: unclamped, each pixel along its own vector, the history dropped only where the
+  /// frame before had other surfaces (so edges show the current frame alone), so that wrong motion vectors leave
+  /// trails. Window contexts with a depth buffer report DLSS as available and do not start NGX. Read when the context
+  /// makes its buffers (a change applies at its next scene).</summary>
+  FastDlssEmulate: TFastDlssEmulation = TFastDlssEmulation.Off;
+  /// <summary>The motion of the pixels no object pass wrote (the background, objects without depth write): the
+  /// camera's, reprojected from the depth (the background as seen at infinity). DLSS needs vectors for every pixel;
+  /// False leaves them zero there (diagnostics: only the objects' own vectors). Read at every frame.</summary>
+  FastDlssCameraMotion: Boolean = True;
+  /// <summary>The DLSS model of every mode (DLSS.Hint.Render.Preset.*). Read when the feature is made.</summary>
+  FastDlssPreset: TFastDlssPreset = TFastDlssPreset.Default;
+  /// <summary>True: DLSS measures the exposure itself (its AutoExposure flag). False: a fixed exposure of 1 (a 1x1
+  /// exposure texture; the colors are already exposed for the display). Read when the feature is made.</summary>
+  FastDlssAutoExposure: Boolean = True;
 
 function DlssModeName(const AMode: TFastDlssMode): string;
+/// <summary>The render size of a mode by NVIDIA's usual ratios (the emulation; NGX's optimal settings with DLSS).
+/// </summary>
+function DlssRenderSize(const AOutput: TSize; const AMode: TFastDlssMode): TSize;
 
 implementation
 
@@ -140,6 +168,15 @@ const
   LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR = $100;
   LOAD_LIBRARY_SEARCH_DEFAULT_DIRS = $1000;
   PerfQuality: array[TFastDlssMode] of Integer = (2, 2, 1, 0, 3, 5);
+  // NVSDK_NGX_DLSS_Hint_Render_Preset of nvsdk_ngx_defs.h, and the parameters that take it.
+  PresetValues: array[TFastDlssPreset] of Cardinal = (0, 10, 11, 12, 13);
+  PresetNames: array[0..4] of PAnsiChar = ('DLSS.Hint.Render.Preset.DLAA', 'DLSS.Hint.Render.Preset.Quality',
+    'DLSS.Hint.Render.Preset.Balanced', 'DLSS.Hint.Render.Preset.Performance',
+    'DLSS.Hint.Render.Preset.UltraPerformance');
+  // NVSDK_NGX_DLSS_Feature_Flags.
+  FlagIsHdr = 1;
+  FlagMVLowRes = 2;
+  FlagAutoExposure = 64;
 
 var
   /// <summary>The driver's NGX Core, loaded once for the process (as NVIDIA's loader does).</summary>
@@ -155,6 +192,13 @@ const
   Names: array[TFastDlssMode] of string = ('Off', 'Quality', 'Balanced', 'Performance', 'Ultra Performance', 'DLAA');
 begin
   Result := Names[AMode];
+end;
+
+function DlssRenderSize(const AOutput: TSize; const AMode: TFastDlssMode): TSize;
+const
+  Ratios: array[TFastDlssMode] of Single = (1, 2 / 3, 0.58, 0.5, 1 / 3, 1);
+begin
+  Result := TSize.Create(Max(1, Round(AOutput.Width * Ratios[AMode])), Max(1, Round(AOutput.Height * Ratios[AMode])));
 end;
 
 function NgxCorePath: string;
@@ -385,13 +429,11 @@ begin
 end;
 
 function TFastDlss.RenderSize(const AOutput: TSize; const AMode: TFastDlssMode): TSize;
-const
-  Ratios: array[TFastDlssMode] of Single = (1, 2 / 3, 0.58, 0.5, 1 / 3, 1);
 var
   Callback: Pointer;
   W, H: Cardinal;
 begin
-  Result := TSize.Create(Max(1, Round(AOutput.Width * Ratios[AMode])), Max(1, Round(AOutput.Height * Ratios[AMode])));
+  Result := DlssRenderSize(AOutput, AMode);
   if not FAvailable or (AMode = TFastDlssMode.Off) then
     Exit(AOutput);
   EnterCriticalSection(GLock);
@@ -444,16 +486,18 @@ begin
 end;
 
 function TFastDlssFeature.Configure(const AList: ID3D12GraphicsCommandList; const AInput, AOutput: TSize;
-  const AMode: TFastDlssMode; const AHdr: Boolean): Boolean;
+  const AMode: TFastDlssMode; const AHdr, AAutoExposure: Boolean; const APreset: TFastDlssPreset): Boolean;
 var
   Flags: Integer;
   S: TFastDlss;
+  Name: PAnsiChar;
 begin
   Result := False;
   S := FSession;
   if not S.FAvailable or (AMode = TFastDlssMode.Off) then
     Exit;
-  if (FHandle <> nil) and (FInput = AInput) and (FOutput = AOutput) and (FMode = AMode) and (FHdr = AHdr) then
+  if (FHandle <> nil) and (FInput = AInput) and (FOutput = AOutput) and (FMode = AMode) and (FHdr = AHdr) and
+    (FAutoExposure = AAutoExposure) and (FPreset = APreset) then
     Exit(True);
   EnterCriticalSection(GLock);
   try
@@ -463,14 +507,20 @@ begin
     S.SetUInt('OutWidth', AOutput.Width);
     S.SetUInt('OutHeight', AOutput.Height);
     S.SetInt('PerfQualityValue', PerfQuality[AMode]);
-    // Motion vectors at the render size, without the jitter; auto exposure.
-    Flags := 2 or 64;
+    // Motion vectors at the render size, without the jitter (MVJittered 0), depth with the near plane at 0
+    // (DepthInverted 0).
+    Flags := FlagMVLowRes;
+    if AAutoExposure then
+      Flags := Flags or FlagAutoExposure;
     if AHdr then
-      Flags := Flags or 1;
+      Flags := Flags or FlagIsHdr;
     S.SetInt('DLSS.Feature.Create.Flags', Flags);
     S.SetInt('DLSS.Enable.Output.Subrects', 0);
     S.SetUInt('CreationNodeMask', 1);
     S.SetUInt('VisibilityNodeMask', 1);
+    // The parameter block is shared: every hint is set (0: NVIDIA's default model of the mode).
+    for Name in PresetNames do
+      S.SetUInt(Name, PresetValues[APreset]);
     Result := Check(TCreateFeature(S.FCreate)(Pointer(AList), 1, S.FParameters, FHandle), 'Create DLSS SR');
     if Result then
     begin
@@ -478,6 +528,8 @@ begin
       FOutput := AOutput;
       FMode := AMode;
       FHdr := AHdr;
+      FAutoExposure := AAutoExposure;
+      FPreset := APreset;
       FError := '';
     end;
   finally
@@ -486,8 +538,8 @@ begin
 end;
 
 function TFastDlssFeature.Evaluate(const AList: ID3D12GraphicsCommandList;
-  const AColor, ADepth, AMotion, AOutput: ID3D12Resource; const AJitter: TPointF; const AReset: Boolean;
-  const AFrameTimeMs: Single): Boolean;
+  const AColor, ADepth, AMotion, AOutput, AExposure: ID3D12Resource; const AJitter: TPointF;
+  const AReset: Boolean; const AFrameTimeMs: Single): Boolean;
 var
   S: TFastDlss;
 begin
@@ -501,6 +553,7 @@ begin
     S.SetResource('Depth', ADepth);
     S.SetResource('MotionVectors', AMotion);
     S.SetResource('Output', AOutput);
+    S.SetResource('ExposureTexture', AExposure);
     S.SetFloat('Jitter.Offset.X', AJitter.X);
     S.SetFloat('Jitter.Offset.Y', AJitter.Y);
     S.SetFloat('MV.Scale.X', 1);

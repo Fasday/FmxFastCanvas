@@ -130,8 +130,12 @@ end;
 procedure THello3DForm.FormCreate(Sender: TObject);
 var
   Available: Boolean;
+  Mode: TFastDlssMode;
 begin
   FLampIntensity := 1;
+  // DLSS on at the start (the project: environment variable FC_DLSS); the panel's changes below set
+  // FastContext3DDlssMode.
+  Mode := FastContext3DDlssMode;
   ComboBoxDlss.ItemIndex := 0;
   // The device is made on first use; what it is decides what the panel offers.
   if FastCanvasInstalled then
@@ -169,6 +173,12 @@ begin
   HdrChange(nil);
   CheckBoxDlss.Enabled := FastCanvasInstalled and (TFastDevice.Backend = TFastCanvasBackend.D3D12) and
     (Context is TFastContext3D12) and TFastContext3D12(Context).DlssAvailable;
+  // The combo box first: its change applies the check box, still off.
+  if CheckBoxDlss.Enabled and (Mode <> TFastDlssMode.Off) then
+  begin
+    ComboBoxDlss.ItemIndex := Ord(Mode) - 1;
+    CheckBoxDlss.IsChecked := True;
+  end;
   DlssChange(nil);
 end;
 

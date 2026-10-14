@@ -166,6 +166,7 @@ type
   TFastContext3D12 = class(TFastContext3D)
   private
     FDlssMode, FDlssBuiltMode: TFastDlssMode;
+    FDlssBuiltEmulate: TFastDlssEmulation;
     FDlssState: IInterface;
     FDlssPhase: Boolean;
     /// <summary>The DLSS state of the context and the session of the device (made on first use). Main thread.
@@ -470,7 +471,9 @@ type
     destructor Destroy; override;
     function Pso(const AKey: TPsoKey; const ALayout: TFastVertexLayout): ID3D12PipelineState;
     function Layout(const ADeclaration: TVertexDeclaration; out AOffsets: TLayoutOffsets): TFastVertexLayout;
-    function SamplerTable(const AFilters: Cardinal): UInt64;
+    /// <summary>The samplers of 8 texture units (2 bits of AFilters each: SamplerFilters); ABias: their texture LOD
+    /// bias (the scene of DLSS).</summary>
+    function SamplerTable(const AFilters: Cardinal; const ABias: Single = 0): UInt64;
   end;
 
   // Commands (payloads of FastBridge.RecordNative).
@@ -976,10 +979,26 @@ end;
 
 { TShared }
 
-constructor TShared.Create;
 const
-  Filters: array[0..3] of TD3D12_FILTER = (D3D12_FILTER_MIN_MAG_MIP_POINT, D3D12_FILTER_MIN_LINEAR_MAG_MIP_POINT,
-    D3D12_FILTER_MIN_POINT_MAG_MIP_LINEAR, D3D12_FILTER_MIN_MAG_MIP_LINEAR);
+  SamplerFilters: array[0..3] of TD3D12_FILTER = (D3D12_FILTER_MIN_MAG_MIP_POINT,
+    D3D12_FILTER_MIN_LINEAR_MAG_MIP_POINT, D3D12_FILTER_MIN_POINT_MAG_MIP_LINEAR, D3D12_FILTER_MIN_MAG_MIP_LINEAR);
+
+/// <summary>A sampler of FMX's texture units: clamped, one of SamplerFilters.</summary>
+function SamplerDesc(const AFilter: Integer; const ABias: Single): TD3D12_SAMPLER_DESC;
+begin
+  FillChar(Result, SizeOf(Result), 0);
+  Result.Filter := SamplerFilters[AFilter];
+  Result.AddressU := D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+  Result.AddressV := D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+  Result.AddressW := D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+  Result.MipLODBias := ABias;
+  Result.MaxAnisotropy := 1;
+  Result.ComparisonFunc := D3D12_COMPARISON_FUNC_NEVER;
+  Result.MinLOD := -MaxSingle;
+  Result.MaxLOD := MaxSingle;
+end;
+
+constructor TShared.Create;
 var
   Ranges: array[0..1] of TD3D12_DESCRIPTOR_RANGE;
   Params: array[0..3] of TD3D12_ROOT_PARAMETER;
@@ -1029,15 +1048,7 @@ begin
   SamplerSource.GetCPUDescriptorHandleForHeapStart(SamplerSourceCpu);
   for I := 0 to 3 do
   begin
-    FillChar(Sampler, SizeOf(Sampler), 0);
-    Sampler.Filter := Filters[I];
-    Sampler.AddressU := D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
-    Sampler.AddressV := D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
-    Sampler.AddressW := D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
-    Sampler.MaxAnisotropy := 1;
-    Sampler.ComparisonFunc := D3D12_COMPARISON_FUNC_NEVER;
-    Sampler.MinLOD := -MaxSingle;
-    Sampler.MaxLOD := MaxSingle;
+    Sampler := SamplerDesc(I, 0);
     Device.CreateSampler(Sampler, Offset(SamplerSourceCpu, I, SamplerIncrement));
   end;
 end;
@@ -1087,12 +1098,17 @@ begin
   Offsets.Add(Key, AOffsets);
 end;
 
-function TShared.SamplerTable(const AFilters: Cardinal): UInt64;
+function TShared.SamplerTable(const AFilters: Cardinal; const ABias: Single): UInt64;
 var
   I: Integer;
   Dst: TD3D12_CPU_DESCRIPTOR_HANDLE;
+  Key: Cardinal;
+  Bias: SmallInt;
 begin
-  if SamplerTables.TryGetValue(AFilters, Result) then
+  // The bias in 1/256 steps above the 16 bits of the filters.
+  Bias := SmallInt(EnsureRange(Round(ABias * 256), -32768, 32767));
+  Key := AFilters or (Cardinal(Word(Bias)) shl 16);
+  if SamplerTables.TryGetValue(Key, Result) then
     Exit;
   if SamplerNext + 8 > SamplerHeapSize then
   begin
@@ -1105,11 +1121,14 @@ begin
   for I := 0 to 7 do
   begin
     Dst := Offset(SamplerCpu, SamplerNext + I, SamplerIncrement);
-    Device.CopyDescriptorsSimple(1, Dst, Offset(SamplerSourceCpu, (AFilters shr (2 * I)) and 3, SamplerIncrement),
-      D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER);
+    if Bias = 0 then
+      Device.CopyDescriptorsSimple(1, Dst, Offset(SamplerSourceCpu, (AFilters shr (2 * I)) and 3, SamplerIncrement),
+        D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER)
+    else
+      Device.CreateSampler(SamplerDesc((AFilters shr (2 * I)) and 3, Bias / 256), Dst);
   end;
   Result := SamplerGpu.ptr + UInt64(SamplerNext) * SamplerIncrement;
-  SamplerTables.Add(AFilters, Result);
+  SamplerTables.Add(Key, Result);
   Inc(SamplerNext, 8);
 end;
 
@@ -1337,6 +1356,84 @@ begin
   G.Blank.Use(StateRead);
   G.BlankReady := True;
 end;
+
+type
+  TMatrix4D = array[0..3, 0..3] of Double;
+
+function MulD(const A, B: TMatrix4D): TMatrix4D;
+var
+  I, J, K: Integer;
+  S: Double;
+begin
+  for I := 0 to 3 do
+    for J := 0 to 3 do
+    begin
+      S := 0;
+      for K := 0 to 3 do
+        S := S + A[I, K] * B[K, J];
+      Result[I, J] := S;
+    end;
+end;
+
+/// <summary>Gauss-Jordan with partial pivoting; False for a singular matrix.</summary>
+function InverseD(const A: TMatrix4D; out R: TMatrix4D): Boolean;
+var
+  M: TMatrix4D;
+  I, J, K, P: Integer;
+  F, T: Double;
+begin
+  M := A;
+  for I := 0 to 3 do
+    for J := 0 to 3 do
+      R[I, J] := Ord(I = J);
+  for K := 0 to 3 do
+  begin
+    P := K;
+    for I := K + 1 to 3 do
+      if Abs(M[I, K]) > Abs(M[P, K]) then
+        P := I;
+    if M[P, K] = 0 then
+      Exit(False);
+    if P <> K then
+      for J := 0 to 3 do
+      begin
+        T := M[P, J];
+        M[P, J] := M[K, J];
+        M[K, J] := T;
+        T := R[P, J];
+        R[P, J] := R[K, J];
+        R[K, J] := T;
+      end;
+    F := 1 / M[K, K];
+    for J := 0 to 3 do
+    begin
+      M[K, J] := M[K, J] * F;
+      R[K, J] := R[K, J] * F;
+    end;
+    for I := 0 to 3 do
+      if I <> K then
+      begin
+        F := M[I, K];
+        if F <> 0 then
+          for J := 0 to 3 do
+          begin
+            M[I, J] := M[I, J] - F * M[K, J];
+            R[I, J] := R[I, J] - F * R[K, J];
+          end;
+      end;
+  end;
+  Result := True;
+end;
+
+function ToSingle(const A: TMatrix4D): TMatrix3D;
+var
+  I, J: Integer;
+begin
+  for I := 0 to 3 do
+    for J := 0 to 3 do
+      Result.M[I].V[J] := A[I, J];
+end;
+
 
 {$I FastCanvas.Context3D12.Ray.inc}
 {$I FastCanvas.Context3D12.Dlss.inc}
@@ -1869,6 +1966,7 @@ begin
       D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET, D3D12_RESOURCE_STATE_RENDER_TARGET);
   end;
   FDlssBuiltMode := FDlssMode;
+  FDlssBuiltEmulate := FastDlssEmulate;
   DepthSize := Px;
   // DLSS (a window with a depth buffer): the session of the device is made when DLSS is first wanted, and stays.
   if (Texture = nil) and DepthStencil and (FDlssMode <> TFastDlssMode.Off) then
@@ -1876,12 +1974,19 @@ begin
     EnsureDlss;
     Dlss := TDlssState(FDlssState as TObject);
     Dlss.Mode := FDlssMode;
-    Dlss.Active := Dlss.Feature <> nil;
+    Dlss.Emulation := FastDlssEmulate;
+    Dlss.Active := (Dlss.Emulation <> TFastDlssEmulation.Off) or (Dlss.Feature <> nil);
     if Dlss.Active then
     begin
       Dlss.OutputSize := Px;
-      Dlss.InputSize := Dlss.Session.RenderSize(Px, FDlssMode);
+      if Dlss.Emulation <> TFastDlssEmulation.Off then
+        Dlss.InputSize := DlssRenderSize(Px, FDlssMode)
+      else
+        Dlss.InputSize := Dlss.Session.RenderSize(Px, FDlssMode);
       Dlss.Hdr := FWindowHdr;
+      Dlss.AutoExposure := FastDlssAutoExposure;
+      Dlss.Preset := FastDlssPreset;
+      Dlss.MipBias := Log2(Dlss.InputSize.Width / Dlss.OutputSize.Width) - 1;
       Dlss.MakeTextures;
       DepthSize := Dlss.InputSize;
     end;
@@ -2002,7 +2107,8 @@ var
 begin
   FDlssPhase := False;
   RunPendingReset;
-  if (Texture = nil) and (FDlssBuiltMode <> FDlssMode) then
+  if (Texture = nil) and ((FDlssBuiltMode <> FDlssMode) or
+    ((FDlssMode <> TFastDlssMode.Off) and (FDlssBuiltEmulate <> FastDlssEmulate))) then
   begin
     FreeBuffer;
     CreateBuffer;
@@ -2183,83 +2289,6 @@ begin
   else
     O.Kind := 255;
   Inc(FRayObjects);
-end;
-
-type
-  TMatrix4D = array[0..3, 0..3] of Double;
-
-function MulD(const A, B: TMatrix4D): TMatrix4D;
-var
-  I, J, K: Integer;
-  S: Double;
-begin
-  for I := 0 to 3 do
-    for J := 0 to 3 do
-    begin
-      S := 0;
-      for K := 0 to 3 do
-        S := S + A[I, K] * B[K, J];
-      Result[I, J] := S;
-    end;
-end;
-
-/// <summary>Gauss-Jordan with partial pivoting; False for a singular matrix.</summary>
-function InverseD(const A: TMatrix4D; out R: TMatrix4D): Boolean;
-var
-  M: TMatrix4D;
-  I, J, K, P: Integer;
-  F, T: Double;
-begin
-  M := A;
-  for I := 0 to 3 do
-    for J := 0 to 3 do
-      R[I, J] := Ord(I = J);
-  for K := 0 to 3 do
-  begin
-    P := K;
-    for I := K + 1 to 3 do
-      if Abs(M[I, K]) > Abs(M[P, K]) then
-        P := I;
-    if M[P, K] = 0 then
-      Exit(False);
-    if P <> K then
-      for J := 0 to 3 do
-      begin
-        T := M[P, J];
-        M[P, J] := M[K, J];
-        M[K, J] := T;
-        T := R[P, J];
-        R[P, J] := R[K, J];
-        R[K, J] := T;
-      end;
-    F := 1 / M[K, K];
-    for J := 0 to 3 do
-    begin
-      M[K, J] := M[K, J] * F;
-      R[K, J] := R[K, J] * F;
-    end;
-    for I := 0 to 3 do
-      if I <> K then
-      begin
-        F := M[I, K];
-        if F <> 0 then
-          for J := 0 to 3 do
-          begin
-            M[I, J] := M[I, J] - F * M[K, J];
-            R[I, J] := R[I, J] - F * R[K, J];
-          end;
-      end;
-  end;
-  Result := True;
-end;
-
-function ToSingle(const A: TMatrix4D): TMatrix3D;
-var
-  I, J: Integer;
-begin
-  for I := 0 to 3 do
-    for J := 0 to 3 do
-      Result.M[I].V[J] := A[I, J];
 end;
 
 /// <summary>The camera of the scene in progress, multiplied and inverted in double precision (single precision lost
@@ -2762,7 +2791,10 @@ begin
     end;
   end;
   C.Samplers := 0;
-  if N > 0 then
+  if (N > 0) and FDlssPhase then
+    // Textures as sharp as at the output size (NVIDIA's DLSS programming guide, mip-map bias).
+    C.Samplers := S.SamplerTable(Filters, TDlssState(FDlssState as TObject).MipBias)
+  else if N > 0 then
     C.Samplers := S.SamplerTable(Filters);
   Dst := PByte(C) + SizeOf(TCmdDraw);
   Move(Vertices^, Dst^, VBytes);
