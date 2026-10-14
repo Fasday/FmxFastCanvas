@@ -433,8 +433,9 @@ but for a few pixels of strokes), at about its speed (`BENCHMARKS.md`). It is th
   buffer; the inside of filled rectangles with an opaque solid color or an opaque two-stop linear gradient is drawn
   first, without blending, and nothing under it is shaded again (overlapping opaque shapes cost a phone their visible
   pixels, not their overdraw); **paths as pieces** (`FASTCANVAS_VK_PATHMESH`): a path, a widened stroke, a dashed
-  outline is drawn as trapezoids around its edges and over its inside instead of a quad over its bounds; partial
-  frames are drawn within a scissor. Solid colors and paths match the full shader within a level or three of 255
+  outline is drawn as trapezoids around its edges and over its inside instead of a quad over its bounds, and the
+  bands of many edges of a lasting path are cut into cells, so that a pixel goes through the edges near it only
+  (`strokes` medium on the Mali-G57: 37.5 -> 72.5 FPS); partial frames are drawn within a scissor. Solid colors and paths match the full shader within a level or three of 255
   where a path's pixel is antialiased (0.04-1.2 % of the pixels of the benchmark's path scenes); gradient interiors,
   interpolated per vertex rather than read from the ramp, differ by one level (0.65 % of the gradients scene). Off
   on discrete GPUs (with the variants).

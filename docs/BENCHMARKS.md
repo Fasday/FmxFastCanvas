@@ -295,8 +295,8 @@ only), without the presenting thread's copy into the swap chain (0.7-1.3 ms). "B
 
 Where many shapes are drawn, `TCanvasGpu`'s main thread is the limit (`roundrects` 32.5 ms, `paths` 41.4 ms,
 `bitmaps` 25.4 ms a frame of recording and drawing) and FastCanvas records the same in 0.4-3.4 ms; where a few large
-shapes are drawn the GPU decides. Still slower than `TCanvasGpu` on the phone: `strokes` medium (dashed outlines,
-24.9 ms of GPU) and, until the change below, `viewport3d` (the 3D context's 4x multisampled target was stored and
+shapes are drawn the GPU decides. Still slower than `TCanvasGpu` on the phone, until the changes below: `strokes`
+medium (dashed outlines, 24.9 ms of GPU) and `viewport3d` (the 3D context's 4x multisampled target was stored and
 resolved through memory: 19.8 ms of render passes and 7.6 ms of copies a frame; with one sample 6.7 ms and 0.9 ms).
 
 The 3D context's multisampled scenes resolved in their rendering instance, their samples and depth not stored
@@ -315,6 +315,13 @@ before.
 `viewport3d` medium needed the chunk held for the scene too: its vertices passed the canvas's 256 KB hand-over, the
 chunk's end split the scene's rendering instance (stored and loaded again: 31.6 FPS, 30.3 ms of render passes).
 `effects` has no multisampled scene (FMX's filters draw single-sampled quads).
+
+Paths cut into cells (`ARCHITECTURE.md`, "The Vulkan back end"), same phone and day, medium, FPS and GPU ms (render
+passes): `strokes` 37.5 / 24.9 before, 72.4-72.6 / 12.1-12.2 after (`TCanvasGpu` 64.9-65.7 FPS: FastCanvas is now
+faster there too); `paths` 67.4 / 14.0 before, 68.2-69.1 / 13.8-14.1 after (its icons turn and scale: few of them
+last long enough to get cells); `strokes` light 118.7 FPS, 3.7 ms (5.5 before); `strokes` with 400 items 11.0 FPS,
+86 ms (a build that cut almost no paths: 11.0 FPS, 82 ms). With every path cut into cells at once (an experiment)
+`strokes` medium ran at 100 FPS (8.3 ms) and `paths` at 94.5 (9.6 ms), but large scenes kept rebuilding the table.
 ## Running the benchmark
 
 Everything that produced the tables is in the repository:

@@ -331,6 +331,21 @@ outline, of a widened curve). An opaque fill's inside gaps go to the interiors' 
 within the quad (scales close to uniform): what they reach beyond the bounds has a coverage of 0. On the RX 9070 XT
 (forced on) the paths and strokes scenes differ from the quads at 0.64 % and 1.2 % of the pixels, by 1-3 levels.
 
+**Cells** (with paths as pieces). A pixel goes through every edge of its band, and a band of a dashed outline holds
+the ends of all the dashes of a side (with round caps, several edges each): on the Mali-G57 the benchmark's `strokes`
+medium took 24.9 ms a frame. A band of 16 edges or more is cut into cells, columns of the path's bounds of about 8
+pixels (at most 64): a cell lists the edges over its column (widened as the band is), leaves out those left of it
+(they add nothing to a pixel square) and stands in for those right of it with vertical edges right of the bounds,
+which add the same to every square of the cell: the steps of the edges' summed winding along the band's height (the
+two ends of a straight dash cancel; the round caps of a dashed curve leave slivers). The band's header then holds
+`0x80000000` + the number of cells and points at their headers (`PathCoverage` picks the cell by the pixel's x).
+Cells take longer to make and more room, so a path gets them only when it lasts (seen in an earlier frame), within
+three times the size of its bands, and no longer once the edge table has been started over eight times within 30
+frames. Elsewhere (and on discrete GPUs) the layout is the bands' alone, and so are the pixels. The Mali-G57's
+`strokes` medium went from 37.5 to 72.5 FPS (24.9 -> 12.1 ms); with the phone's path forced on the RX 9070 XT the
+strokes scene differs from the bands at 0.04 % of the pixels by at most 6 levels (a faint line of the bands' summed
+rounding gone).
+
 **Partial frames** draw within a scissor of the bounds of their rectangles (`TGpuRenderer.SetScissor`); the clip test
 of an instance is left out where its clip leaves out only pixels outside the scissor, so that partial frames keep the
 cheap variants and the interiors.
