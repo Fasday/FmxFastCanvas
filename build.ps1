@@ -22,7 +22,8 @@ param(
   [ValidateSet('Win64', 'Win32')] [string] $Platform = 'Win64',
   [string[]] $SearchPath = @(),
   [string[]] $Define = @(),
-  # Output root instead of bin\ (e.g. bin-dev to build while a benchmark run uses bin\).
+  # Output root instead of bin\ (e.g. bin-dev to build while a benchmark run uses bin\); an absolute path (another
+  # drive) takes the DCUs too: <OutRoot>\dcu\...
   [string] $OutRoot = 'bin'
 )
 
@@ -36,8 +37,13 @@ $Root = $PSScriptRoot
 
 $ProjectPath = (Resolve-Path $Project).Path
 $Name = [IO.Path]::GetFileNameWithoutExtension($ProjectPath)
-$OutDir = Join-Path $Root "$OutRoot\$Platform\$Config"
-$DcuDir = Join-Path $Root "dcu\$OutRoot\$Platform\$Config\$Name"
+if ([IO.Path]::IsPathRooted($OutRoot)) {
+  $OutDir = Join-Path $OutRoot "$Platform\$Config"
+  $DcuDir = Join-Path $OutRoot "dcu\$Platform\$Config\$Name"
+} else {
+  $OutDir = Join-Path $Root "$OutRoot\$Platform\$Config"
+  $DcuDir = Join-Path $Root "dcu\$OutRoot\$Platform\$Config\$Name"
+}
 $ResDir = Join-Path $Root 'dcu'
 New-Item -ItemType Directory -Force -Path $OutDir, $DcuDir | Out-Null
 

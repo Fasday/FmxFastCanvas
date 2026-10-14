@@ -12,11 +12,17 @@
     lib\linux64\<config> for librtlhelper, the SDK's usr\lib\x86_64-linux-gnu and usr\lib\gcc\x86_64-linux-gnu\<n>).
     msbuild takes the same as the properties DCC_SysLibRoot and DCC_LibraryPath (an IDE SDK profile sets them through
     Profile_sysroot and Profile_LibraryPath).
-  - A .dpr: dcclinux64 as build.ps1 runs dcc64. Output: bin\Linux64\<Config>\<Name> (with -OutRoot another folder),
-    libsk4d.so (Skia, Redist\linux64) copied next to it, not with -Define FASTCANVAS_NOSKIA (the probes then leave the
-    Skia engines out: Pango text, the own geometry). DCUs: dcu\<OutRoot>\Linux64\<Config>\<Name>\.
-  - A .dproj with the Linux64 platform: msbuild (-SearchPath, -Define and -OutRoot do not apply), output where the
-    project puts it (<project dir>\Linux64\<Config>\), libsk4d.so next to it; log dcu\<Name>-linux.log.
+  - A .dpr: dcclinux64 as build.ps1 runs dcc64. Output: bin\Linux64\<Config>\<Name> (with -OutRoot another folder;
+    an absolute -OutRoot, another drive, takes the DCUs too: <OutRoot>\dcu\...), libsk4d.so (Skia, Redist\linux64)
+    copied next to it, not with -Define FASTCANVAS_NOSKIA (the probes then leave the Skia engines out: Pango text,
+    the own geometry). DCUs: dcu\<OutRoot>\Linux64\<Config>\<Name>\.
+  - -Wayland <FMXWayland folder>: the program runs on FMXWayland (a native Wayland platform for FMX instead of
+    Embarcadero's libfmux and GTK): its tools\gen-fmux-api.ps1 generates FMUX.Api.pas into <OutRoot>\gen (from this
+    Delphi's FMX for Linux), and that folder, FMXWayland's src and src\Protocols come first on the unit path, so the
+    program links FMXWayland's FMUX.Api instead of Embarcadero's. FastCanvas then presents through
+    VK_KHR_wayland_surface (FastCanvas.Platform); nothing in FastCanvas refers to FMXWayland's units.
+  - A .dproj with the Linux64 platform: msbuild (-SearchPath, -Define, -OutRoot and -Wayland do not apply), output
+    where the project puts it (<project dir>\Linux64\<Config>\), libsk4d.so next to it; log dcu\<Name>-linux.log.
   - Always a full build (-B); a .map file (-G) for addresses in crash reports; dcu\BuildInfo.inc as build.ps1 writes
     it.
 
@@ -25,6 +31,8 @@
 .EXAMPLE
   .\tools\build-linux.ps1 -Project src\Probe\PortProbe.dpr -SearchPath src\Common,src\Canvas,src\Bench
   .\tools\build-linux.ps1 -Project src\Probe\PortProbe.dproj
+  .\tools\build-linux.ps1 -Project src\Probe\PortProbe.dpr -SearchPath src\Common,src\Canvas,src\Bench `
+    -Define FASTCANVAS_NOSKIA -Wayland F:\Projects\FMXWayland -OutRoot D:\Work\FastCanvas-wayland
 #>
 param(
   [Parameter(Mandatory = $true)] [string] $Project,
@@ -32,7 +40,9 @@ param(
   [string[]] $SearchPath = @(),
   [string[]] $Define = @(),
   [string] $OutRoot = 'bin',
-  [string] $Sdk = 'D:\LinuxSDK\ubuntu-22.04'
+  [string] $Sdk = 'D:\LinuxSDK\ubuntu-22.04',
+  # FMXWayland's folder: the program runs on FMXWayland instead of FMX's GTK platform.
+  [string] $Wayland = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -51,8 +61,13 @@ if (-not $gccDir) { throw "No usr\lib\gcc\x86_64-linux-gnu\<version> in $Sdk" }
 
 $ProjectPath = (Resolve-Path $Project).Path
 $Name = [IO.Path]::GetFileNameWithoutExtension($ProjectPath)
-$OutDir = Join-Path $Root "$OutRoot\Linux64\$Config"
-$DcuDir = Join-Path $Root "dcu\$OutRoot\Linux64\$Config\$Name"
+if ([IO.Path]::IsPathRooted($OutRoot)) {
+  $OutDir = Join-Path $OutRoot "Linux64\$Config"
+  $DcuDir = Join-Path $OutRoot "dcu\Linux64\$Config\$Name"
+} else {
+  $OutDir = Join-Path $Root "$OutRoot\Linux64\$Config"
+  $DcuDir = Join-Path $Root "dcu\$OutRoot\Linux64\$Config\$Name"
+}
 $ResDir = Join-Path $Root 'dcu'
 
 # Same environment as rsvars.bat; bin64 holds the linker.
@@ -119,6 +134,16 @@ $buildInfo = @(
 Set-Content -Path (Join-Path $ResDir 'BuildInfo.inc') -Value $buildInfo -Encoding ascii
 
 $paths = @($ResDir) + ($SearchPath | ForEach-Object { (Resolve-Path $_).Path })
+if ($Wayland) {
+  # FMXWayland's FMUX.Api (generated from this Delphi's) and its units before Delphi's precompiled FMUX.Api.
+  $Wayland = (Resolve-Path $Wayland).Path
+  $genBase = if ([IO.Path]::IsPathRooted($OutRoot)) { $OutRoot } else { Join-Path $Root "dcu\$OutRoot" }
+  $GenDir = Join-Path $genBase 'gen'
+  New-Item -ItemType Directory -Force -Path $GenDir | Out-Null
+  & (Join-Path $Wayland 'tools\gen-fmux-api.ps1') -Bds $Bds -Out (Join-Path $GenDir 'FMUX.Api.pas') -Config $Config
+  if (-not $?) { throw 'gen-fmux-api.ps1 failed' }
+  $paths = @($GenDir, (Join-Path $Wayland 'src'), (Join-Path $Wayland 'src\Protocols')) + $paths
+}
 $paths += Join-Path $Root 'third_party\pasvulkan\src'
 # Delphi's own: units (dcclinux64.cfg has them too), the .res files of FMX's units, the archives the linker takes.
 $delphiLib = Join-Path $Bds "lib\linux64\$($Config.ToLower())"

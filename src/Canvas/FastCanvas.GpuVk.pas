@@ -52,7 +52,16 @@ unit FastCanvas.GpuVk;
   presented; FMX makes the canvas again for the next native window. On Android the swap chain takes the frame's size
   unrotated (the compositor rotates it) and is not made again for being suboptimal, presents with FIFO unless tearing
   is asked for, and Present waits until the thread has taken the frame before: the frames keep the display's pace, as
-  when the render thread presented (FMX paints as often as its timers ask). }
+  when the render thread presented (FMX paints as often as its timers ask).
+
+  Linux on FMXWayland: the surface is made from the window's wl_surface (VK_KHR_wayland_surface); Mesa's WSI talks
+  to the compositor from the presenting thread on an event queue of its own, beside FMXWayland's main thread (both
+  read the display with wl_display_prepare_read). The present mode avoids FIFO, whose present waits for the
+  compositor's frame callbacks while it holds the queue lock (none come for a hidden window): MAILBOX, else
+  IMMEDIATE. Before the platform unmaps the window (Suspend) the presenting thread ends and its swap chain goes,
+  and nothing is presented until the next frame, which the platform paints once the compositor has configured the
+  window again; the first frame after the window is made or shown again is waited for until it is presented, so that
+  the window is mapped when FMX's paint returns (FMXWayland makes the popups of a window once it is mapped). }
 
 interface
 
@@ -463,6 +472,12 @@ type
     /// presented leaves it to the next one).</summary>
     FChainIndex: Cardinal;
     FChainHeld, FChainStale: Boolean;
+    /// <summary>Suspend was called: no frame is presented until the next one is prepared (render thread; set on the
+    /// main thread while the render thread is idle).</summary>
+    FSuspended: Boolean;
+    /// <summary>Wayland: the next frame shown is the first since the window was made or suspended; Present waits
+    /// until the presenting thread has presented it.</summary>
+    FFirstShow: Boolean;
     /// <summary>The Vulkan surface of the platform's window and the present modes it offers; False when the window
     /// cannot have one now (Android: no native window).</summary>
     function CreateVkSurface: Boolean;
@@ -493,6 +508,10 @@ type
     procedure ReadPixels(const ABits: Pointer; const AWidth, AHeight: Integer); override;
     function RestoreLast: Boolean; override;
     function Capture(out ACapture: TGpuCapture): Boolean; override;
+    procedure Suspend; override;
+    /// <summary>Suspends the windows that present to the Wayland surface ANative (TGpuWindowHandle.Window); the
+    /// render thread is idle (main thread). Nothing when there is no recording context.</summary>
+    class procedure SuspendWindows(const ANative: NativeUInt);
   end;
   /// <summary>Presents the frames of a window, so that the render thread does not wait for the display or the
   /// driver's acquire and present: the render thread copies a finished frame into the window's FShown and wakes this
@@ -567,6 +586,9 @@ type
     /// <summary>Render thread: waits at most ATimeoutMs until the frame posted last has been taken (with FIFO the
     /// acquire waits for the display, so the frames keep its pace).</summary>
     procedure WaitTaken(const ATimeoutMs: Cardinal);
+    /// <summary>Render thread: waits at most ATimeoutMs until the frame posted last has been presented (its present
+    /// call has returned) or dropped.</summary>
+    procedure WaitShown(const ATimeoutMs: Cardinal);
     /// <summary>The window's surface was lost (see FSurfaceLost).</summary>
     function SurfaceLost: Boolean;
     /// <summary>The thread ends; its Vulkan objects go (the GPU is waited for).</summary>
@@ -2812,6 +2834,7 @@ end;
 constructor TGpuVkWindow.Create(const AHandle: TGpuWindowHandle; const ALayered: Boolean);
 begin
   inherited;
+  FFirstShow := AHandle.Wayland;
   TFastDevice.Lock;
   try
     GpuVk.FWindows.Add(Self);
@@ -2892,6 +2915,7 @@ var
   Info: TVkAndroidSurfaceCreateInfoKHR;
 {$ELSE}
   Info: TVkXlibSurfaceCreateInfoKHR;
+  WaylandInfo: TVkWaylandSurfaceCreateInfoKHR;
 {$ENDIF}
   Supported: TVkBool32;
   Count: Cardinal;
@@ -2918,11 +2942,28 @@ begin
 {$ELSE}
   if (FHandle.Window = 0) or (FHandle.Display = nil) then
     Exit(False);
-  FillChar(Info, SizeOf(Info), 0);
-  Info.sType := VK_STRUCTURE_TYPE_XLIB_SURFACE_CREATE_INFO_KHR;
-  Info.dpy := FHandle.Display;
-  Info.window := FHandle.Window;
-  F.Check(F.InstanceVk.CreateXlibSurfaceKHR(F.Instance, @Info, nil, @FVkSurface), 'vkCreateXlibSurfaceKHR');
+  if FHandle.Wayland then
+  begin
+    // FMXWayland's window: its wl_surface on its wl_display.
+    if not F.WaylandSurfaces then
+      raise EFastDevice.Create('FastCanvas: the Vulkan loader has no VK_KHR_wayland_surface');
+    FillChar(WaylandInfo, SizeOf(WaylandInfo), 0);
+    WaylandInfo.sType := VK_STRUCTURE_TYPE_WAYLAND_SURFACE_CREATE_INFO_KHR;
+    WaylandInfo.display := FHandle.Display;
+    WaylandInfo.surface := Pointer(FHandle.Window);
+    F.Check(F.InstanceVk.CreateWaylandSurfaceKHR(F.Instance, @WaylandInfo, nil, @FVkSurface),
+      'vkCreateWaylandSurfaceKHR');
+  end
+  else
+  begin
+    if not F.XlibSurfaces then
+      raise EFastDevice.Create('FastCanvas: the Vulkan loader has no VK_KHR_xlib_surface');
+    FillChar(Info, SizeOf(Info), 0);
+    Info.sType := VK_STRUCTURE_TYPE_XLIB_SURFACE_CREATE_INFO_KHR;
+    Info.dpy := FHandle.Display;
+    Info.window := FHandle.Window;
+    F.Check(F.InstanceVk.CreateXlibSurfaceKHR(F.Instance, @Info, nil, @FVkSurface), 'vkCreateXlibSurfaceKHR');
+  end;
 {$ENDIF}
   Supported := VK_FALSE;
   F.InstanceVk.GetPhysicalDeviceSurfaceSupportKHR(F.Physical, F.QueueFamily, FVkSurface, @Supported);
@@ -2955,6 +2996,10 @@ begin
     Result := VK_PRESENT_MODE_IMMEDIATE_KHR
   else if {$IFDEF ANDROID}FTearingAsked and {$ENDIF}HasMode(VK_PRESENT_MODE_MAILBOX_KHR) then
     Result := VK_PRESENT_MODE_MAILBOX_KHR
+  else if FHandle.Wayland and HasMode(VK_PRESENT_MODE_IMMEDIATE_KHR) then
+    // Wayland's FIFO waits in the present for frame callbacks, holding the queue lock; a hidden or minimized window
+    // gets none. Without MAILBOX, IMMEDIATE (the compositor still shows whole frames).
+    Result := VK_PRESENT_MODE_IMMEDIATE_KHR
   else if GpuVk.Fast.FifoLatestReady and HasMode(VK_PRESENT_MODE_FIFO_LATEST_READY_KHR) then
     Result := VK_PRESENT_MODE_FIFO_LATEST_READY_KHR
   else
@@ -3116,6 +3161,9 @@ end;
 function TGpuVkWindow.Prepare(const AWidth, AHeight: Integer; const ATearing: Boolean;
   const AOutput: TGpuOutput): TGpuSurface;
 begin
+  // A frame after Suspend: the platform paints it once the window is configured again (FMXWayland paints only
+  // windows that are).
+  FSuspended := False;
   if ATearing <> FTearingAsked then
   begin
     FTearingAsked := ATearing;
@@ -3405,9 +3453,10 @@ begin
   end;
   if (FPresenter <> nil) and FPresenter.SurfaceLost then
     DropSurface;
-  if (FVkSurface = VK_NULL_HANDLE) and not CreateVkSurface then
+  if FSuspended or ((FVkSurface = VK_NULL_HANDLE) and not CreateVkSurface) then
   begin
-    // No surface now (Android: no native window): the frame stays in the window's surface, not shown.
+    // No surface now (Android: no native window), or the platform unmapped the window (Suspend): the frame stays in
+    // the window's surface, not shown.
     C.Submit;
     FDrawn := True;
     FLastShown := False;
@@ -3451,6 +3500,14 @@ begin
   Inc(FPresenter.FShownGen);
   FPresenter.Unlock;
   FPresenter.Post;
+  if FFirstShow then
+  begin
+    // Wayland: the window is mapped once its first buffer is committed; FMXWayland takes it as mapped when FMX's
+    // paint returns (the canvas waits for this frame then). Bounded: a frame that cannot be shown does not hold up
+    // the render thread.
+    FFirstShow := False;
+    FPresenter.WaitShown(1000);
+  end;
   FDrawn := False;
   FLastShown := True;
   if (Old <> nil) and (Old.Width = FShown.Width) and (Old.Height = FShown.Height) then
@@ -3536,6 +3593,27 @@ begin
   finally
     FSurface.Unmap(False);
   end;
+end;
+
+procedure TGpuVkWindow.Suspend;
+begin
+  // The presenting thread ends (a present in progress is done first, a frame not taken yet is dropped) and its swap
+  // chain goes with it; the next frame makes them again. The direct swap chain likewise.
+  StopPresenter;
+  ReleaseDirectChain;
+  FSuspended := True;
+  FFirstShow := FHandle.Wayland;
+end;
+
+class procedure TGpuVkWindow.SuspendWindows(const ANative: NativeUInt);
+var
+  W: TGpuVkWindow;
+begin
+  if (GCtx = nil) or (ANative = 0) then
+    Exit;
+  for W in GCtx.FWindows.ToArray do
+    if W.FHandle.Wayland and (W.FHandle.Window = ANative) then
+      W.Suspend;
 end;
 
 procedure TGpuVkWindow.ReadPixels(const ABits: Pointer; const AWidth, AHeight: Integer);
@@ -3639,6 +3717,15 @@ begin
   Unlock;
   if Pending then
     FTaken.WaitFor(ATimeoutMs);
+end;
+
+procedure TGpuVkPresenter.WaitShown(const ATimeoutMs: Cardinal);
+begin
+  WaitTaken(ATimeoutMs);
+  // The thread takes a frame and presents it holding the lock (PresentPending): once it is free again, the present
+  // of the frame taken has returned.
+  Lock;
+  Unlock;
 end;
 
 function TGpuVkPresenter.SurfaceLost: Boolean;

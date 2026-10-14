@@ -2138,6 +2138,14 @@ function TFastContext3DVk.TargetPixels: TSize;
 begin
   if Texture <> nil then
     Result := TSize.Create(Texture.Width, Texture.Height)
+{$IFDEF LINUX}
+  else if Parent <> nil then
+  begin
+    // The platform's pixels (FMXWayland: the buffer size its viewport maps to the window).
+    Result := FastWindowPixelSize(Parent, FWindowHandle, Width, Height);
+    Result := TSize.Create(Max(1, Result.Width), Max(1, Result.Height));
+  end
+{$ENDIF}
   else
     Result := TSize.Create(Max(1, Round(Width * Scale)), Max(1, Round(Height * Scale)));
 end;

@@ -272,6 +272,10 @@ type
     D2DText: Boolean;
     /// <summary>D2D of a window ignores alpha (D2DTarget AOpaque).</summary>
     D2DOpaque: Boolean;
+    /// <summary>Main thread, Wayland: the next frame of the window is the first since it was made or unmapped;
+    /// EndScene waits until it is presented (FMXWayland takes the window as mapped when FMX's paint returns).
+    /// </summary>
+    FirstFrame: Boolean;
     procedure ReleaseViews;
     /// <summary>AHdr, AComposition: TCmdBegin.Hdr, TCmdBegin.Composition.</summary>
     procedure Prepare(const AWidth, AHeight: Integer; const ATearing: Boolean; const ABitmap: TFastBitmap;
@@ -332,6 +336,12 @@ type
     /// <summary>How the scene in progress antialiases its text: FastCanvasTextAntialias with System resolved, and
     /// ClearType only in window frames (else Grayscale).</summary>
     FTextAntialias: TFastTextAntialias;
+{$IFDEF LINUX}
+    /// <summary>FMXWayland's popups and transparent forms (TTargetKind.Layered there): the platform's paint context
+    /// of the frame in progress, and the frame's pixels read back for it (FastWindowShowPixels).</summary>
+    FContextHandle: THandle;
+    FReadback: TArray<Cardinal>;
+{$ENDIF}
 {$IFDEF MSWINDOWS}
     procedure QueueRecreateWindow;
 {$ENDIF}
@@ -1728,7 +1738,16 @@ begin
   TFastDevice.Ensure;
   RegisterTextLayout;
   FTarget := TFastTarget.Create;
+{$IFDEF LINUX}
+  if FastWindowReadback(AParent) then
+  begin
+    // FMXWayland's popups and transparent forms: the frames are read back into the platform's frame.
+    FTarget.Kind := TTargetKind.Layered;
+    Exit;
+  end;
+{$ENDIF}
   FTarget.Handle := FastWindowOf(AParent);
+  FTarget.FirstFrame := FTarget.Handle.Wayland;
 {$IFDEF MSWINDOWS}
   H := WindowHandleToPlatform(AParent);
   FTarget.Wnd := H.Wnd;
@@ -1874,10 +1893,22 @@ begin
     // (nothing was recorded for its window yet).
     if not FastWindowReady(Parent) then
       Exit(False);
-    if (FTarget.Handle.Window = 0) and (FTarget.Window = nil) then
-      FTarget.Handle := FastWindowOf(Parent);
-    if FTarget.Handle.Window = 0 then
-      Exit(False);
+{$IFDEF LINUX}
+    if FTarget.Kind = TTargetKind.Layered then
+    begin
+      // The frame goes to the platform's paint context, which FMX passes with each paint.
+      if AContextHandle = 0 then
+        Exit(False);
+      FContextHandle := AContextHandle;
+    end
+    else
+{$ENDIF}
+    begin
+      if (FTarget.Handle.Window = 0) and (FTarget.Window = nil) then
+        FTarget.Handle := FastWindowOf(Parent);
+      if FTarget.Handle.Window = 0 then
+        Exit(False);
+    end;
     Size := FastWindowPixelSize(Parent, FTarget.Handle, Width, Height);
     FPixelW := Size.Width;
     FPixelH := Size.Height;
@@ -2079,13 +2110,22 @@ begin
   C.Bits := nil;
   C.BitsWidth := 0;
   C.BitsHeight := 0;
-{$IFDEF MSWINDOWS}
+{$IF Defined(MSWINDOWS)}
   if FTarget.Kind = TTargetKind.Layered then
   begin
     H := WindowHandleToPlatform(Parent);
     C.Bits := H.BufferBits;
     C.BitsWidth := H.BufferSize.Width;
     C.BitsHeight := H.BufferSize.Height;
+  end;
+{$ELSEIF Defined(LINUX)}
+  if FTarget.Kind = TTargetKind.Layered then
+  begin
+    if Length(FReadback) <> FPixelW * FPixelH then
+      SetLength(FReadback, FPixelW * FPixelH);
+    C.Bits := @FReadback[0];
+    C.BitsWidth := FPixelW;
+    C.BitsHeight := FPixelH;
   end;
 {$ENDIF}
   inherited;
@@ -2095,12 +2135,18 @@ begin
   begin
     Q.FrameSubmitted;
     Q.Submit;
-    // FMX copies the buffer of a transparent window right after EndScene.
-    if (FTarget.Kind = TTargetKind.Layered) or (GetCurrentThreadId <> MainThreadID) then
+    // FMX copies the buffer of a transparent window right after EndScene. The first frame of a Wayland window is
+    // presented when FMX's paint returns.
+    if (FTarget.Kind = TTargetKind.Layered) or FTarget.FirstFrame or (GetCurrentThreadId <> MainThreadID) then
       Q.WaitSubmitted
     else
       Q.WaitFrames(FastCanvasFramesInFlight);
+    FTarget.FirstFrame := False;
     Q.CheckError;
+{$IFDEF LINUX}
+    if FTarget.Kind = TTargetKind.Layered then
+      FastWindowShowPixels(FContextHandle, @FReadback[0], FPixelW, FPixelH, TSizeF.Create(Width, Height));
+{$ENDIF}
   end
   else if GetCurrentThreadId <> MainThreadID then
     Q.Sync;
@@ -5023,6 +5069,36 @@ begin
   TTextLayoutManager.RegisterTextLayout(FastTextEngineClass.LayoutClass, TFastCanvas);
 end;
 
+{$IFDEF LINUX}
+/// <summary>FastCanvas.Platform.FastWindowUnmapping: FMXWayland is about to unmap the window of the wl_surface
+/// ANative. What was recorded runs first; then nothing is presented to the window until its next frame (FMXWayland
+/// paints it once the compositor has configured it again), which is waited for until it is presented.</summary>
+procedure WindowUnmapping(const ANative: NativeUInt);
+var
+  P: TPair<Pointer, Boolean>;
+begin
+  if not TFastDevice.Ready then
+    Exit;
+  FastCanvasSync;
+  TFastDevice.Lock;
+  try
+    TMonitor.Enter(GBitmapsLock);
+    try
+      if GTargets <> nil then
+        for P in GTargets do
+          if TFastTarget(P.Key).Handle.Wayland and (TFastTarget(P.Key).Handle.Window = ANative) then
+            TFastTarget(P.Key).FirstFrame := True;
+    finally
+      TMonitor.Exit(GBitmapsLock);
+    end;
+    // The canvas's windows and the Vulkan 3D context's (TForm3D).
+    TGpuVkWindow.SuspendWindows(ANative);
+  finally
+    TFastDevice.Unlock;
+  end;
+end;
+{$ENDIF}
+
 procedure InstallFastCanvas;
 begin
   if FastCanvasNoHeapSleep then
@@ -5036,6 +5112,11 @@ begin
   TCanvasManager.EnableSoftwareCanvas(True);
   // Android: partial frames need the rectangles FMX's platform forgets.
   FastKeepInvalidated;
+{$ENDIF}
+{$IFDEF LINUX}
+  // FMXWayland: the canvas stops presenting to a window before the platform unmaps it.
+  FastWindowUnmapping := WindowUnmapping;
+  FastWatchUnmapping;
 {$ENDIF}
   GInstalled := True;
 {$IFDEF MSWINDOWS}

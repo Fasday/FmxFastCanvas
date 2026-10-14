@@ -13,7 +13,7 @@ unit FastCanvas.Gpu;
   Surfaces (TGpuSurface) are the premultiplied BGRA textures of TBitmap handles and window buffers; windows
   (TGpuWindow) are swap chains (of the window, or shown by DirectComposition: TGpuComposition) or, for transparent
   windows, a texture read back after every frame. A window is known by a TGpuWindowHandle: a Win32 window, an
-  Android native window or an X11 window (FastCanvas.Platform). }
+  Android native window, an X11 window or a Wayland surface (FastCanvas.Platform). }
 
 interface
 
@@ -215,10 +215,16 @@ type
   /// <summary>A window of the platform as the backends present to it (FastCanvas.Platform makes it).</summary>
   TGpuWindowHandle = record
     /// <summary>Windows: the HWND. Android: the ANativeWindow (a reference the canvas target holds). Linux: the X11
-    /// window (XID).</summary>
+    /// window (XID), or the wl_surface when Wayland.</summary>
     Window: NativeUInt;
-    /// <summary>Linux: the X11 Display; else nil.</summary>
+    /// <summary>Linux: the X11 Display, or the wl_display when Wayland; else nil.</summary>
     Display: Pointer;
+    /// <summary>Linux on FMXWayland: Window and Display are Wayland's (VK_KHR_wayland_surface), and the platform
+    /// stops showing frames of its own in the window while the handle is held (FastCanvas.Platform).</summary>
+    Wayland: Boolean;
+    /// <summary>Wayland: the FMX window handle (TWindowHandle) the surface belongs to, which outlives this handle.
+    /// </summary>
+    Owner: TObject;
   end;
 
 {$IFDEF MSWINDOWS}
@@ -282,6 +288,12 @@ type
     /// <summary>Diagnostics: the frame presented last. The device lock is held and the render thread is idle. False
     /// when there is none or the backend cannot.</summary>
     function Capture(out ACapture: TGpuCapture): Boolean; virtual;
+    /// <summary>The platform is about to unmap the window (Wayland: a role object that must see no buffer until the
+    /// compositor configures it again): nothing is presented to it from now until the next frame is prepared. The
+    /// device lock is held and the render thread is idle (main thread).</summary>
+    procedure Suspend; virtual;
+    /// <summary>The window's handle.</summary>
+    property Handle: TGpuWindowHandle read FHandle;
     /// <summary>The swap chain is FP16 scRGB now.</summary>
     property Hdr: Boolean read FHdr;
   end;
@@ -534,6 +546,10 @@ function TGpuWindow.Capture(out ACapture: TGpuCapture): Boolean;
 begin
   ACapture := Default(TGpuCapture);
   Result := False;
+end;
+
+procedure TGpuWindow.Suspend;
+begin
 end;
 
 {$IFDEF MSWINDOWS}

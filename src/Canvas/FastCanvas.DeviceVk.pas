@@ -24,7 +24,8 @@ unit FastCanvas.DeviceVk;
   free-threaded, command recording is done with the device lock held (TFastDevice.Lock); submissions and presents
   take the queue lock (LockQueue), which the threads presenting windows take without the device lock.
 
-  Other platforms: VK_KHR_android_surface (Android) or VK_KHR_xlib_surface (Linux, X11) instead of
+  Other platforms: VK_KHR_android_surface (Android), or on Linux VK_KHR_xlib_surface (X11: FMX's GTK platform) and
+  VK_KHR_wayland_surface (FMXWayland), each where the loader has it (one of them at least), instead of
   VK_KHR_win32_surface; the queue family is the first one that draws (whether it presents to a window is asked when
   the window's surface is made). Devices below Vulkan 1.3 (many phones have 1.1) are Legacy: dynamic rendering,
   synchronization2 and (below 1.2) timeline semaphores come from their extensions where the device has them, the KHR
@@ -106,6 +107,7 @@ type
     FBufferDeviceAddress, FAccelerationStructure, FRayQuery: Boolean;
     FFifoLatestReady: Boolean;
     FPushDescriptor: Boolean;
+    FXlibSurfaces, FWaylandSurfaces: Boolean;
     FDepthFormat: TVkFormat;
     FScratchAlignment: Cardinal;
     /// <summary>The version of the instance (what the loader offers, at most 1.3).</summary>
@@ -204,6 +206,10 @@ type
     /// <summary>VK_KHR_push_descriptor is enabled (the 3D context pushes its descriptors; else it binds sets of the
     /// recording context's pools).</summary>
     property PushDescriptor: Boolean read FPushDescriptor;
+    /// <summary>Linux: VK_KHR_xlib_surface is enabled (windows of FMX's GTK platform on X11).</summary>
+    property XlibSurfaces: Boolean read FXlibSurfaces;
+    /// <summary>Linux: VK_KHR_wayland_surface is enabled (windows of FMXWayland, FastCanvas.Platform).</summary>
+    property WaylandSurfaces: Boolean read FWaylandSurfaces;
     /// <summary>The depth and stencil format of the 3D context: D32_SFLOAT_S8_UINT, else D24_UNORM_S8_UINT (as
     /// attachment and sampled); VK_FORMAT_UNDEFINED: none.</summary>
     property DepthFormat: TVkFormat read FDepthFormat;
@@ -248,9 +254,13 @@ const
   /// <summary>The Vulkan loader of the platform.</summary>
   LoaderName =
     {$IF Defined(MSWINDOWS)}'vulkan-1.dll'{$ELSEIF Defined(ANDROID)}'libvulkan.so'{$ELSE}'libvulkan.so.1'{$ENDIF};
-  /// <summary>The surface extension of the platform's windows.</summary>
+  /// <summary>The surface extension of the platform's windows (Linux: X11's; Wayland's is enabled too where the loader
+  /// has it, and either one will do).</summary>
   SurfaceExtension = {$IF Defined(MSWINDOWS)}VK_KHR_WIN32_SURFACE_EXTENSION_NAME{$ELSEIF Defined(ANDROID)}
     VK_KHR_ANDROID_SURFACE_EXTENSION_NAME{$ELSE}VK_KHR_XLIB_SURFACE_EXTENSION_NAME{$ENDIF};
+  /// <summary>What a loader without them lacks (the message).</summary>
+  SurfaceExtensionText = {$IF Defined(LINUX)}VK_KHR_XLIB_SURFACE_EXTENSION_NAME + ' or ' +
+    VK_KHR_WAYLAND_SURFACE_EXTENSION_NAME{$ELSE}SurfaceExtension{$ENDIF};
 
 type
   TFastVkRange = record
@@ -739,14 +749,30 @@ begin
   SetLength(Available, Count);
   if Count > 0 then
     vkEnumerateInstanceExtensionProperties(nil, @Count, @Available[0]);
+{$IF Defined(LINUX)}
+  // X11 windows (FMX's GTK platform) and Wayland surfaces (FMXWayland): whichever the loader has.
+  FXlibSurfaces := HasExtension(Available, VK_KHR_XLIB_SURFACE_EXTENSION_NAME);
+  FWaylandSurfaces := HasExtension(Available, VK_KHR_WAYLAND_SURFACE_EXTENSION_NAME);
+  if not FXlibSurfaces and not FWaylandSurfaces then
+{$ELSE}
   if not HasExtension(Available, SurfaceExtension) then
+{$ENDIF}
   begin
     Names := '';
     for I := 0 to High(Available) do
       Names := Names + ' ' + string(AnsiString(PAnsiChar(@Available[I].extensionName[0])));
-    raise EFastVulkan.CreateFmt('FastCanvas: the Vulkan loader has no %s (it has%s)', [SurfaceExtension, Names]);
+    raise EFastVulkan.CreateFmt('FastCanvas: the Vulkan loader has no %s (it has%s)', [SurfaceExtensionText,
+      Names]);
   end;
-  ExtNames := [PAnsiChar(VK_KHR_SURFACE_EXTENSION_NAME), PAnsiChar(SurfaceExtension)];
+  ExtNames := [PAnsiChar(VK_KHR_SURFACE_EXTENSION_NAME)];
+{$IF Defined(LINUX)}
+  if FXlibSurfaces then
+    ExtNames := ExtNames + [PAnsiChar(VK_KHR_XLIB_SURFACE_EXTENSION_NAME)];
+  if FWaylandSurfaces then
+    ExtNames := ExtNames + [PAnsiChar(VK_KHR_WAYLAND_SURFACE_EXTENSION_NAME)];
+{$ELSE}
+  ExtNames := ExtNames + [PAnsiChar(SurfaceExtension)];
+{$ENDIF}
   Validation := False;
   if FDebug then
   begin

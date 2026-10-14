@@ -66,9 +66,11 @@ unit Vulkan;
   {$define CPU64}
  {$endif}
 {$endif}
-// FastCanvas patch: Linux (not Android) presents to X11 windows through VK_KHR_xlib_surface.
+// FastCanvas patch: Linux (not Android) presents to X11 windows through VK_KHR_xlib_surface, and to Wayland
+// surfaces (FMXWayland) through VK_KHR_wayland_surface.
 {$if defined(Linux) and not defined(Android)}
  {$define XLIB}
+ {$define WAYLAND}
 {$ifend}
 {$if defined(Android)}
  {$define VK_USE_PLATFORM_ANDROID_KHR}

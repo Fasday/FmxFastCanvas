@@ -23,8 +23,8 @@ Marked `FastCanvas patch` in the source; the generated declarations are untouche
 - `VK_DEFAULT_LIB_NAME`: `libvulkan.so.1` also for Delphi's `LINUX`.
 - `vkLoadLibrary`, `vkGetProcAddress`, `vkFreeLibrary`: `dlopen`, `dlsym`, `dlclose` of `Posix.Dlfcn` for Delphi on
   POSIX (UTF-8 names; the upstream code returned nil there).
-- `XLIB` is defined on Linux (not Android): the declarations of `VK_KHR_xlib_surface` (FastCanvas presents to X11
-  windows there).
+- `XLIB` and `WAYLAND` are defined on Linux (not Android): the declarations of `VK_KHR_xlib_surface` and
+  `VK_KHR_wayland_surface` (FastCanvas presents to X11 windows there, and to Wayland surfaces on FMXWayland).
 - `TVkInt32` and `TVkUInt32` are `Int32` and `UInt32` for Delphi too (upstream: `LongInt`, `LongWord`), which are
   64-bit on Delphi's 64-bit POSIX platforms (Android64, Linux64): every 32-bit field of the structures was 8 bytes
   wide there (`VkExtensionProperties` 264 bytes instead of 260, found on an Android emulator). The same types on
