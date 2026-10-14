@@ -535,13 +535,24 @@ float RampIntegral(float t)
 //
 // The edges of a path are split into horizontal bands of its local bounds (rect); a band lists every edge that
 // overlaps it, widened by more than half a pixel, so one band holds all the edges the square needs. Band b of the
-// path: Edges[header + b / 2] = (start, count) of bands 2k and 2k + 1, as uint bits.
+// path: Edges[header + b / 2] = (start, count) of bands 2k and 2k + 1, as uint bits. A band of many edges is cut into
+// cells, columns of the bounds (count 0x80000000 + their number; start: their headers, pairs as the bands'): a cell
+// lists the edges that overlap its column (widened likewise), and the edges right of it as vertical edges right of the
+// bounds (they add the same).
 float PathCoverage(float2 l, float w, float4 rect, uint header, uint bands, bool evenOdd)
 {
     float t = (l.y - rect.y) / max(rect.w - rect.y, 1e-6) * bands;
     uint band = (uint)clamp(floor(t), 0, bands - 1);
     float4 h = Edges.Load(header + band / 2);
     uint2 se = (band & 1) != 0 ? asuint(h.zw) : asuint(h.xy);
+    if (se.y >= 0x80000000u)
+    {
+        uint cells = se.y & 0xFFFF;
+        float u = (l.x - rect.x) / max(rect.z - rect.x, 1e-6) * cells;
+        uint cell = (uint)clamp(floor(u), 0, cells - 1);
+        h = Edges.Load(se.x + cell / 2);
+        se = (cell & 1) != 0 ? asuint(h.zw) : asuint(h.xy);
+    }
     float inv = 1 / max(w, 1e-6);
     float2 corner = l - 0.5 * w;
     float acc = 0;

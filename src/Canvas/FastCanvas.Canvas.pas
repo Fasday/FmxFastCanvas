@@ -187,6 +187,9 @@ const
   MaxEdgePaths = 4096;
   /// <summary>Horizontal bands of a path in the edge table (shader PathCoverage).</summary>
   MaxPathBands = 256;
+  /// <summary>The count of a band header for a band cut into cells (the low 16 bits: their number; BandEdges).
+  /// </summary>
+  BandCells = Cardinal($80000000);
   // TCmdBegin.Hdr.
   HdrModeMask = 3;
   HdrLinear = 4;
@@ -598,6 +601,11 @@ type
     FBanded: TArray<TEdge>;
     FCover, FSolidPieces: TArray<TPathPiece>;
     FFrame, FEdgeResetFrame: Integer;
+    /// <summary>Paths are no longer cut into cells (BandEdges): the table was started over too often; the frames of
+    /// the last restarts (AllocEdges).</summary>
+    FCellsOff: Boolean;
+    FRestarts: array[0..7] of Integer;
+    FRestartIndex: Integer;
     /// <summary>The frame in progress is partial but found no frame to start from: it is not presented.</summary>
     FNoPresent: Boolean;
     // Per-frame part of the edge table: next free entry, and the keys added in the last two frames.
@@ -3472,19 +3480,77 @@ begin
   Result.Key := StrokeKey(C);
 end;
 
+/// <summary>Sorts AValues[ALo..AHi] ascending (quicksort, insertion sort for short runs).</summary>
+procedure SortSingles(var AValues: TArray<Single>; ALo, AHi: Integer);
+var
+  I, J: Integer;
+  P, T: Single;
+begin
+  while AHi - ALo > 16 do
+  begin
+    P := AValues[(ALo + AHi) shr 1];
+    I := ALo;
+    J := AHi;
+    repeat
+      while AValues[I] < P do
+        Inc(I);
+      while AValues[J] > P do
+        Dec(J);
+      if I <= J then
+      begin
+        T := AValues[I];
+        AValues[I] := AValues[J];
+        AValues[J] := T;
+        Inc(I);
+        Dec(J);
+      end;
+    until I > J;
+    // The smaller part recursively, the larger one in the loop.
+    if J - ALo < AHi - I then
+    begin
+      SortSingles(AValues, ALo, J);
+      ALo := I;
+    end
+    else
+    begin
+      SortSingles(AValues, I, AHi);
+      AHi := J;
+    end;
+  end;
+  for I := ALo + 1 to AHi do
+  begin
+    T := AValues[I];
+    J := I - 1;
+    while (J >= ALo) and (AValues[J] > T) do
+    begin
+      AValues[J + 1] := AValues[J];
+      Dec(J);
+    end;
+    AValues[J + 1] := T;
+  end;
+end;
+
 /// <summary>Band layout of polygon edges for the shader (PathCoverage), written to AOut (grown when needed, reused):
-/// (Bands + 1) div 2 headers of two (start, count) pairs each (relative to AOut, as Cardinal bits), then the edges
-/// of every band. A band lists the edges overlapping it widened by 0.75 pixel at the lowest scale of the bucket, so
-/// the pixel square around any point of the band finds all the edges it needs in that band. ABandPixels > 0: bands
-/// at most that many pixels tall (TGpuRenderer.BandPixels; a pixel goes through every edge of its band, and those that
-/// do not reach its row add nothing, so the band count does not change the result). Returns the number of entries
-/// used.</summary>
-function BandEdges(const ASink: TFastEdgeSink; const AMinScale, ABandPixels: Single; var AOut: TArray<TEdge>;
-  out ABands: Integer): Integer;
+/// (Bands + 1) div 2 headers of two (start, count) pairs each (relative to AOut, as Cardinal bits), then the edges of
+/// every band. A band lists the edges overlapping it widened by 0.75 pixel at the lowest scale of the bucket, so the
+/// pixel square around any point of the band finds all the edges it needs in that band. ABandPixels > 0: bands at
+/// most that many pixels tall (TGpuRenderer.BandPixels; a pixel goes through every edge of its band, and those that
+/// do not reach its row add nothing, so the band count does not change the result). ACellsAllowed: a band of many
+/// edges (a dashed outline puts the ends of a whole side's dashes into one band) is cut into cells, columns of the
+/// bounds (count BandCells or the number of cells; start: their headers, pairs as the bands'). Returns the number
+/// of entries used.</summary>
+function BandEdges(const ASink: TFastEdgeSink; const AMinScale, ABandPixels: Single; const ACellsAllowed: Boolean;
+  var AOut: TArray<TEdge>; out ABands: Integer): Integer;
+const
+  /// <summary>Edges from which a band is cut into cells, of about CellPixels pixels.</summary>
+  CellEdges = 16;
+  CellPixels = 8;
+  MaxCells = 64;
 var
   H, InvH, Margin: Single;
-  B, I, Headers, First, Last: Integer;
+  B, I, Headers, Total, Bands, Cells, First, Last: Integer;
   Counts, Next: array[0..MaxPathBands - 1] of Integer;
+  EF, EL: TArray<Integer>;
 
   procedure Span(const E: TEdge; out AFirst, ALast: Integer);
   var
@@ -3510,43 +3576,325 @@ var
     Hi := (Hi + Margin - ASink.MinY) * InvH;
     if Lo <= 0 then
       AFirst := 0
-    else if Lo >= ABands - 1 then
-      AFirst := ABands - 1
+    else if Lo >= Bands - 1 then
+      AFirst := Bands - 1
     else
       AFirst := Trunc(Lo);
     if Hi <= 0 then
       ALast := 0
-    else if Hi >= ABands - 1 then
-      ALast := ABands - 1
+    else if Hi >= Bands - 1 then
+      ALast := Bands - 1
     else
       ALast := Trunc(Hi);
   end;
 
+  procedure Header(const AAt, AIndex: Integer; const AStart, ACount: Cardinal);
+  begin
+    if Odd(AIndex) then
+    begin
+      PCardinal(@AOut[AAt + AIndex div 2].X1)^ := AStart;
+      PCardinal(@AOut[AAt + AIndex div 2].Y1)^ := ACount;
+    end
+    else
+    begin
+      PCardinal(@AOut[AAt + AIndex div 2].X0)^ := AStart;
+      PCardinal(@AOut[AAt + AIndex div 2].Y0)^ := ACount;
+    end;
+  end;
+
+  /// <summary>Bands, some of them cut into cells. A cell lists the edges that overlap its column widened as the band
+  /// is (exactly as a band does), leaves out the edges left of it (a pixel square left of an edge gets nothing from
+  /// it) and stands in for the edges right of it with vertical edges right of the bounds: such an edge gives every
+  /// square of the cell the height they share, signed by its direction, as a vertical edge of the same heights does,
+  /// so the edges right of the column become the steps of their summed winding along the band's height (the two ends
+  /// of a dash cancel where they are level; the round caps of a dashed curve leave slivers). 0: a table more than
+  /// three times the bands' (the edge table's room).</summary>
+  function Mixed: Integer;
+  var
+    BandStart: array[0..MaxPathBands] of Integer;
+    Idx, CF, CL, LoI, HiI, Dir, Order, Active, D, ColStart: TArray<Integer>;
+    Ys: TArray<Single>;
+    E: TEdge;
+    InvCW, X, BY0, BY1, Lo, Hi: Single;
+    B, I, C, J, K, N, M, Start, W, A, Act, Ptr, Budget, CellAt, PseudoAt, PseudoCount: Integer;
+    Changed: Boolean;
+
+    procedure Put(const AX0, AY0, AX1, AY1: Single);
+    begin
+      if Result >= Length(AOut) then
+        SetLength(AOut, Max(Result + 1, 2 * Length(AOut)));
+      AOut[Result].X0 := AX0;
+      AOut[Result].Y0 := AY0;
+      AOut[Result].X1 := AX1;
+      AOut[Result].Y1 := AY1;
+      Inc(Result);
+    end;
+
+    function YIndex(const AY: Single): Integer;
+    var
+      L, R, Mid: Integer;
+    begin
+      L := 0;
+      R := K - 1;
+      while L < R do
+      begin
+        Mid := (L + R) div 2;
+        if Ys[Mid] < AY then
+          L := Mid + 1
+        else
+          R := Mid;
+      end;
+      Result := L;
+    end;
+
+  begin
+    BandStart[0] := 0;
+    for B := 0 to Bands - 1 do
+      BandStart[B + 1] := BandStart[B] + Counts[B];
+    SetLength(Idx, BandStart[Bands]);
+    for B := 0 to Bands - 1 do
+      Next[B] := BandStart[B];
+    for I := 0 to ASink.Count - 1 do
+      for B := EF[I] to EL[I] do
+      begin
+        Idx[Next[B]] := I;
+        Inc(Next[B]);
+      end;
+    InvCW := Cells / (ASink.MaxX - ASink.MinX);
+    // Right of every pixel square of every cell.
+    X := ASink.MaxX + Margin;
+    Headers := (Bands + 1) div 2;
+    Budget := 3 * (Total + Headers) + 64;
+    if Length(AOut) < Headers then
+      SetLength(AOut, Max(Headers, 2 * Length(AOut)));
+    FillChar(AOut[0], Headers * SizeOf(TEdge), 0);
+    Result := Headers;
+    for B := 0 to Bands - 1 do
+    begin
+      N := Counts[B];
+      if N < CellEdges then
+      begin
+        Start := Result;
+        for J := 0 to N - 1 do
+        begin
+          E := ASink.Edges[Idx[BandStart[B] + J]];
+          Put(E.X0, E.Y0, E.X1, E.Y1);
+        end;
+        Header(0, B, Start, N);
+        Continue;
+      end;
+      // The headers of the band's cells.
+      CellAt := Result;
+      Inc(Result, (Cells + 1) div 2);
+      if Result > Length(AOut) then
+        SetLength(AOut, Max(Result, 2 * Length(AOut)));
+      FillChar(AOut[CellAt], (Cells + 1) div 2 * SizeOf(TEdge), 0);
+      Header(0, B, CellAt, BandCells or Cardinal(Cells));
+      // The heights the band's squares reach.
+      if H > 0 then
+      begin
+        BY0 := ASink.MinY + B * H - Margin;
+        BY1 := ASink.MinY + (B + 1) * H + Margin;
+      end
+      else
+      begin
+        BY0 := ASink.MinY - Margin;
+        BY1 := ASink.MaxY + Margin;
+      end;
+      SetLength(CF, N);
+      SetLength(CL, N);
+      SetLength(LoI, N);
+      SetLength(HiI, N);
+      SetLength(Dir, N);
+      SetLength(Ys, 2 * N);
+      // The columns each edge overlaps (CF..CL); horizontal edges and edges outside the band's heights add nothing
+      // (Dir 0).
+      M := 0;
+      for J := 0 to N - 1 do
+      begin
+        E := ASink.Edges[Idx[BandStart[B] + J]];
+        CF[J] := EnsureRange(Floor((Min(E.X0, E.X1) - Margin - ASink.MinX) * InvCW), 0, Cells - 1);
+        CL[J] := EnsureRange(Floor((Max(E.X0, E.X1) + Margin - ASink.MinX) * InvCW), 0, Cells - 1);
+        Lo := Max(Min(E.Y0, E.Y1), BY0);
+        Hi := Min(Max(E.Y0, E.Y1), BY1);
+        if (E.Y0 = E.Y1) or (Hi <= Lo) then
+          Dir[J] := 0
+        else
+        begin
+          if E.Y1 > E.Y0 then
+            Dir[J] := 1
+          else
+            Dir[J] := -1;
+          Ys[M] := Lo;
+          Ys[M + 1] := Hi;
+          Inc(M, 2);
+        end;
+      end;
+      // The distinct heights, and each edge's.
+      SortSingles(Ys, 0, M - 1);
+      K := 0;
+      for J := 0 to M - 1 do
+        if (K = 0) or (Ys[J] <> Ys[K - 1]) then
+        begin
+          Ys[K] := Ys[J];
+          Inc(K);
+        end;
+      SetLength(D, K + 1);
+      FillChar(D[0], Length(D) * SizeOf(Integer), 0);
+      for J := 0 to N - 1 do
+        if Dir[J] <> 0 then
+        begin
+          E := ASink.Edges[Idx[BandStart[B] + J]];
+          LoI[J] := YIndex(Max(Min(E.Y0, E.Y1), BY0));
+          HiI[J] := YIndex(Min(Max(E.Y0, E.Y1), BY1));
+          // Right of column 0 to begin with.
+          if CF[J] > 0 then
+          begin
+            Inc(D[LoI[J]], Dir[J]);
+            Dec(D[HiI[J]], Dir[J]);
+          end;
+        end;
+      // The edges by their first column (counting sort).
+      SetLength(Order, N);
+      SetLength(ColStart, Cells + 1);
+      FillChar(ColStart[0], Length(ColStart) * SizeOf(Integer), 0);
+      for A := 0 to N - 1 do
+        Inc(ColStart[CF[A] + 1]);
+      for C := 1 to Cells do
+        Inc(ColStart[C], ColStart[C - 1]);
+      for A := 0 to N - 1 do
+      begin
+        Order[ColStart[CF[A]]] := A;
+        Inc(ColStart[CF[A]]);
+      end;
+      SetLength(Active, N);
+      Act := 0;
+      Ptr := 0;
+      Changed := False;
+      PseudoAt := 0;
+      PseudoCount := 0;
+      for C := 0 to Cells - 1 do
+      begin
+        // Edges whose first column this is: no longer right of the column, listed from here to their last.
+        while (Ptr < N) and (CF[Order[Ptr]] = C) do
+        begin
+          A := Order[Ptr];
+          if Dir[A] <> 0 then
+          begin
+            if C > 0 then
+            begin
+              Dec(D[LoI[A]], Dir[A]);
+              Inc(D[HiI[A]], Dir[A]);
+              Changed := True;
+            end;
+            Active[Act] := A;
+            Inc(Act);
+          end;
+          Inc(Ptr);
+        end;
+        Start := Result;
+        J := 0;
+        while J < Act do
+        begin
+          A := Active[J];
+          if CL[A] < C then
+          begin
+            // Left of this column and of the ones after it.
+            Dec(Act);
+            Active[J] := Active[Act];
+            Continue;
+          end;
+          E := ASink.Edges[Idx[BandStart[B] + A]];
+          Put(E.X0, E.Y0, E.X1, E.Y1);
+          Inc(J);
+        end;
+        // The summed winding of the edges right of the column, step by step (the column before's again while no edge
+        // has left that set).
+        if Changed or (C = 0) then
+        begin
+          PseudoAt := Result;
+          W := 0;
+          for J := 0 to K - 2 do
+          begin
+            Inc(W, D[J]);
+            for A := 1 to Abs(W) do
+              if W > 0 then
+                Put(X, Ys[J], X, Ys[J + 1])
+              else
+                Put(X, Ys[J + 1], X, Ys[J]);
+          end;
+          PseudoCount := Result - PseudoAt;
+          Changed := False;
+        end
+        else
+        begin
+          A := Result;
+          for J := 0 to PseudoCount - 1 do
+          begin
+            E := AOut[PseudoAt + J];
+            Put(E.X0, E.Y0, E.X1, E.Y1);
+          end;
+          PseudoAt := A;
+        end;
+        Header(CellAt, C, Start, Result - Start);
+        if Result > Budget then
+          Exit(0);
+      end;
+    end;
+  end;
+
 begin
-  ABands := ASink.Count div 6;
+  Bands := ASink.Count div 6;
   if ABandPixels > 0 then
-    ABands := Max(ABands, Trunc((ASink.MaxY - ASink.MinY) * AMinScale / ABandPixels));
-  ABands := EnsureRange(ABands, 1, MaxPathBands);
-  H := (ASink.MaxY - ASink.MinY) / ABands;
+    Bands := Max(Bands, Trunc((ASink.MaxY - ASink.MinY) * AMinScale / ABandPixels));
+  Bands := EnsureRange(Bands, 1, MaxPathBands);
+  H := (ASink.MaxY - ASink.MinY) / Bands;
   if H <= 1E-6 then
   begin
-    ABands := 1;
+    Bands := 1;
     H := 0;
   end;
+  ABands := Bands;
   InvH := 0;
   if H > 0 then
     InvH := 1 / H;
   Margin := 0.75 / Max(AMinScale, 1E-3);
   FillChar(Counts, SizeOf(Counts), 0);
-  for I := 0 to ASink.Count - 1 do
+  if ACellsAllowed then
   begin
-    Span(ASink.Edges[I], First, Last);
-    for B := First to Last do
-      Inc(Counts[B]);
-  end;
-  Headers := (ABands + 1) div 2;
+    // The bands of every edge, kept for the cells (bands alone compute them twice: the render thread allocates
+    // nothing per path then).
+    SetLength(EF, ASink.Count);
+    SetLength(EL, ASink.Count);
+    Total := 0;
+    for I := 0 to ASink.Count - 1 do
+    begin
+      Span(ASink.Edges[I], EF[I], EL[I]);
+      for B := EF[I] to EL[I] do
+        Inc(Counts[B]);
+      Inc(Total, EL[I] - EF[I] + 1);
+    end;
+    Cells := Min(Trunc((ASink.MaxX - ASink.MinX) * AMinScale / CellPixels), MaxCells);
+    if Cells > 1 then
+      for B := 0 to Bands - 1 do
+        if Counts[B] >= CellEdges then
+        begin
+          Result := Mixed;
+          if Result > 0 then
+            Exit;
+          Break;
+        end;
+  end
+  else
+    for I := 0 to ASink.Count - 1 do
+    begin
+      Span(ASink.Edges[I], First, Last);
+      for B := First to Last do
+        Inc(Counts[B]);
+    end;
+  Headers := (Bands + 1) div 2;
   Result := Headers;
-  for B := 0 to ABands - 1 do
+  for B := 0 to Bands - 1 do
   begin
     Next[B] := Result;
     Inc(Result, Counts[B]);
@@ -3554,17 +3902,8 @@ begin
   if Length(AOut) < Result then
     SetLength(AOut, Max(Result, 2 * Length(AOut)));
   FillChar(AOut[0], Headers * SizeOf(TEdge), 0);
-  for B := 0 to ABands - 1 do
-    if Odd(B) then
-    begin
-      PCardinal(@AOut[B div 2].X1)^ := Next[B];
-      PCardinal(@AOut[B div 2].Y1)^ := Counts[B];
-    end
-    else
-    begin
-      PCardinal(@AOut[B div 2].X0)^ := Next[B];
-      PCardinal(@AOut[B div 2].Y0)^ := Counts[B];
-    end;
+  for B := 0 to Bands - 1 do
+    Header(0, B, Next[B], Counts[B]);
   for I := 0 to ASink.Count - 1 do
   begin
     Span(ASink.Edges[I], First, Last);
@@ -3618,7 +3957,9 @@ var
   Geometry: IFastGeometry;
   Done: Boolean;
   Fill, Shape: Byte;
-  Bands, N, I, Start, NC, NS: Integer;
+  Bands, N, I, K, Start, NC, NS: Integer;
+  Hdr: PCardinal;
+  Cnt: Cardinal;
   R: TRectF;
   Q, MinScale, MaxScale, Half, Grow: Single;
   Persistent: Boolean;
@@ -3680,13 +4021,34 @@ begin
   AEdges.Frame := -1;
   if FSink.Count > 0 then
   begin
-    N := BandEdges(FSink, Power(2, (BucketMin - 0.5) / 4), FGpu.BandPixels, FBanded, Bands);
+    // Cells where paths are drawn as pieces (tilers: every pixel of a piece counts; elsewhere the GPU shades the bands
+    // fast enough), for the paths that last (seen in an earlier frame: cells take longer to make), unless the table
+    // has been started over in two frames running (FCellsOff: they take more room).
+    N := BandEdges(FSink, Power(2, (BucketMin - 0.5) / 4), FGpu.BandPixels, FGpu.PathMeshes and Persistent and
+      not FCellsOff, FBanded, Bands);
+    // Cells take more entries than bands: whole bands where they would not fit.
+    if N > GpuEdgesLimit div 4 then
+      N := BandEdges(FSink, Power(2, (BucketMin - 0.5) / 4), FGpu.BandPixels, False, FBanded, Bands);
     if N > GpuEdgesLimit div 4 then
       Exit(False);
     if not Persistent and (N > FGpu.EdgeCapacity div 4) then
       Persistent := True;
     Start := AllocEdges(N, Persistent);
-    // Band headers hold absolute indices.
+    // Band headers hold absolute indices, and so do the cell headers of bands cut into cells.
+    for I := 0 to Bands - 1 do
+    begin
+      if Odd(I) then
+        Hdr := PCardinal(@FBanded[I div 2].X1)
+      else
+        Hdr := PCardinal(@FBanded[I div 2].X0);
+      Cnt := PCardinal(PByte(Hdr) + SizeOf(Single))^;
+      if (Cnt and BandCells) <> 0 then
+        for K := 0 to Integer((Cnt and $FFFF) + 1) div 2 - 1 do
+        begin
+          Inc(PCardinal(@FBanded[Integer(Hdr^) + K].X0)^, Start);
+          Inc(PCardinal(@FBanded[Integer(Hdr^) + K].X1)^, Start);
+        end;
+    end;
     for I := 0 to (Bands + 1) div 2 - 1 do
     begin
       Inc(PCardinal(@FBanded[I].X0)^, Start);
@@ -3760,6 +4122,12 @@ begin
           FGpu.ResizeEdges(Cap);
         FEdgeResetFrame := FFrame;
       end;
+      // Started over eight times within 30 frames (the table does not grow enough): bands from now on, which take
+      // less room than cells.
+      FRestarts[FRestartIndex] := FFrame;
+      FRestartIndex := (FRestartIndex + 1) mod Length(FRestarts);
+      if (FRestarts[FRestartIndex] > 0) and (FFrame - FRestarts[FRestartIndex] < 30) then
+        FCellsOff := True;
       FEdges.Clear;
       FEdgeCount := 0;
       FPersistCount := 0;
