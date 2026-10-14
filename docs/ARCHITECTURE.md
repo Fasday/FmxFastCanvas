@@ -179,7 +179,9 @@ asserted by size at compile time.
   colors (a color only makes Pango end a run; the canvas draws runs in their colors), and the box's width with
   `PANGO_WRAP_WORD_CHAR` for `WordWrap`. Without `WordWrap` lines are as long as they are (width -1) and the layout is
   moved by the alignment; trimming ellipsizes at the end (`PANGO_ELLIPSIZE_END`), every paragraph's one line without
-  `WordWrap`, the lines that fit the box's height with it. Word trimming looks for the ellipsis runs Pango made
+  `WordWrap`, the lines that fit the box's height with it (Pango ellipsizes only a paragraph that does not fit: when
+  whole paragraphs are left out below the box, the text is laid out again ending in "…" after the last line that
+  fits). Word trimming looks for the ellipsis runs Pango made
   (`PANGO_ANALYSIS_FLAG_IS_ELLIPSIS`: their items are the text left out), goes back to the last line break opportunity
   of the line (Pango's log attributes) and lays out the shortened text with "…" in place again, keeping a map of its
   indices to the layout's; Pango widens an ellipsis to the box's edge, which the text's width leaves out (the

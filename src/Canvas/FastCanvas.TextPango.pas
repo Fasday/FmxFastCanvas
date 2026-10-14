@@ -59,11 +59,11 @@ type
   /// the layout sits in the layout box.</summary>
   TFastPangoLayoutData = class(TFastLayoutData)
   private
-    /// <summary>The text laid out: the layout's text, or with word trimming that text shortened at word boundaries,
-    /// with the ellipses as characters.</summary>
+    /// <summary>The text laid out: the layout's text, or with trimming that text shortened (at word boundaries, or
+    /// where paragraphs below the box are left out), with the ellipses as characters.</summary>
     FText: string;
-    /// <summary>With word trimming: the index in the layout's text of every index of FText (and of its end); nil
-    /// when FText is the layout's text.</summary>
+    /// <summary>Shortened text: the index in the layout's text of every index of FText (and of its end); nil when
+    /// FText is the layout's text.</summary>
     FMap: TArray<Integer>;
     FStyles: TArray<TFastPangoStyle>;
     /// <summary>The style of every UTF-16 code unit of FText (index into FStyles).</summary>
@@ -82,7 +82,9 @@ type
     procedure SetText(const AText: string; const ACharStyles: TArray<Integer>);
     function MakeLayout: Pointer;
     function Layout: Pointer;
-    procedure TrimWords;
+    procedure Shorten(const ACuts: TArray<TPoint>; const AKeepRest: Boolean);
+    function EllipsizeOmitted: Boolean;
+    function TrimWords: Boolean;
     procedure Analyse;
     /// <summary>The index in FText of an index of the layout's text.</summary>
     function ShownIndex(const AIndex: Integer): Integer;
@@ -1152,11 +1154,104 @@ begin
   Result := FLayout;
 end;
 
+/// <summary>FText becomes its pieces: the text before each cut (X: where the ellipsis goes, Y: the end of the text
+/// it stands for), an ellipsis for each, and with AKeepRest the text after the last cut. FMap maps the new text to
+/// the layout's (through the map of an earlier shortening).</summary>
+procedure TFastPangoLayoutData.Shorten(const ACuts: TArray<TPoint>; const AKeepRest: Boolean);
+var
+  Shown: TStringBuilder;
+  Map, Styles: TList<Integer>;
+  Cut: TPoint;
+  P, Prev: Integer;
+
+  procedure Keep(const AFrom, ATo: Integer);
+  var
+    K: Integer;
+  begin
+    for K := AFrom to ATo - 1 do
+    begin
+      Shown.Append(FText.Chars[K]);
+      Map.Add(TextIndex(K));
+      Styles.Add(FCharStyles[K]);
+    end;
+  end;
+
+begin
+  Shown := TStringBuilder.Create;
+  Map := TList<Integer>.Create;
+  Styles := TList<Integer>.Create;
+  try
+    Prev := 0;
+    for Cut in ACuts do
+    begin
+      P := EnsureRange(Cut.X, Prev, Length(FText));
+      Keep(Prev, P);
+      // The ellipsis in the style of the character before it.
+      Shown.Append(#$2026);
+      Map.Add(TextIndex(P));
+      if P > 0 then
+        Styles.Add(FCharStyles[P - 1])
+      else if FCharStyles <> nil then
+        Styles.Add(FCharStyles[0])
+      else
+        Styles.Add(0);
+      Prev := EnsureRange(Cut.Y, P, Length(FText));
+    end;
+    if AKeepRest then
+      Keep(Prev, Length(FText));
+    Map.Add(TextIndex(Length(FText)));
+    FMap := Map.ToArray;
+    SetText(Shown.ToString, Styles.ToArray);
+  finally
+    Shown.Free;
+    Map.Free;
+    Styles.Free;
+  end;
+end;
+
+/// <summary>With WordWrap, an ellipsis after the last line that fits the box when paragraphs after it are left out
+/// (Pango ellipsizes only a paragraph that does not fit; DirectWrite trims there too). True when FText changed: the
+/// caller makes a new layout. Under the Pango lock.</summary>
+function TFastPangoLayoutData.EllipsizeOmitted: Boolean;
+var
+  Iter: Pointer;
+  Line: PPangoLayoutLine;
+  LineStart, P, I: Integer;
+  Rest: Boolean;
+begin
+  Result := False;
+  if not FEllipsize or (FHeight < 0) or (pango_layout_is_ellipsized(FLayout) <> 0) then
+    Exit;
+  Iter := pango_layout_get_iter(FLayout);
+  repeat
+    Line := pango_layout_iter_get_line_readonly(Iter);
+  until pango_layout_iter_next_line(Iter) = 0;
+  pango_layout_iter_free(Iter);
+  if Line = nil then
+    Exit;
+  LineStart := FByteToChar[EnsureRange(Line.StartIndex, 0, High(FByteToChar))];
+  P := FByteToChar[EnsureRange(Line.StartIndex + Line.Length, 0, High(FByteToChar))];
+  // Nothing but white space and line breaks after the last line: nothing left out.
+  Rest := False;
+  for I := P to Length(FText) - 1 do
+    if FText.Chars[I] > ' ' then
+    begin
+      Rest := True;
+      Break;
+    end;
+  if not Rest then
+    Exit;
+  while (P > LineStart) and (FText.Chars[P - 1] <= ' ') do
+    Dec(P);
+  Shorten([TPoint.Create(P, Length(FText))], False);
+  Result := True;
+end;
+
 /// <summary>Word trimming, as DirectWrite trims: every line Pango ellipsized ends at the last word boundary before
-/// Pango's cut instead (where the line has one before it), without the white space before it, followed by an
-/// ellipsis; FText becomes that text (FMap maps it to the layout's). FLayout is the layout to look at; the caller
-/// makes a new one when FMap is set. Under the Pango lock.</summary>
-procedure TFastPangoLayoutData.TrimWords;
+/// Pango's cut instead (where the line has one before it; else after its first character), without the white space
+/// before it, followed by an ellipsis (Shorten). True when FText changed: the caller makes a new layout. Under the
+/// Pango lock.</summary>
+function TFastPangoLayoutData.TrimWords: Boolean;
 type
   TCut = record
     LineStart, CutStart, CutEnd: Integer;
@@ -1168,10 +1263,9 @@ var
   Run: PPangoGlyphItem;
   Line: PPangoLayoutLine;
   Attrs: PCardinal;
-  Count, I, N, P, Prev: Integer;
+  Count, I, N, P: Integer;
   CodePoints: TArray<Integer>;
-  Shown: TStringBuilder;
-  Map, Styles: TList<Integer>;
+  Pieces: TArray<TPoint>;
 
   function Attr(const AIndex: Integer): Cardinal;
   begin
@@ -1181,25 +1275,11 @@ var
       Result := 0;
   end;
 
-  procedure Keep(const AFrom, ATo: Integer);
-  var
-    K: Integer;
-  begin
-    for K := AFrom to ATo - 1 do
-    begin
-      Shown.Append(FText.Chars[K]);
-      Map.Add(K);
-      Styles.Add(FCharStyles[K]);
-    end;
-  end;
-
 begin
+  Result := False;
   if pango_layout_is_ellipsized(FLayout) = 0 then
     Exit;
   Cuts := TList<TCut>.Create;
-  Shown := TStringBuilder.Create;
-  Map := TList<Integer>.Create;
-  Styles := TList<Integer>.Create;
   try
     // The ellipsis runs: their items stand for the text left out.
     Iter := pango_layout_get_iter(FLayout);
@@ -1228,9 +1308,10 @@ begin
         Inc(N);
     end;
     CodePoints[Length(FText)] := N;
-    Prev := 0;
-    for Cut in Cuts do
+    SetLength(Pieces, Cuts.Count);
+    for I := 0 to Cuts.Count - 1 do
     begin
+      Cut := Cuts[I];
       P := Cut.CutStart;
       while (P > Cut.LineStart) and ((Attr(P) and LogAttrLineBreak = 0) or IsLowSurrogate(FText.Chars[P])) do
         Dec(P);
@@ -1243,26 +1324,15 @@ begin
       end;
       while (P > Cut.LineStart) and (Attr(P - 1) and LogAttrWhite <> 0) do
         Dec(P);
-      P := Max(P, Prev);
-      Keep(Prev, P);
-      Shown.Append(#$2026);
-      Map.Add(P);
-      if P > 0 then
-        Styles.Add(FCharStyles[P - 1])
-      else
-        Styles.Add(FCharStyles[Min(Cut.CutStart, High(FCharStyles))]);
-      Prev := Max(Cut.CutEnd, P);
+      Pieces[I] := TPoint.Create(P, Cut.CutEnd);
     end;
-    Keep(Prev, Length(FText));
-    Map.Add(Length(FText));
-    FMap := Map.ToArray;
-    SetText(Shown.ToString, Styles.ToArray);
   finally
     Cuts.Free;
-    Shown.Free;
-    Map.Free;
-    Styles.Free;
   end;
+  // The paragraphs after the cut: shown without WordWrap; with it, the lines that fit end at the cut (laid out
+  // again, they would make Pango ellipsize the last line once more).
+  Shorten(Pieces, FHeight < 0);
+  Result := True;
 end;
 
 /// <summary>The width Pango added to an ellipsis at the end of a line (it fills the line to the box's edge), in
@@ -1778,14 +1848,15 @@ begin
     TMonitor.Enter(GPangoLock);
     try
       D.FLayout := D.MakeLayout;
-      if Trimming = TTextTrimming.Word then
+      if D.EllipsizeOmitted then
       begin
-        D.TrimWords;
-        if D.FMap <> nil then
-        begin
-          g_object_unref(D.FLayout);
-          D.FLayout := D.MakeLayout;
-        end;
+        g_object_unref(D.FLayout);
+        D.FLayout := D.MakeLayout;
+      end;
+      if (Trimming = TTextTrimming.Word) and D.TrimWords then
+      begin
+        g_object_unref(D.FLayout);
+        D.FLayout := D.MakeLayout;
       end;
       pango_layout_get_extents(D.FLayout, @Ink, @Logical);
       // Lines as long as they are: Pango aligns them with the longest; the alignment moves that in the box.
