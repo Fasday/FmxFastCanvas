@@ -2,8 +2,8 @@ unit FastCanvas.DeviceVk;
 
 { The Vulkan device of FastCanvas (FastCanvasBackend = Vulkan): the loader, an instance (Vulkan 1.3, VK_KHR_surface
   and VK_KHR_win32_surface), the physical device (a discrete graphics card first, with a graphics queue family that
-  presents to windows), the logical device with dynamic rendering, synchronization2 and timeline semaphores, its
-  graphics queue and the device command table, and memory type lookup. Buffer device address, acceleration
+  presents to windows), the logical device with dynamic rendering, synchronization2 and timeline semaphores where it
+  has them, its graphics queue and the device command table, and memory type lookup. Buffer device address, acceleration
   structures and ray query with descriptor indexing are enabled too where the device has them (the ray-traced effects
   of the 3D context need them), and VK_KHR_present_mode_fifo_latest_ready.
 
