@@ -92,17 +92,22 @@ All settings are global variables, set before `Application.Initialize` unless no
 | Variable | Default | Meaning |
 |---|---|---|
 | `FastCanvasGeometryEngine` | `Native` (Windows), `Own` | Paths, their fill edges and stroke outlines: `Native` is Direct2D (Windows only; elsewhere it stands for `Own`), `Own` is FastCanvas's own engine (`FastCanvas.GeometryOwn`: no library; the default on Android and Linux), `Skia` is Skia (`FastCanvas.GeometrySkia`). Read when the first canvas is made. |
-| `FastCanvasTextEngine` | `Native` (Windows), `Skia` | Text layout and glyphs: `Native` is DirectWrite, `Skia` is Skia's paragraphs (`FastCanvas.TextSkia`: HarfBuzz shaping, the platform's font fallback; the only one on Android and Linux). `Own` is no text engine. Read by `InstallFastCanvas`. |
+| `FastCanvasTextEngine` | `Native` (Windows, Linux), `Skia` (Android) | Text layout and glyphs: `Native` is DirectWrite on Windows and Pango with FreeType on Linux (`FastCanvas.TextPango`, see "Android and Linux"), `Skia` is Skia's paragraphs (`FastCanvas.TextSkia`: HarfBuzz shaping, the platform's font fallback; the only one on Android). `Own` is no text engine (on Linux it stands for `Native`). Read by `InstallFastCanvas`. |
+| `FastPangoLightHinting` (`FastCanvas.TextPango`) | `False` | Linux: glyphs of the Pango engine hinted lightly (FreeType's light hinting, vertically only: the look of GTK's text with fontconfig's default `hintslight`); `False`: unhinted outlines, as Skia's. Set before the first text is drawn. |
 
-On Windows the other engines are linked only when the program uses their units (`FastCanvas.GeometryOwn`,
-`FastCanvas.GeometrySkia`, `FastCanvas.TextSkia`); the Skia ones then need `sk4d.dll` next to the executable. The own
-geometry engine strokes as Direct2D does (joins, the miter limit, caps, dash patterns and their places, curves
+On Windows and Linux the other engines are linked only when the program uses their units (`FastCanvas.GeometryOwn`,
+`FastCanvas.GeometrySkia`, `FastCanvas.TextSkia`); the Skia ones then need `sk4d.dll` (`libsk4d.so`) next to the
+executable. The own geometry engine strokes as Direct2D does (joins, the miter limit, caps, dash patterns and their
+places, curves
 flattened as densely): on the benchmark's scenes its screenshots differ from Direct2D's in 0.35 % of the pixels of
 `strokes`, 0.17 % of `paths` (antialiasing at curves and dash ends) and nowhere else, at the same or a higher frame
 rate (`BENCHMARKS.md`). Skia's geometry differs more (dash phase, curve flattening) and widens dashed strokes more
 slowly. Skia's text differs from DirectWrite's by a fraction of a pixel in line height (paragraphs drift by a pixel
 every few lines), its glyphs are unhinted outlines (DirectWrite's grayscale is about as soft), and FMX fonts added
-through `TFontManager` are not known to it.
+through `TFontManager` are not known to it. On Linux Skia's paragraphs are slow: about 80 ms to lay out a paragraph of
+190 characters, against 0.1 ms with Pango and 0.1 ms with Skia on Windows (`TextProbe --bench`, measured in WSL on the
+same PC; apparently every paragraph builder of `sk4d` makes a font collection of its own, whose fonts fontconfig then
+matches again).
 
 Functions: `FastCanvasSync` (wait until the render thread has executed everything recorded), `FastCanvasRenderBusyMs`,
 `FastCanvasDrawCalls`, `FastCanvasDeviceResets` (diagnostics), `FastCanvasSystemTextAntialias` (what `System` text
@@ -437,10 +442,11 @@ drawn without the ray-traced effects.
 
 ## Android and Linux
 
-There the canvas runs on its Vulkan back end, with FastCanvas's own geometry engine and Skia's text engine (Skia is
-part of Delphi's RTL: linked into the library on Android; on Linux `libsk4d.so` of `Redist\linux64` goes next to the
-program), and the Vulkan 3D context (`InstallFastContext3DVk`) draws `TViewport3D`, `TForm3D`, the effects and the
-ray-traced effects as on Windows. The search path needs `src\Canvas` and `third_party\pasvulkan\src` only.
+There the canvas runs on its Vulkan back end, with FastCanvas's own geometry engine, Skia's text engine on Android
+(Skia is part of Delphi's RTL, linked into the library) and the Pango text engine on Linux (the system's Pango,
+HarfBuzz, fontconfig and FreeType: no Skia), and the Vulkan 3D context (`InstallFastContext3DVk`) draws
+`TViewport3D`, `TForm3D`, the effects and the ray-traced effects as on Windows. The search path needs `src\Canvas`
+and `third_party\pasvulkan\src` only.
 
 ```pascal
 begin
@@ -489,7 +495,29 @@ Linux:
   runs through XWayland without `GDK_BACKEND=x11`. The canvas makes the form's drawing area a native window and
   presents to its X11 window (`VK_KHR_xlib_surface`, the XID and the display through GDK, loaded at run time).
 - Running it needs `libvulkan.so.1` and a Vulkan 1.1 driver with the extensions under "Requirements" (Mesa: radv,
-  anv, nvk; lavapipe on the CPU), GTK 3 (`libgtk-3.so.0`), and `libsk4d.so` next to the program.
+  anv, nvk; lavapipe on the CPU) and GTK 3 (`libgtk-3.so.0`), which brings the libraries of the text engine:
+  `libpango-1.0.so.0` and `libpangoft2-1.0.so.0` (Pango 1.44 or later), `libharfbuzz.so.0`, `libfontconfig.so.1`,
+  `libfreetype.so.6`, `libgobject-2.0.so.0`, `libglib-2.0.so.0` (loaded with `dlopen` at the first text layout; the
+  program does not link them, and an exception names what is missing). `libsk4d.so` (`Redist\linux64`, 26.7 MB)
+  goes next to the program only when it uses the Skia engines (`FastCanvas.GeometrySkia`, `FastCanvas.TextSkia`).
+- **Text on Linux** (`FastCanvas.TextPango`, the default; `FastCanvasTextEngine := TFastCanvasEngine.Skia` with the
+  unit `FastCanvas.TextSkia` takes Skia's): a `PangoLayout` per text layout on a PangoFT2 font map at 96 dpi with
+  pixel sizes (FMX's font sizes are pixels) and glyph positions in fractions of a pixel: HarfBuzz shaping (Arabic,
+  Hebrew, Devanagari, Thai, ligatures), bidi, line breaking, fontconfig's font fallback (as GTK applications on the
+  system show text; emoji in color from Noto Color Emoji's bitmaps). `WordWrap` wraps at words, inside words longer
+  than a line; without it lines are as long as they are and move by the alignment. Leading and trailing alignment
+  follow `RightToLeft`. Trimming: without `WordWrap` every line ellipsized at the box's width, with it the lines that
+  fit the box and an ellipsis on the last; `Character` is Pango's ellipsizing, `Word` cuts at the last word boundary
+  before it (a word longer than the line keeps its first character), as DirectWrite trims. Attributes (font and color
+  ranges), underline and strikeout, `PositionAtPoint`, `RegionForRange` (carets, bidi ranges) and `ConvertToPath`
+  work as with the other engines. Lines are as high as their fonts' ascent and descent, in fractions of a pixel
+  (Skia's paragraphs round them to whole pixels: on DejaVu Sans 14 px a line is 16.30 px with Pango, 16 with Skia).
+  Glyphs: FreeType (the engine's own `FT_Library`, a face per font file), unhinted outlines at quarter pixels as with
+  Skia, or lightly hinted (`FastPangoLightHinting`); rotated and large text from FreeType's outlines. Fonts added
+  through FMX's `TFontManager` are not known to it (as to Skia).
+- **Without Skia**: a Linux program that leaves the Skia units out runs without `libsk4d.so`
+  (`tools\build-linux.ps1 -Define FASTCANVAS_NOSKIA` builds the probes so and does not copy it). PortProbe: 15.5 MB
+  alone; with the Skia engines linked 16.0 MB and `libsk4d.so` (26.7 MB) next to it (MB of 2^20 bytes).
 - Building without PAServer: Delphi links Linux programs against a copy of the target's libraries, the platform SDK.
   `tools\make-linux-sdk.ps1 [-Distro Ubuntu-26.04] [-Sdk D:\LinuxSDK\ubuntu-26.04] [-Install]` makes one from a WSL
   distribution (the top-level files of `/usr/lib/x86_64-linux-gnu` and `/usr/lib/gcc/x86_64-linux-gnu/<n>`,
@@ -497,8 +525,9 @@ Linux:
   `-Install` first installs `libc6-dev` and `libgcc-<n>-dev`, which hold the startup objects and linker scripts):
   about 0.9 GB. Programs linked against it need that distribution's glibc or a later one (an SDK made from an older
   distribution reaches more systems).
-- `tools\build-linux.ps1 -Project <dpr> -SearchPath <dirs> [-Config Debug] [-Sdk <dir>]` builds with `dcclinux64`
-  into `bin\Linux64\<Config>\<name>` and copies `libsk4d.so` next to it; with a `.dproj` that has the Linux64 platform
+- `tools\build-linux.ps1 -Project <dpr> -SearchPath <dirs> [-Config Debug] [-Sdk <dir>] [-Define <names>]` builds
+  with `dcclinux64` into `bin\Linux64\<Config>\<name>` and copies `libsk4d.so` next to it (not with
+  `-Define FASTCANVAS_NOSKIA`); with a `.dproj` that has the Linux64 platform
   it runs msbuild instead (output where the project puts it). dcclinux64 links with LLVM's lld (`bin64\ld.lld.exe`, on
   the PATH) and is told about the SDK with `--syslibroot:<sdk>` (the linker's sysroot) and `--libpath:<dirs>`: Delphi's
   `lib\linux64\release` (`librtlhelper`), the SDK's `usr\lib\x86_64-linux-gnu` and `usr\lib\gcc\x86_64-linux-gnu\<n>`;
@@ -518,7 +547,11 @@ Linux:
   reflections, and FMX's effects, each pixel for pixel as Win64 on an RX 9070 XT outside the text (other fonts); with
   `GDK_SCALE=2`, with sizes changed from code, closed by the window manager and by itself, 2.5 minutes without memory
   growth after the caches fill; the validation layer (with synchronization validation, also with
-  `FASTCANVAS_VK_API=1.1` and `FASTCANVAS_VK_NOPUSH=1`) reports nothing. The benchmark is Windows-only.
+  `FASTCANVAS_VK_API=1.1` and `FASTCANVAS_VK_NOPUSH=1`) reports nothing. The benchmark is Windows-only. With the
+  Pango text engine (2026-10-14, Pango 1.57, FreeType 2.14): PortProbe built without Skia runs without `libsk4d.so`
+  and draws the same frame as with Skia's engines but for the text (glyphs a quarter pixel apart in places, lines a
+  fraction of a pixel taller); `src\Probe\TextProbe.dpr` (`tools\run-textprobe-linux.sh`) draws every case above with
+  either engine (see "Debugging").
 
 ## Threads
 
@@ -546,6 +579,8 @@ Linux:
   update or a GPU reset.
 - `FastCanvasCaptureWindow`: the frame a window presented last, as floats (checks of HDR output).
 - `ReportMemoryLeaksOnShutdown := True` in the program: FastCanvas frees everything it made at shutdown.
+- `tools\map-address.ps1 -Map <map> -Address <hex>`: the function of an address in a crash message of a Linux program
+  (the map file of LLVM's lld).
 - The benchmark runs on Vulkan with `--canvas=fcvk` (also `fcvkrt`, `fcvkao`, `fcvksoft`, `fcvkrefl` with ray-traced
   effects, `fcvksep` with FMX's stock 3D context, `fcvkskia` with the Skia geometry and text engines, `fcvkown` with the
   own geometry engine of Android and Linux).
