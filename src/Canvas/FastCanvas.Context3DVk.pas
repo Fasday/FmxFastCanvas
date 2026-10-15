@@ -19,7 +19,8 @@ unit FastCanvas.Context3DVk;
   FastCanvas.VkFmxShaders.inc), found by a hash of the GLSL source and of the Direct3D variables; their constants are
   laid out as for Direct3D (FastCanvas.Context3D), one uniform block per stage. Off Windows FMX ships no Direct3D
   sources: the table's copy of their variables gives the layout (ShaderLayout). A shader without SPIR-V there (an
-  application's own shader) raises EContext3DException: not supported. One descriptor set layout, pushed per draw
+  application's own shader) raises EContext3DException: not supported, unless it has a SPIR-V source of its own (raw
+  draws, below). One descriptor set layout, pushed per draw
   (VK_KHR_push_descriptor; without it written into a set of the recording context's pools and bound): binding 0 the
   vertex constants, 1 the pixel constants, 2..9 the texture units with their samplers. Clip space as
   with Direct3D: the viewport flips y (negative height), FMX's projection has Direct3D's depth range.
@@ -36,6 +37,14 @@ unit FastCanvas.Context3DVk;
   and the stencil unless a later scene reads them (TFastContext3DVk.FKeep), so a tiler keeps them in tile memory;
   else it stores them as before, and the scene's end resolves them in a rendering instance of its own (ResolvePass).
   A scene holds the canvas's chunk (FastChunkHold) so that its commands reach the render thread together.
+
+  Raw draws (FastCanvas.Context3D: DrawRaw, CopyToTexture, ReadTarget, TFastTexture, TFastBuffer): the shaders' SPIR-V
+  sources (FastShaderArchSpirV, dxc of the HLSL the Direct3D contexts take as DXBC), their resources moved to a
+  descriptor set of their own when they are loaded (LoadRawSpirV: b0 of each stage at BindingVS / BindingPS, tN at
+  RawBindingImages + N, sN at RawBindingSamplers + N); pipelines cached by shaders, layout and the whole raw state,
+  samplers by their description; raw textures are TTextureVk (cubes of six layers), raw buffers TRawBufferVk; uploads,
+  writes and copies are commands in program order (outside rendering, with their barriers). A context that draws raw
+  keeps its depth in memory.
 
   Ray-traced effects (RayTracing, FastContext3DRayTracing: shadows, soft shadows, ambient occlusion, reflections) with
   ray queries over the scene's acceleration structures (FastCanvas.Context3DVk.Ray.inc), where the device has them

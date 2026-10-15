@@ -20,7 +20,7 @@ FMX itself (forms, controls, styles, layout, animations) is unchanged.
 | `FastCanvas.Hdr`, `Shaders/FastOutput.hlsl` | HDR output: the setting, what the display of a window can show (DXGI outputs, SDR white level), the pass that turns a window's frame into scRGB. |
 | `FastCanvas.Service` | Installs the canvas class and the 3D context class into FMX (`IFMXCanvasService`, `IFMXContextService`). |
 | `FastCanvas.Bridge` | What a 3D context needs from the canvas: device, lock, bitmap textures, a way into the command stream and a look at the commands ahead of the running one, a hold on the chunk. |
-| `FastCanvas.Context3D` | The part of the 3D contexts that does not depend on the API: shaders and their variables, pipeline state, vertex layouts, the settings of the ray-traced effects. |
+| `FastCanvas.Context3D` | The part of the 3D contexts that does not depend on the API: shaders and their variables, pipeline state, vertex layouts, the settings of the ray-traced effects, the types of raw draws (`TFastRawDraw`, `TFastRawState`, `TFastSampler`, `TFastTexture`, `TFastBuffer`). |
 | `FastCanvas.Context3D11`, `FastCanvas.Context3D12`, `FastCanvas.Context3DVk` | The 3D contexts (`TContext3D`) for `TViewport3D`, `TForm3D` and the effects. |
 | `FastCanvas.Context3D12.Ray.inc`, `Shaders/FastRay.hlsl` → `FastCanvas.RayShaders.inc` | Ray-traced effects (DXR 1.1, shader model 6.5). |
 | `FastCanvas.DeviceVk` | The Vulkan device (1.1 and up; dynamic rendering, synchronization2 and timeline semaphores where it has them, core or extension): the loader and surface extension of the platform, instance, physical and logical device and their optional features, the render passes of devices without dynamic rendering, the memory suballocator, the queue lock. |
@@ -471,6 +471,20 @@ own for each back end, on the canvas's device:
   constants are copied and bound as `b0`; textures and samplers as tables of eight. `TFastTexture` and `TFastBuffer`
   are objects of the installed context class; their uploads and writes are commands too, so they run in program order
   with the draws. FMX's cached state is marked dirty after a raw draw, so the next `DrawPrimitives` sets it again.
+- **Raw draws on Vulkan**: a shader's SPIR-V source (dxc of the same HLSL, `FastShaderArchSpirV`) is read once when the
+  shader is made (`LoadRawSpirV`): its resources are moved to a descriptor set layout of the raw draws (binding 0 and
+  1 the constant buffers of the stages, 16..23 the textures as sampled images, 32..39 the samplers; pushed, or a set
+  of the recording context's pools), and the module tells the vertex inputs' locations by dxc's names
+  (`in.var.<semantic><index>`), the uniform blocks' sizes and the cube units. Pipelines are cached by a hash of shaders,
+  layout, stride, the whole `TFastRawState`, topology, samples and target format, samplers by their description; both
+  are made on the main thread when the draw is recorded. The command carries the pipeline, the eight textures (the
+  white 2D or cube texture where the shader declares one and none was given), the samplers, the geometry or the
+  buffers, and the constants; the render thread binds them in the target's rendering instance, uploading the
+  constants zero-padded to the blocks. Textures are `TTextureVk`s of six layers for cubes, zeroed before their first
+  use (block-compressed ones by a copy of zeros). Buffer writes are copies outside rendering between two memory
+  barriers (vertex input before, the copy's writes for vertex input after); uploads and copies likewise, so they end
+  the rendering instance where they come. A raw draw counts as a draw for the look ahead (`EndsInPass`). The depth of
+  a context that drew raw is not transient and is stored at every scene's end (copies and reads after the scene).
 
 ### Ray-traced effects (Direct3D 12 with DXR 1.1, Vulkan with ray queries)
 

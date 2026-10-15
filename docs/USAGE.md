@@ -378,9 +378,10 @@ through `TFastContext3D` (`FastCanvas.Context3D`) instead, on the context of a `
 target (`TContextManager.CreateFromTexture`), between its `BeginScene` and `EndScene`:
 
 - `DrawRaw(const TFastRawDraw)`: one indexed draw (triangles, lines or points) with
-  - the program's shaders: `TContextShader`s with `DX11` / `DX10` bytecode (shader model 4 or 5, e.g. from `fxc`),
-    their constants in `cbuffer` register `b0` (`VSConstants` / `PSConstants`, `VSConstantSize` / `PSConstantSize`
-    bytes, multiples of 16), textures at `t0`–`t7` with their samplers at `s0`–`s7`;
+  - the program's shaders: `TContextShader`s with `DX11` / `DX10` bytecode (shader model 4 or 5, e.g. from `fxc`) and
+    SPIR-V for Vulkan (see "Shaders for every back end" below), their constants in `cbuffer` register `b0`
+    (`VSConstants` / `PSConstants`, `VSConstantSize` / `PSConstantSize` bytes, multiples of 16), textures at
+    `t0`–`t7` with their samplers at `s0`–`s7`;
   - its vertex layout (`TFastVertexLayout.Create` of `TFastVertexElement`s: semantic, index, `DXGI_FORMAT`, byte
     offset) and `Stride`;
   - geometry from memory (`Vertices` / `VertexCount`, `Indices`: copied when recorded) or from `TFastBuffer`s
@@ -401,11 +402,52 @@ target (`TContextManager.CreateFromTexture`), between its `BeginScene` and `EndS
   blocks). `TFastBuffer`: a vertex or index buffer; `Write` of a byte range. Uploads and writes are recorded in
   program order with the draws: a write after a draw does not change what that draw reads.
 
-Raw draws need an installed context class (`InstallFastContext3D11` / `InstallFastContext3D12`); textures and
-buffers belong to its device. FMX's own state (`SetContextState`, the material of the next `DrawPrimitives`) is not
-changed by them, so FMX objects and raw draws can be mixed in one scene. After a device loss textures and buffers get
-new, zeroed GPU memory and a higher `Generation`: upload them again. Pipeline states are made once per combination of
-shaders, layout, state, topology and target format and kept.
+Raw draws need an installed context class (`InstallFastContext3D11` / `InstallFastContext3D12` /
+`InstallFastContext3DVk`); textures and buffers belong to its device. FMX's own state (`SetContextState`, the material
+of the next `DrawPrimitives`) is not changed by them, so FMX objects and raw draws can be mixed in one scene. After a
+device loss textures and buffers get new, zeroed GPU memory and a higher `Generation`: upload them again. Pipeline
+states are made once per combination of shaders, layout, state, topology and target format and kept.
+
+**Shaders for every back end.** A raw-draw shader is one `TContextShader` with a source per back end, all compiled
+from the same HLSL and sharing one list of variables (the uniform layout: a `Vector` variable over the constant
+buffer's bytes, `Texture` variables at the units the pixel shader samples):
+
+```pascal
+Shader.LoadFromData('my.ps', TContextShaderKind.PixelShader, '', [
+  TContextShaderSource.Create(TContextShaderArch.DX11, Dxbc, Vars),     // Direct3D 11 and 12: fxc, ps_4_0 / ps_5_0
+  TContextShaderSource.Create(FastShaderArchSpirV, SpirV, Vars)]);      // Vulkan: dxc -spirv
+```
+
+- **Direct3D 11 and 12** take the `DX11` (else `DX10`) source: DXBC of shader model 4 or 5.
+- **Vulkan** takes the source of `FastShaderArchSpirV` (FMX has no arch for SPIR-V; none of its contexts takes a source
+  of this one) whose code is SPIR-V (`FastSpirVSource`), made of the same HLSL by the Vulkan SDK's dxc:
+  `dxc -spirv -fspv-target-env=vulkan1.1 -fvk-use-dx-layout -fvk-t-shift 16 0 -fvk-s-shift 32 0 -T ps_6_0 -E main`
+  (`-fvk-use-dx-layout`: the constants at the offsets of Direct3D's packing, so the same bytes go to every back end;
+  `-fvk-use-dx-position-w` where a pixel shader reads `SV_Position.w`). The context moves the module's resources to its
+  own descriptor set when it loads it: the constant buffer (`b0` or `$Globals`) of a vertex shader to binding 0, of a
+  pixel shader to binding 1, texture `tN` to 16 + N, sampler `sN` to 32 + N (with or without the shifts), all in set 0.
+  It finds a vertex shader's inputs by the names dxc gives them (`in.var.TEXCOORD1`: semantic and index of the layout's
+  elements), the size of a uniform block and the texture units declared as cubes in the module. Textures and samplers
+  apart (`Texture2D` / `TextureCube` with `SamplerState`), one constant buffer per stage, no other resources; points
+  need a vertex shader that writes `PointSize` (`[[vk::builtin("PointSize")]]`), as Vulkan has no default size. The
+  viewport flips y as Direct3D's does: the same clip space, winding, `SV_Position` and depth range.
+- Off Windows FMX ships no Direct3D sources: the variables of the SPIR-V source give the layout there.
+- On Vulkan the context draws raw into its target with dynamic rendering (or render passes) like FMX's draws; a
+  buffer write, a texture upload or a copy ends the rendering instance (copies run outside it), and a context that
+  draws raw keeps its depth and stencil in memory (not transient) and stores them at every scene's end, so they can be
+  copied and read. Block-compressed textures are decoded on the CPU where the device has no BC formats (phones; RGBA8,
+  R8 or RG8 then); a sampler's border color is the nearest of transparent black, opaque black and opaque white, the
+  address mode "mirror once" mirrors; depth bias clamps where the device has `depthBiasClamp`, wireframe draws where it
+  has `fillModeNonSolid`.
+
+RawProbe, a test program of the development repository, checks all of it against values computed on the CPU (8220
+checks: each context passes them all and draws the same pixels). The DOOM 3 BFG port's renderer back end draws with raw
+draws on all three (2026-10-15, RX 9070 XT: its 86 renderprogs as DXBC and SPIR-V of one patched source; on Vulkan its
+back end tests pass and its view of `mars_city1` differs from Direct3D 12's by 0.4 levels on average, at 0.5 % of the
+pixels by more than 24; a fixed view of `mars_city1` at 1280 x 720 differs at 0.05 % of the pixels by at most 3 levels
+and takes 0.400 ms a frame for the back end, the GPU and the present, Direct3D 12 0.402 ms, Direct3D 11 0.548 ms, and
+1.88 ms against 1.77 ms with the game's front end; no message of the validation layer, synchronization validation
+included).
 
 A program without FMX forms (a console test) shuts FastCanvas down as FMX's `FinalizeForms` does:
 `TContextManager.UnInitialize` and `TCanvasManager.UnInitialize` after its last context is freed.
@@ -444,7 +486,8 @@ but for a few pixels of strokes), at about its speed (`BENCHMARKS.md`). It is th
 - **The 3D context** runs FMX's own shaders (materials, filters, effects, transitions) as SPIR-V made from the GLSL
   sources FMX ships, with the constants laid out as for Direct3D: `tools\compile-fmx-shaders-vk.ps1` writes
   `FastCanvas.VkFmxShaders.inc` (run it again, with the Vulkan SDK, when a Delphi update changes FMX's shaders). A
-  shader FMX does not ship (an application's `TContextShader` or material) raises `EContext3DException`. The descriptors
+  shader FMX does not ship (an application's `TContextShader` or material) raises `EContext3DException`, unless it has
+  a SPIR-V source for raw draws (see "Raw draws (3D contexts)"). The descriptors
   of a draw are pushed (`VK_KHR_push_descriptor`), or written into a set of the canvas's descriptor pools where the
   device lacks that extension (`FASTCANVAS_VK_NOPUSH=1` takes that path on any GPU). The constant layout of each
   shader (the variables of its Direct3D source: offsets, sizes, texture units) is kept in the generated include with
@@ -479,8 +522,8 @@ but for a few pixels of strokes), at about its speed (`BENCHMARKS.md`). It is th
   dual-source blending (`dualSrcBlend`, which that Mali lacks) ClearType text is drawn grayscale.
 
 Not on Vulkan: HDR output (`FastCanvasHdr`, `Hdr`, `DrawIntensity`), DirectComposition, DLSS, the application ray
-passes (`RayScene`, `RayDispatch`, `RayDraw` and their types are Direct3D 12 only), application shaders in the 3D
-context, `D2DText`. Win32 programs run on Vulkan too, but AMD's 32-bit driver has no ray queries: their 3D scenes are
+passes (`RayScene`, `RayDispatch`, `RayDraw` and their types are Direct3D 12 only), application shaders in FMX's
+materials (`DrawPrimitives`; raw draws take them with a SPIR-V source), `D2DText`. Win32 programs run on Vulkan too, but AMD's 32-bit driver has no ray queries: their 3D scenes are
 drawn without the ray-traced effects.
 
 ## Android and Linux
@@ -770,7 +813,8 @@ is there the canvas takes its windows from it. Without it (FMX's GTK platform) n
   rendering, synchronization2 or push descriptors on any device, `FASTCANVAS_VK_NOTIMELINE=1`: no timeline semaphores
   (fences): the Vulkan 1.1 core path of phones on a desktop GPU, ray-traced effects included; with
   `FASTCANVAS_VK_API=1.1` as well it is the path of such a phone. `FASTCANVAS_VK_STATS` also notes the features in
-  use and the number of render passes.
+  use and the number of render passes. `FASTCANVAS_VK_NOBC=1`: the device's BC formats stay off, so raw textures of
+  them are decoded on the CPU (the path of phones).
 - `FastCanvasSimulateDeviceLoss`: the next scene treats the device as lost and recreates everything, as after a driver
   update or a GPU reset.
 - `FastCanvasCaptureWindow`: the frame a window presented last, as floats (checks of HDR output).
@@ -794,5 +838,5 @@ is there the canvas takes its windows from it. Without it (FMX's GTK platform) n
   objects.
 - Partial frames are Direct3D 12 and Vulkan only.
 - HDR output is Direct3D 12 only, and not for transparent forms.
-- On Vulkan the 3D context runs only FMX's own shaders, and there are no application ray passes and no DLSS (see
-  "Vulkan back end").
+- On Vulkan the 3D context's materials run only FMX's own shaders (raw draws take an application's with a SPIR-V
+  source), and there are no application ray passes and no DLSS (see "Vulkan back end").
