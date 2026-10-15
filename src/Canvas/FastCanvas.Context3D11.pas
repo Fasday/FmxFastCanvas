@@ -1464,6 +1464,12 @@ begin
   Box.right := X + AWidth;
   Box.bottom := Y + AHeight;
   Box.back := 1;
+  // Compressed formats: whole blocks (a level smaller than a block is one block; else nothing is written).
+  if FastTextureCompressed(ATexture.Format) then
+  begin
+    Box.right := (Box.right + 3) and not 3;
+    Box.bottom := (Box.bottom + 3) and not 3;
+  end;
   Src := AData;
   // UpdateSubresource of a deferred context without the driver's command lists offsets the source by the box
   // (documented workaround: the source pointer goes back by as much).
