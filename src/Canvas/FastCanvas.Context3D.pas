@@ -119,7 +119,8 @@ type
   end;
 
   { Raw draws: the 3D pipeline of Direct3D for programs that bring their own shaders, vertex formats and states
-    (USAGE.md, "Raw draws"). The enumerations have the values of Direct3D 11 and 12 (the same in both). }
+    (USAGE.md, "Raw draws"). The enumerations have the values of Direct3D 11 and 12 (the same in both); the Vulkan
+    context maps them. }
 
   TFastBlend = (Zero = 1, One = 2, SrcColor = 3, InvSrcColor = 4, SrcAlpha = 5, InvSrcAlpha = 6, DestAlpha = 7,
     InvDestAlpha = 8, DestColor = 9, InvDestColor = 10);
@@ -163,7 +164,8 @@ type
   end;
 
   /// <summary>A sampler of a raw draw: Filter is a D3D11_FILTER / D3D12_FILTER value, the address modes D3D's
-  /// (1 wrap, 2 mirror, 3 clamp, 4 border).</summary>
+  /// (1 wrap, 2 mirror, 3 clamp, 4 border). Vulkan: the border color is the nearest of transparent black, opaque
+  /// black and opaque white; comparison filters sample as the plain ones.</summary>
   TFastSampler = packed record
     Filter: Cardinal;
     AddressU, AddressV, AddressW: Byte;
@@ -180,8 +182,8 @@ type
   TFastTextureFormat = (RGBA8, BGRA8, R8, RG8, R16, RG16, RGBA16F, RGBA32F, BC1, BC2, BC3, BC4, BC5, Depth24);
 
   /// <summary>A texture for raw draws: 2D or cube, any of TFastTextureFormat, with explicit mip levels. Its GPU memory
-  /// belongs to the installed 3D context (InstallFastContext3D11 / 12). Upload is recorded in program order with the
-  /// draws (main thread, as the scenes).</summary>
+  /// belongs to the installed 3D context (InstallFastContext3D11 / 12 / Vk). Upload is recorded in program order with
+  /// the draws (main thread, as the scenes).</summary>
   TFastTexture = class
   private
     FKind: TFastTextureKind;
@@ -229,8 +231,9 @@ type
     property Generation: Integer read GetGeneration;
   end;
 
-  /// <summary>A draw with the program's shaders (TContextShader with DX11 / DX10 bytecode: their constant buffers at
-  /// b0, textures at tN with their samplers at sN), vertex layout and state, between BeginScene and EndScene.
+  /// <summary>A draw with the program's shaders (TContextShader with DX11 / DX10 bytecode for Direct3D and a SPIR-V
+  /// source (FastShaderArchSpirV) for Vulkan, from the same HLSL: their constant buffers at b0, textures at tN with
+  /// their samplers at sN), vertex layout and state, between BeginScene and EndScene.
   /// Geometry from memory (Vertices / Indices, copied when recorded) or from TFastBuffers (the offsets in bytes).
   /// Rectangles in pixels of the target, top-left origin; an empty Scissor clips nothing, an empty Viewport is the
   /// whole target.</summary>
@@ -336,7 +339,7 @@ type
     /// top first.</summary>
     procedure ReadTarget(const ARect: TRect; const AKind: TFastReadKind; const ADest: Pointer;
       const APitch: Integer); virtual; abstract;
-    /// <summary>The context class installed last (InstallFastContext3D11 / 12); raw draws need one.</summary>
+    /// <summary>The context class installed last (InstallFastContext3D11 / 12 / Vk); raw draws need one.</summary>
     class function Installed: TContextClass;
     /// <summary>Device of the installed class: the objects of TFastTexture and TFastBuffer.</summary>
     class function NewTextureObject(const ATexture: TFastTexture): IInterface; virtual; abstract;
@@ -352,6 +355,13 @@ type
   end;
 
   TFastContext3DClass = class of TFastContext3D;
+
+const
+  /// <summary>The arch of a raw-draw shader's SPIR-V source (TContextShaderSource) for TFastContext3DVk. FMX has no
+  /// arch for SPIR-V and none of its own contexts takes a source of this one (TContextShaderSource.IsDefined is False
+  /// for it); TFastContext3DVk takes the source whose code starts with SPIR-V's magic number.</summary>
+  FastShaderArchSpirV = TContextShaderArch.Undefined;
+  FastSpirVMagic = Cardinal($07230203);
 
 var
   /// <summary>Ray-traced effects every new 3D context that traces rays starts with (TViewport3D, TForm3D, filters).
@@ -371,6 +381,9 @@ function FastTextureCompressed(const AFormat: TFastTextureFormat): Boolean;
 /// <summary>DXGI_FORMAT of a raw texture format: the resource format (Depth24: R24G8_TYPELESS) and the format of its
 /// shader view (Depth24: R24_UNORM_X8_TYPELESS).</summary>
 function FastTextureDxgiFormat(const AFormat: TFastTextureFormat; const AView: Boolean): Integer;
+/// <summary>The SPIR-V source of a shader (of FastShaderArchSpirV, its code starting with SPIR-V's magic number);
+/// False without one.</summary>
+function FastSpirVSource(const AShader: TContextShader; out ASource: TContextShaderSource): Boolean;
 
 /// <summary>DXGI_FORMAT value of a pixel format, 0 when the format has no texture equivalent.</summary>
 function FastDxgiFormat(const AFormat: TPixelFormat): Integer;
@@ -514,6 +527,13 @@ begin
   end;
 end;
 
+function FastSpirVSource(const AShader: TContextShader; out ASource: TContextShaderSource): Boolean;
+begin
+  ASource := AShader.GetSourceByArch(FastShaderArchSpirV);
+  Result := (Length(ASource.Code) >= 20) and ((Length(ASource.Code) and 3) = 0) and
+    (PCardinal(@ASource.Code[0])^ = FastSpirVMagic);
+end;
+
 { TFastVertexLayout }
 
 class function TFastVertexLayout.Create(const AElements: array of TFastVertexElement): TFastVertexLayout;
@@ -609,7 +629,7 @@ begin
     if (FNative = nil) or (FDeviceGen <> TFastContext3D.FDeviceGen) then
     begin
       if TFastContext3D.FInstalled = nil then
-        raise EContext3DException.Create('FastContext3D: raw draws need InstallFastContext3D11 or 12');
+        raise EContext3DException.Create('FastContext3D: raw draws need InstallFastContext3D11, 12 or Vk');
       FNative := nil;
       try
         FNative := TFastContext3DClass(TFastContext3D.FInstalled).NewTextureObject(Self);
@@ -690,7 +710,7 @@ begin
     if (FNative = nil) or (FDeviceGen <> TFastContext3D.FDeviceGen) then
     begin
       if TFastContext3D.FInstalled = nil then
-        raise EContext3DException.Create('FastContext3D: raw draws need InstallFastContext3D11 or 12');
+        raise EContext3DException.Create('FastContext3D: raw draws need InstallFastContext3D11, 12 or Vk');
       FNative := nil;
       try
         FNative := TFastContext3DClass(TFastContext3D.FInstalled).NewBufferObject(Self);

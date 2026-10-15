@@ -468,9 +468,9 @@ own for each back end, on the canvas's device:
   the pipeline state object (or the D3D11 state objects) cached by a hash of shaders, layout, state, topology, sample
   count and target format; geometry from memory is copied into the command and uploaded by the render thread
   (Direct3D 11: into a dynamic ring buffer of the deferred context), from a `TFastBuffer` it is bound in place; the
-  constants are copied and bound as `b0`; textures and samplers as tables of eight. `TFastTexture` and `TFastBuffer` are objects of the installed context class; their
-  uploads and writes are commands too, so they run in program order with the draws. FMX's cached state is marked dirty
-  after a raw draw, so the next `DrawPrimitives` sets it again.
+  constants are copied and bound as `b0`; textures and samplers as tables of eight. `TFastTexture` and `TFastBuffer`
+  are objects of the installed context class; their uploads and writes are commands too, so they run in program order
+  with the draws. FMX's cached state is marked dirty after a raw draw, so the next `DrawPrimitives` sets it again.
 
 ### Ray-traced effects (Direct3D 12 with DXR 1.1, Vulkan with ray queries)
 
