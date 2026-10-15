@@ -348,6 +348,8 @@ type
       out AArea: Single): Boolean;
     /// <summary>Device: draws the pending instances with the bound slot textures (uploads the tables first).</summary>
     procedure DrawPending; virtual; abstract;
+    /// <summary>Drops the pending instances without drawing them (after DrawPending failed).</summary>
+    procedure DiscardPending; virtual;
     /// <summary>Device: the staged edges (FEdgeLo..FEdgeHi from FEdgeData[0]) into the edge table; then resets the
     /// range.</summary>
     procedure UploadEdgeRange; virtual; abstract;
@@ -829,10 +831,25 @@ procedure TGpuRenderer.Flush;
 var
   I: Integer;
 begin
-  DrawPending;
-  for I := 0 to FSlotCount - 1 do
-    FSlotTex[I] := nil;
-  FSlotCount := 0;
+  try
+    try
+      DrawPending;
+    except
+      // Drawn by the next flush, instances that failed would fail again (every frame after one fault) or land on
+      // another target.
+      DiscardPending;
+      raise;
+    end;
+  finally
+    for I := 0 to FSlotCount - 1 do
+      FSlotTex[I] := nil;
+    FSlotCount := 0;
+  end;
+end;
+
+procedure TGpuRenderer.DiscardPending;
+begin
+  FPendingCount := 0;
 end;
 
 procedure TGpuRenderer.SetClip(const AIndex: Integer; const AClip: TGpuClip);

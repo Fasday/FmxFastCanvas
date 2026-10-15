@@ -751,6 +751,7 @@ type
     function DescriptorSet: TVkDescriptorSet;
   protected
     procedure DrawPending; override;
+    procedure DiscardPending; override;
     procedure UploadEdgeRange; override;
     procedure CreateEdgeTable(const ACapacity: Integer); override;
   public
@@ -5313,6 +5314,14 @@ begin
   end;
   FRunStopMesh := False;
   FPendingCount := 0;
+  FMeshRefCount := 0;
+  FMeshPieceCount := 0;
+end;
+
+procedure TGpuVkRenderer.DiscardPending;
+begin
+  inherited;
+  FRunStopMesh := False;
   FMeshRefCount := 0;
   FMeshPieceCount := 0;
 end;

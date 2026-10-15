@@ -4872,6 +4872,22 @@ begin
   end;
   GPlayNext := nil;
   GPlayEnd := nil;
+  // The chunk keeps the bitmaps of its commands alive until it has run (TRenderChunk.KeepAlive), and a chunk may end
+  // in the middle of a frame (full, or handed over for a wait of the main thread: TBitmap.Map in a paint): what is
+  // pending is drawn now, while its textures are alive, and the texture slots are freed. (Until 2026-10-15 the next
+  // chunk drew it: a bitmap drawn, then freed after a Map in the same paint was read after it was freed.)
+  try
+    LeaveD2D;
+    FGpu.Flush;
+  except
+    on E: EAbort do
+      ;
+    on E: Exception do
+      if DeviceGone then
+        MarkDeviceLost
+      else
+        GQueue.ReportError(Format('%s: %s (end of a chunk)', [E.ClassName, E.Message]));
+  end;
 end;
 
 procedure PlayStream(const AData: PByte; const ASize: Integer);

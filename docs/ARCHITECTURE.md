@@ -100,7 +100,9 @@ nothing is drawn on the main thread, and no driver is called there. `EndScene` o
 thread, which executes chunks in submission order, so the stream order is the program order: a bitmap drawn into and
 then drawn onto a form needs no synchronization. The main thread records frame N + 1 while the render thread draws
 frame N (`FastCanvasFramesInFlight`). Objects that commands refer to (bitmaps, text layouts) are kept alive by the
-chunk until it has run.
+chunk until it has run, so the renderer draws what is pending at the end of every chunk: a chunk may end in the middle
+of a frame (full, or handed over for a wait such as `TBitmap.Map` in a paint), and a bitmap drawn before it may be
+freed right after.
 
 Waits of the main thread (a frame in flight, `TBitmap.Map`) dispatch messages sent to its windows and nothing else,
 so a wait inside a paint does not re-enter FMX. Without a render thread (`FastCanvasRenderThread := False`) the same
