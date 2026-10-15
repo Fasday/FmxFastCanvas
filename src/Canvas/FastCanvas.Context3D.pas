@@ -83,7 +83,153 @@ type
   TFastVertexLayout = record
     Elements: TArray<TFastVertexElement>;
     Hash: UInt64;
+    /// <summary>A layout of the given elements (raw draws: any DXGI formats and semantics), with its hash.</summary>
+    class function Create(const AElements: array of TFastVertexElement): TFastVertexLayout; static;
   end;
+
+  { Raw draws: the 3D pipeline of Direct3D for programs that bring their own shaders, vertex formats and states
+    (USAGE.md, "Raw draws"). The enumerations have the values of Direct3D 11 and 12 (the same in both). }
+
+  TFastBlend = (Zero = 1, One = 2, SrcColor = 3, InvSrcColor = 4, SrcAlpha = 5, InvSrcAlpha = 6, DestAlpha = 7,
+    InvDestAlpha = 8, DestColor = 9, InvDestColor = 10);
+  TFastBlendOp = (Add = 1, Subtract = 2, RevSubtract = 3, Min = 4, Max = 5);
+  TFastCompare = (Never = 1, Less = 2, Equal = 3, LessEqual = 4, Greater = 5, NotEqual = 6, GreaterEqual = 7,
+    Always = 8);
+  TFastStencilOp = (Keep = 1, Zero = 2, Replace = 3, IncrSat = 4, DecrSat = 5, Invert = 6, Incr = 7, Decr = 8);
+  /// <summary>The faces that are not drawn.</summary>
+  TFastCullMode = (None = 1, Front = 2, Back = 3);
+
+  TFastStencilFace = packed record
+    Fail, DepthFail, Pass: TFastStencilOp;
+    Func: TFastCompare;
+  end;
+
+  /// <summary>Blend, depth-stencil and rasterizer state of a raw draw. Start from Default (no blending, all channels
+  /// written, depth test LessEqual with writes, no stencil, no culling, clockwise front faces).</summary>
+  TFastRawState = packed record
+    BlendEnable: Boolean;
+    SrcBlend, DestBlend: TFastBlend;
+    BlendOp: TFastBlendOp;
+    SrcBlendAlpha, DestBlendAlpha: TFastBlend;
+    BlendOpAlpha: TFastBlendOp;
+    /// <summary>Bit 0 red, 1 green, 2 blue, 3 alpha.</summary>
+    WriteMask: Byte;
+    DepthEnable: Boolean;
+    DepthWrite: Boolean;
+    DepthFunc: TFastCompare;
+    StencilEnable: Boolean;
+    StencilReadMask, StencilWriteMask: Byte;
+    FrontFace, BackFace: TFastStencilFace;
+    Cull: TFastCullMode;
+    Wireframe: Boolean;
+    FrontCounterClockwise: Boolean;
+    Pad: Byte;
+    /// <summary>Added to the depth of the pixels in units of the depth buffer's resolution (D24: 2^-24).</summary>
+    DepthBias: Integer;
+    SlopeScaledDepthBias: Single;
+    DepthBiasClamp: Single;
+    class function Default: TFastRawState; static;
+  end;
+
+  /// <summary>A sampler of a raw draw: Filter is a D3D11_FILTER / D3D12_FILTER value, the address modes D3D's
+  /// (1 wrap, 2 mirror, 3 clamp, 4 border).</summary>
+  TFastSampler = packed record
+    Filter: Cardinal;
+    AddressU, AddressV, AddressW: Byte;
+    MaxAnisotropy: Byte;
+    MipLODBias, MinLOD, MaxLOD: Single;
+    BorderColor: array[0..3] of Single;
+    /// <summary>Trilinear, wrapping, all mip levels.</summary>
+    class function Default: TFastSampler; static;
+  end;
+
+  TFastTextureKind = (Texture2D, Cube);
+  /// <summary>Texture formats of raw draws. Depth24: a copy of a depth buffer (CopyToTexture), sampled as its depth
+  /// (R24, 0..1).</summary>
+  TFastTextureFormat = (RGBA8, BGRA8, R8, RG8, R16, RG16, RGBA16F, RGBA32F, BC1, BC2, BC3, BC4, BC5, Depth24);
+
+  /// <summary>A texture for raw draws: 2D or cube, any of TFastTextureFormat, with explicit mip levels. Its GPU memory
+  /// belongs to the installed 3D context (InstallFastContext3D11 / 12). Upload is recorded in program order with the
+  /// draws (main thread, as the scenes).</summary>
+  TFastTexture = class
+  private
+    FKind: TFastTextureKind;
+    FFormat: TFastTextureFormat;
+    FWidth, FHeight, FMips: Integer;
+    FNative: IInterface;
+    FDeviceGen: Integer;
+    FGeneration: Integer;
+    function GetGeneration: Integer;
+  public
+    constructor Create(const AKind: TFastTextureKind; const AFormat: TFastTextureFormat;
+      const AWidth, AHeight, AMips: Integer);
+    destructor Destroy; override;
+    /// <summary>Pixels into a rectangle of a mip level of a face (0 for 2D; cube faces +X, -X, +Y, -Y, +Z, -Z).
+    /// Compressed formats: blocks of 4 x 4 pixels, X and Y multiples of 4, ARowPitch the bytes of a row of blocks.
+    /// </summary>
+    procedure Upload(const AFace, AMip, X, Y, AWidth, AHeight: Integer; const AData: Pointer; const ARowPitch: Integer);
+    /// <summary>The object of the installed context (nil without a device right now).</summary>
+    function Native: IInterface;
+    property Kind: TFastTextureKind read FKind;
+    property Format: TFastTextureFormat read FFormat;
+    property Width: Integer read FWidth;
+    property Height: Integer read FHeight;
+    property Mips: Integer read FMips;
+    /// <summary>1 after Create; grows when a device loss gave the texture new (zeroed) GPU memory.</summary>
+    property Generation: Integer read GetGeneration;
+  end;
+
+  /// <summary>A vertex or index buffer in GPU memory for raw draws. Write is recorded in program order.</summary>
+  TFastBuffer = class
+  private
+    FSize: Integer;
+    FIndex: Boolean;
+    FNative: IInterface;
+    FDeviceGen: Integer;
+    FGeneration: Integer;
+    function GetGeneration: Integer;
+  public
+    constructor Create(const ASize: Integer; const AIndex: Boolean);
+    destructor Destroy; override;
+    procedure Write(const AOffset: Integer; const AData: Pointer; const ASize: Integer);
+    function Native: IInterface;
+    property Size: Integer read FSize;
+    property IsIndex: Boolean read FIndex;
+    property Generation: Integer read GetGeneration;
+  end;
+
+  /// <summary>A draw with the program's shaders (TContextShader with DX11 / DX10 bytecode: their constant buffers at
+  /// b0, textures at tN with their samplers at sN), vertex layout and state, between BeginScene and EndScene.
+  /// Geometry from memory (Vertices / Indices, copied when recorded) or from TFastBuffers (the offsets in bytes).
+  /// Rectangles in pixels of the target, top-left origin; an empty Scissor clips nothing, an empty Viewport is the
+  /// whole target.</summary>
+  TFastRawDraw = record
+    VertexShader, PixelShader: TContextShader;
+    Layout: TFastVertexLayout;
+    Stride: Integer;
+    Kind: TPrimitivesKind;
+    Vertices: Pointer;
+    VertexCount: Integer;
+    VertexBuffer: TFastBuffer;
+    VertexOffset: Integer;
+    Indices: Pointer;
+    IndexBuffer: TFastBuffer;
+    IndexOffset: Integer;
+    Index32: Boolean;
+    IndexCount: Integer;
+    /// <summary>Added to the indices (buffers only).</summary>
+    BaseVertex: Integer;
+    VSConstants, PSConstants: Pointer;
+    VSConstantSize, PSConstantSize: Integer;
+    Textures: array[0..7] of TFastTexture;
+    Samplers: array[0..7] of TFastSampler;
+    State: TFastRawState;
+    StencilRef: Byte;
+    Scissor: TRect;
+    Viewport: TRect;
+  end;
+
+  TFastReadKind = (Color, Depth, Stencil);
 
   TFastContext3D = class(TContext3D)
   public class var
@@ -105,6 +251,10 @@ type
     FShaders: TList<TFastShader>;
     /// <summary>The context service shut down (ShutdownBase).</summary>
     FFinished: Boolean;
+    /// <summary>Raw draws: the installed context class (it makes the objects of TFastTexture and TFastBuffer), and
+    /// one more at every device loss (those objects are made again, empty).</summary>
+    FInstalled: TContextClass;
+    FDeviceGen: Integer;
   protected
     { state }
     procedure DoSetContextState(AState: TContextState); override;
@@ -133,7 +283,48 @@ type
     class function PixelFormat: TPixelFormat; override;
     class function MaxTextureSize: Integer; override;
     class procedure ShutdownBase;
+
+    { Raw draws (USAGE.md, "Raw draws"). Main thread, as the scenes. }
+
+    /// <summary>Draws with the program's shaders, layout, geometry, textures and state (TFastRawDraw), between
+    /// BeginScene and EndScene. FMX's own state (SetContextState, the material of the next DrawPrimitives) is not
+    /// changed by it.</summary>
+    procedure DrawRaw(const ADraw: TFastRawDraw); virtual; abstract;
+    /// <summary>Copies ASource (pixels of the target, top-left origin) of what the scene has drawn so far into ADest
+    /// at (ADestX, ADestY), mip level 0. ADepth: the depth buffer instead (the whole of it into a Depth24 texture of
+    /// its size). The color copy needs a texture of the target's format (BGRA8 for TViewport3D-like targets).
+    /// </summary>
+    procedure CopyToTexture(const ADest: TFastTexture; const ADestX, ADestY: Integer; const ASource: TRect;
+      const ADepth: Boolean); virtual; abstract;
+    /// <summary>Waits for what was recorded and reads ARect of the target: Color as the target stores it (4 bytes
+    /// per pixel, BGRA), Depth as 4 bytes per pixel (0..1 as Single), Stencil 1 byte per pixel. Rows of APitch bytes,
+    /// top first.</summary>
+    procedure ReadTarget(const ARect: TRect; const AKind: TFastReadKind; const ADest: Pointer;
+      const APitch: Integer); virtual; abstract;
+    /// <summary>The context class installed last (InstallFastContext3D11 / 12); raw draws need one.</summary>
+    class function Installed: TContextClass;
+    /// <summary>Device of the installed class: the objects of TFastTexture and TFastBuffer.</summary>
+    class function NewTextureObject(const ATexture: TFastTexture): IInterface; virtual; abstract;
+    class procedure UploadTextureObject(const ATexture: TFastTexture; const AObject: IInterface;
+      const AFace, AMip, X, Y, AWidth, AHeight: Integer; const AData: Pointer; const ARowPitch: Integer);
+      virtual; abstract;
+    class function NewBufferObject(const ABuffer: TFastBuffer): IInterface; virtual; abstract;
+    class procedure WriteBufferObject(const ABuffer: TFastBuffer; const AObject: IInterface; const AOffset: Integer;
+      const AData: Pointer; const ASize: Integer); virtual; abstract;
+    /// <summary>The installer of a context class (raw draws use it) and the device loss handlers.</summary>
+    class procedure SetInstalled(const AClass: TContextClass);
+    class procedure RawDeviceLost;
   end;
+
+  TFastContext3DClass = class of TFastContext3D;
+
+/// <summary>Bytes of a block (compressed formats: 4 x 4 pixels) or pixel of a raw texture format.</summary>
+function FastTextureBlockBytes(const AFormat: TFastTextureFormat): Integer;
+/// <summary>The format is compressed in blocks of 4 x 4 pixels.</summary>
+function FastTextureCompressed(const AFormat: TFastTextureFormat): Boolean;
+/// <summary>DXGI_FORMAT of a raw texture format: the resource format (Depth24: R24G8_TYPELESS) and the format of its
+/// shader view (Depth24: R24_UNORM_X8_TYPELESS).</summary>
+function FastTextureDxgiFormat(const AFormat: TFastTextureFormat; const AView: Boolean): Integer;
 
 /// <summary>DXGI_FORMAT value of a pixel format, 0 when the format has no texture equivalent.</summary>
 function FastDxgiFormat(const AFormat: TPixelFormat): Integer;
@@ -164,6 +355,15 @@ const
   DXGI_FORMAT_B5G5R5A1_UNORM = 86;
   DXGI_FORMAT_B8G8R8A8_UNORM = 87;
   DXGI_FORMAT_B4G4R4A4_UNORM = 115;
+  DXGI_FORMAT_R16G16_UNORM = 35;
+  DXGI_FORMAT_R24G8_TYPELESS = 44;
+  DXGI_FORMAT_R24_UNORM_X8_TYPELESS = 46;
+  DXGI_FORMAT_R8G8_UNORM = 49;
+  DXGI_FORMAT_BC1_UNORM = 71;
+  DXGI_FORMAT_BC2_UNORM = 74;
+  DXGI_FORMAT_BC3_UNORM = 77;
+  DXGI_FORMAT_BC4_UNORM = 80;
+  DXGI_FORMAT_BC5_UNORM = 83;
 
   SemPosition: PAnsiChar = 'POSITION';
   SemNormal: PAnsiChar = 'NORMAL';
@@ -226,6 +426,267 @@ begin
   end;
 end;
 
+function FastTextureBlockBytes(const AFormat: TFastTextureFormat): Integer;
+begin
+  case AFormat of
+    TFastTextureFormat.R8: Result := 1;
+    TFastTextureFormat.RG8, TFastTextureFormat.R16: Result := 2;
+    TFastTextureFormat.RGBA16F, TFastTextureFormat.BC1, TFastTextureFormat.BC4: Result := 8;
+    TFastTextureFormat.RGBA32F, TFastTextureFormat.BC2, TFastTextureFormat.BC3, TFastTextureFormat.BC5: Result := 16;
+  else
+    Result := 4;
+  end;
+end;
+
+function FastTextureCompressed(const AFormat: TFastTextureFormat): Boolean;
+begin
+  Result := AFormat in [TFastTextureFormat.BC1, TFastTextureFormat.BC2, TFastTextureFormat.BC3, TFastTextureFormat.BC4,
+    TFastTextureFormat.BC5];
+end;
+
+function FastTextureDxgiFormat(const AFormat: TFastTextureFormat; const AView: Boolean): Integer;
+begin
+  case AFormat of
+    TFastTextureFormat.RGBA8: Result := DXGI_FORMAT_R8G8B8A8_UNORM;
+    TFastTextureFormat.BGRA8: Result := DXGI_FORMAT_B8G8R8A8_UNORM;
+    TFastTextureFormat.R8: Result := DXGI_FORMAT_R8_UNORM;
+    TFastTextureFormat.RG8: Result := DXGI_FORMAT_R8G8_UNORM;
+    TFastTextureFormat.R16: Result := DXGI_FORMAT_R16_UNORM;
+    TFastTextureFormat.RG16: Result := DXGI_FORMAT_R16G16_UNORM;
+    TFastTextureFormat.RGBA16F: Result := DXGI_FORMAT_R16G16B16A16_FLOAT;
+    TFastTextureFormat.RGBA32F: Result := DXGI_FORMAT_R32G32B32A32_FLOAT;
+    TFastTextureFormat.BC1: Result := DXGI_FORMAT_BC1_UNORM;
+    TFastTextureFormat.BC2: Result := DXGI_FORMAT_BC2_UNORM;
+    TFastTextureFormat.BC3: Result := DXGI_FORMAT_BC3_UNORM;
+    TFastTextureFormat.BC4: Result := DXGI_FORMAT_BC4_UNORM;
+    TFastTextureFormat.BC5: Result := DXGI_FORMAT_BC5_UNORM;
+  else
+    if AView then
+      Result := DXGI_FORMAT_R24_UNORM_X8_TYPELESS
+    else
+      Result := DXGI_FORMAT_R24G8_TYPELESS;
+  end;
+end;
+
+{ TFastVertexLayout }
+
+class function TFastVertexLayout.Create(const AElements: array of TFastVertexElement): TFastVertexLayout;
+var
+  N: Integer;
+begin
+  SetLength(Result.Elements, Length(AElements));
+  for N := 0 to High(AElements) do
+    Result.Elements[N] := AElements[N];
+  Result.Hash := $CBF29CE484222325;
+  for N := 0 to High(Result.Elements) do
+  begin
+    Result.Hash := FastHash(@Result.Elements[N].SemanticIndex, 3 * SizeOf(Integer), Result.Hash);
+    Result.Hash := FastHash(Result.Elements[N].Semantic, Length(AnsiString(Result.Elements[N].Semantic)),
+      Result.Hash);
+  end;
+end;
+
+{ TFastRawState }
+
+class function TFastRawState.Default: TFastRawState;
+begin
+  FillChar(Result, SizeOf(Result), 0);
+  Result.SrcBlend := TFastBlend.One;
+  Result.DestBlend := TFastBlend.Zero;
+  Result.BlendOp := TFastBlendOp.Add;
+  Result.SrcBlendAlpha := TFastBlend.One;
+  Result.DestBlendAlpha := TFastBlend.Zero;
+  Result.BlendOpAlpha := TFastBlendOp.Add;
+  Result.WriteMask := $F;
+  Result.DepthEnable := True;
+  Result.DepthWrite := True;
+  Result.DepthFunc := TFastCompare.LessEqual;
+  Result.StencilReadMask := $FF;
+  Result.StencilWriteMask := $FF;
+  Result.FrontFace.Fail := TFastStencilOp.Keep;
+  Result.FrontFace.DepthFail := TFastStencilOp.Keep;
+  Result.FrontFace.Pass := TFastStencilOp.Keep;
+  Result.FrontFace.Func := TFastCompare.Always;
+  Result.BackFace := Result.FrontFace;
+  Result.Cull := TFastCullMode.None;
+end;
+
+{ TFastSampler }
+
+class function TFastSampler.Default: TFastSampler;
+begin
+  FillChar(Result, SizeOf(Result), 0);
+  Result.Filter := $15;   // MIN_MAG_MIP_LINEAR
+  Result.AddressU := 1;
+  Result.AddressV := 1;
+  Result.AddressW := 1;
+  Result.MaxAnisotropy := 1;
+  Result.MinLOD := 0;
+  Result.MaxLOD := MaxSingle;
+end;
+
+{ TFastTexture }
+
+constructor TFastTexture.Create(const AKind: TFastTextureKind; const AFormat: TFastTextureFormat;
+  const AWidth, AHeight, AMips: Integer);
+begin
+  inherited Create;
+  if (AWidth <= 0) or (AHeight <= 0) or (AWidth > 16384) or (AHeight > 16384) or (AMips <= 0) or
+    ((AKind = TFastTextureKind.Cube) and (AWidth <> AHeight)) then
+    raise EArgumentOutOfRangeException.CreateFmt('FastContext3D: a texture of %d x %d pixels, %d levels',
+      [AWidth, AHeight, AMips]);
+  FKind := AKind;
+  FFormat := AFormat;
+  FWidth := AWidth;
+  FHeight := AHeight;
+  FMips := AMips;
+  // The GPU memory now: no installed context raises here.
+  Native;
+end;
+
+destructor TFastTexture.Destroy;
+begin
+  // Recorded commands keep their own reference.
+  TCanvas.Lock;
+  try
+    FNative := nil;
+  finally
+    TCanvas.Unlock;
+  end;
+  inherited;
+end;
+
+function TFastTexture.Native: IInterface;
+begin
+  TCanvas.Lock;
+  try
+    if (FNative = nil) or (FDeviceGen <> TFastContext3D.FDeviceGen) then
+    begin
+      if TFastContext3D.FInstalled = nil then
+        raise EContext3DException.Create('FastContext3D: raw draws need InstallFastContext3D11 or 12');
+      FNative := nil;
+      try
+        FNative := TFastContext3DClass(TFastContext3D.FInstalled).NewTextureObject(Self);
+      except
+        // No device right now (removed and not replaced yet).
+        if FGeneration > 0 then
+          Exit(nil);
+        raise;
+      end;
+      FDeviceGen := TFastContext3D.FDeviceGen;
+      Inc(FGeneration);
+    end;
+    Result := FNative;
+  finally
+    TCanvas.Unlock;
+  end;
+end;
+
+function TFastTexture.GetGeneration: Integer;
+begin
+  Native;
+  Result := FGeneration;
+end;
+
+procedure TFastTexture.Upload(const AFace, AMip, X, Y, AWidth, AHeight: Integer; const AData: Pointer;
+  const ARowPitch: Integer);
+var
+  W, H: Integer;
+  N: IInterface;
+begin
+  if (AWidth <= 0) or (AHeight <= 0) or (AData = nil) then
+    Exit;
+  W := Max(1, FWidth shr AMip);
+  H := Max(1, FHeight shr AMip);
+  if (AMip < 0) or (AMip >= FMips) or (AFace < 0) or ((FKind = TFastTextureKind.Texture2D) and (AFace > 0)) or
+    (AFace > 5) or (X < 0) or (Y < 0) or (X + AWidth > W) or (Y + AHeight > H) or
+    (FastTextureCompressed(FFormat) and (((X and 3) <> 0) or ((Y and 3) <> 0))) then
+    raise EArgumentOutOfRangeException.CreateFmt('FastContext3D: upload of %d x %d at (%d, %d) into level %d face %d',
+      [AWidth, AHeight, X, Y, AMip, AFace]);
+  TCanvas.Lock;
+  try
+    N := Native;
+    if N <> nil then
+      TFastContext3DClass(TFastContext3D.FInstalled).UploadTextureObject(Self, N, AFace, AMip, X, Y, AWidth,
+        AHeight, AData, ARowPitch);
+  finally
+    TCanvas.Unlock;
+  end;
+end;
+
+{ TFastBuffer }
+
+constructor TFastBuffer.Create(const ASize: Integer; const AIndex: Boolean);
+begin
+  inherited Create;
+  if ASize <= 0 then
+    raise EArgumentOutOfRangeException.CreateFmt('FastContext3D: a buffer of %d bytes', [ASize]);
+  FSize := ASize;
+  FIndex := AIndex;
+  Native;
+end;
+
+destructor TFastBuffer.Destroy;
+begin
+  TCanvas.Lock;
+  try
+    FNative := nil;
+  finally
+    TCanvas.Unlock;
+  end;
+  inherited;
+end;
+
+function TFastBuffer.Native: IInterface;
+begin
+  TCanvas.Lock;
+  try
+    if (FNative = nil) or (FDeviceGen <> TFastContext3D.FDeviceGen) then
+    begin
+      if TFastContext3D.FInstalled = nil then
+        raise EContext3DException.Create('FastContext3D: raw draws need InstallFastContext3D11 or 12');
+      FNative := nil;
+      try
+        FNative := TFastContext3DClass(TFastContext3D.FInstalled).NewBufferObject(Self);
+      except
+        if FGeneration > 0 then
+          Exit(nil);
+        raise;
+      end;
+      FDeviceGen := TFastContext3D.FDeviceGen;
+      Inc(FGeneration);
+    end;
+    Result := FNative;
+  finally
+    TCanvas.Unlock;
+  end;
+end;
+
+function TFastBuffer.GetGeneration: Integer;
+begin
+  Native;
+  Result := FGeneration;
+end;
+
+procedure TFastBuffer.Write(const AOffset: Integer; const AData: Pointer; const ASize: Integer);
+var
+  N: IInterface;
+begin
+  if (ASize <= 0) or (AData = nil) then
+    Exit;
+  if (AOffset < 0) or (AOffset > FSize - ASize) then
+    raise EArgumentOutOfRangeException.CreateFmt('FastContext3D: %d bytes at %d into a buffer of %d bytes',
+      [ASize, AOffset, FSize]);
+  TCanvas.Lock;
+  try
+    N := Native;
+    if N <> nil then
+      TFastContext3DClass(TFastContext3D.FInstalled).WriteBufferObject(Self, N, AOffset, AData, ASize);
+  finally
+    TCanvas.Unlock;
+  end;
+end;
+
 { TFastShader }
 
 function TFastShader.Find(const AName: string): Integer;
@@ -274,6 +735,21 @@ begin
           S.Material[M] := S.Variables[I].Index;
           S.MaterialSize[M] := Min(S.Variables[I].Size, 16);
         end;
+end;
+
+class function TFastContext3D.Installed: TContextClass;
+begin
+  Result := FInstalled;
+end;
+
+class procedure TFastContext3D.SetInstalled(const AClass: TContextClass);
+begin
+  FInstalled := AClass;
+end;
+
+class procedure TFastContext3D.RawDeviceLost;
+begin
+  Inc(FDeviceGen);
 end;
 
 class function TFastContext3D.PixelFormat: TPixelFormat;

@@ -154,6 +154,14 @@ own for each back end, on the canvas's device:
 - Bitmaps of the canvas are used in place as textures and render targets: a `TViewport3D` renders and copies its image
   into the form's bitmap on the GPU (the stock contexts read it back through the CPU), and the effects filter canvas
   bitmaps without leaving the GPU.
+- **Raw draws** (`DrawRaw`, `CopyToTexture`, `ReadTarget`; USAGE.md): the program's shaders, vertex layout and full
+  pipeline state. A raw draw is one more command of the stream (Direct3D 12) or of the deferred context (Direct3D 11):
+  the pipeline state object (or the D3D11 state objects) cached by a hash of shaders, layout, state, topology, sample
+  count and target format; geometry from memory is copied into the command and uploaded by the render thread
+  (Direct3D 11: into a dynamic ring buffer of the deferred context), from a `TFastBuffer` it is bound in place; the
+  constants are copied and bound as `b0`; textures and samplers as tables of eight. `TFastTexture` and `TFastBuffer` are objects of the installed context class; their
+  uploads and writes are commands too, so they run in program order with the draws. FMX's cached state is marked dirty
+  after a raw draw, so the next `DrawPrimitives` sets it again.
 
 ### Ray-traced effects (Direct3D 12, DXR 1.1)
 

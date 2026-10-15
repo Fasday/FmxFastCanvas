@@ -36,7 +36,9 @@ type
     procedure CreateTargets;
     function TargetView: IInterface;
     procedure BindTarget;
+    procedure SetViewport(const ARect: TRect);
     function TargetPixels: TSize;
+    function TargetTexture: IInterface;
   protected
     procedure DoCreateBuffer; override;
     procedure DoResize; override;
@@ -64,6 +66,18 @@ type
     destructor Destroy; override;
     class function Valid: Boolean; override;
     class function Style: TContextStyles; override;
+    { Raw draws (FastCanvas.Context3D) }
+    procedure DrawRaw(const ADraw: TFastRawDraw); override;
+    procedure CopyToTexture(const ADest: TFastTexture; const ADestX, ADestY: Integer; const ASource: TRect;
+      const ADepth: Boolean); override;
+    procedure ReadTarget(const ARect: TRect; const AKind: TFastReadKind; const ADest: Pointer;
+      const APitch: Integer); override;
+    class function NewTextureObject(const ATexture: TFastTexture): IInterface; override;
+    class procedure UploadTextureObject(const ATexture: TFastTexture; const AObject: IInterface;
+      const AFace, AMip, X, Y, AWidth, AHeight: Integer; const AData: Pointer; const ARowPitch: Integer); override;
+    class function NewBufferObject(const ABuffer: TFastBuffer): IInterface; override;
+    class procedure WriteBufferObject(const ABuffer: TFastBuffer; const AObject: IInterface; const AOffset: Integer;
+      const AData: Pointer; const ASize: Integer); override;
   end;
 
 var
@@ -106,6 +120,19 @@ type
     PS: ID3D11PixelShader;
   end;
 
+  /// <summary>The texture of a TFastTexture (raw draws).</summary>
+  TRawTexture11 = class(TInterfacedObject)
+  public
+    Texture: ID3D11Texture2D;
+    View: ID3D11ShaderResourceView;
+  end;
+
+  /// <summary>The buffer of a TFastBuffer (raw draws).</summary>
+  TRawBuffer11 = class(TInterfacedObject)
+  public
+    Buffer: ID3D11Buffer;
+  end;
+
   TRing = record
     Buffer: ID3D11Buffer;
     Size, Pos: Integer;
@@ -137,11 +164,26 @@ type
     BoundRaster: ID3D11RasterizerState;
     BoundVSConstants, BoundPSConstants: ID3D11Buffer;
     Fresh: Boolean;
+    // Raw draws: state objects by the hash of their description, and whether a raw draw left a viewport other than
+    // the whole target bound (FMX's draws set it back).
+    RawBlends: TDictionary<UInt64, ID3D11BlendState>;
+    RawDepths: TDictionary<UInt64, ID3D11DepthStencilState>;
+    RawRasters: TDictionary<UInt64, ID3D11RasterizerState>;
+    RawSamplers: TDictionary<UInt64, ID3D11SamplerState>;
+    ViewportChanged: Boolean;
+    /// <summary>The driver records command lists itself (D3D11_FEATURE_THREADING); without, UpdateSubresource on a
+    /// deferred context with a box offsets the source by the box too (the documented workaround adjusts it).</summary>
+    DriverCommandLists: Boolean;
     constructor Create;
     destructor Destroy; override;
     procedure Invalidate;
     function Upload(var ARing: TRing; const ABind: Cardinal; const AData: Pointer; const ASize: Integer): Integer;
-    function Constants(const AVertex: Boolean; const AData: TBytes): ID3D11Buffer;
+    function Constants(const AVertex: Boolean; const AData: TBytes): ID3D11Buffer; overload;
+    function Constants(const AVertex: Boolean; const AData: Pointer; const ASize: Integer): ID3D11Buffer; overload;
+    function RawBlend(const AState: TFastRawState): ID3D11BlendState;
+    function RawDepth(const AState: TFastRawState): ID3D11DepthStencilState;
+    function RawRaster(const AState: TFastRawState; const AScissor: Boolean): ID3D11RasterizerState;
+    function RawSampler(const ASampler: TFastSampler): ID3D11SamplerState;
     function Blend: ID3D11BlendState;
     function DepthState: ID3D11DepthStencilState;
     function Raster: ID3D11RasterizerState;
@@ -210,6 +252,7 @@ var
   Desc: TD3D11_TEXTURE2D_DESC;
   Init: D3D11_SUBRESOURCE_DATA;
   White: Cardinal;
+  Threading: TD3D11_FEATURE_DATA_THREADING;
 begin
   inherited;
   Device := FastBridge.Device();
@@ -222,6 +265,13 @@ begin
   DepthStates := TDictionary<UInt64, ID3D11DepthStencilState>.Create;
   Rasters := TDictionary<Word, ID3D11RasterizerState>.Create;
   Layouts := TDictionary<UInt64, ID3D11InputLayout>.Create;
+  RawBlends := TDictionary<UInt64, ID3D11BlendState>.Create;
+  RawDepths := TDictionary<UInt64, ID3D11DepthStencilState>.Create;
+  RawRasters := TDictionary<UInt64, ID3D11RasterizerState>.Create;
+  RawSamplers := TDictionary<UInt64, ID3D11SamplerState>.Create;
+  FillChar(Threading, SizeOf(Threading), 0);
+  DriverCommandLists := Succeeded(Device.CheckFeatureSupport(D3D11_FEATURE_THREADING, @Threading,
+    SizeOf(Threading))) and Threading.DriverCommandLists;
   // Small: every command list starts with a DISCARD, which renames the whole buffer (effects record one list per
   // filter pass). The rings grow when a draw does not fit.
   Vertices.Size := 256 * 1024;
@@ -255,6 +305,10 @@ begin
   DepthStates.Free;
   Rasters.Free;
   Layouts.Free;
+  RawBlends.Free;
+  RawDepths.Free;
+  RawRasters.Free;
+  RawSamplers.Free;
   inherited;
 end;
 
@@ -340,6 +394,132 @@ begin
   Check(DC.Map(Result, 0, D3D11_MAP_WRITE_DISCARD, 0, Mapped), 'Map (constants)');
   Move(AData[0], Mapped.pData^, Length(AData));
   DC.Unmap(Result, 0);
+end;
+
+function TShared.Constants(const AVertex: Boolean; const AData: Pointer; const ASize: Integer): ID3D11Buffer;
+var
+  Map: TDictionary<Integer, ID3D11Buffer>;
+  Desc: TD3D11_BUFFER_DESC;
+  Mapped: D3D11_MAPPED_SUBRESOURCE;
+  Size: Integer;
+begin
+  if AVertex then
+    Map := VSConstants
+  else
+    Map := PSConstants;
+  Size := (ASize + 15) and not 15;
+  if not Map.TryGetValue(Size, Result) then
+  begin
+    FillChar(Desc, SizeOf(Desc), 0);
+    Desc.ByteWidth := Size;
+    Desc.Usage := D3D11_USAGE_DYNAMIC;
+    Desc.BindFlags := D3D11_BIND_CONSTANT_BUFFER;
+    Desc.CPUAccessFlags := D3D11_CPU_ACCESS_WRITE;
+    Check(Device.CreateBuffer(Desc, nil, Result), 'CreateBuffer (constants)');
+    Map.Add(Size, Result);
+  end;
+  Check(DC.Map(Result, 0, D3D11_MAP_WRITE_DISCARD, 0, Mapped), 'Map (constants)');
+  Move(AData^, Mapped.pData^, ASize);
+  DC.Unmap(Result, 0);
+end;
+
+function TShared.RawBlend(const AState: TFastRawState): ID3D11BlendState;
+var
+  Key: UInt64;
+  Desc: TD3D11_BLEND_DESC;
+begin
+  Key := FastHash(@AState.BlendEnable, 8);
+  if RawBlends.TryGetValue(Key, Result) then
+    Exit;
+  FillChar(Desc, SizeOf(Desc), 0);
+  Desc.RenderTarget[0].BlendEnable := AState.BlendEnable;
+  Desc.RenderTarget[0].SrcBlend := D3D11_BLEND(Ord(AState.SrcBlend));
+  Desc.RenderTarget[0].DestBlend := D3D11_BLEND(Ord(AState.DestBlend));
+  Desc.RenderTarget[0].BlendOp := D3D11_BLEND_OP(Ord(AState.BlendOp));
+  Desc.RenderTarget[0].SrcBlendAlpha := D3D11_BLEND(Ord(AState.SrcBlendAlpha));
+  Desc.RenderTarget[0].DestBlendAlpha := D3D11_BLEND(Ord(AState.DestBlendAlpha));
+  Desc.RenderTarget[0].BlendOpAlpha := D3D11_BLEND_OP(Ord(AState.BlendOpAlpha));
+  Desc.RenderTarget[0].RenderTargetWriteMask := AState.WriteMask and $F;
+  Check(Device.CreateBlendState(Desc, Result), 'CreateBlendState (raw)');
+  RawBlends.Add(Key, Result);
+end;
+
+function TShared.RawDepth(const AState: TFastRawState): ID3D11DepthStencilState;
+var
+  Key: UInt64;
+  Desc: TD3D11_DEPTH_STENCIL_DESC;
+begin
+  Key := FastHash(@AState.DepthEnable, NativeInt(@AState.Cull) - NativeInt(@AState.DepthEnable));
+  if RawDepths.TryGetValue(Key, Result) then
+    Exit;
+  FillChar(Desc, SizeOf(Desc), 0);
+  Desc.DepthEnable := AState.DepthEnable;
+  if AState.DepthWrite then
+    Desc.DepthWriteMask := D3D11_DEPTH_WRITE_MASK_ALL
+  else
+    Desc.DepthWriteMask := D3D11_DEPTH_WRITE_MASK_ZERO;
+  Desc.DepthFunc := D3D11_COMPARISON_FUNC(Ord(AState.DepthFunc));
+  Desc.StencilEnable := AState.StencilEnable;
+  Desc.StencilReadMask := AState.StencilReadMask;
+  Desc.StencilWriteMask := AState.StencilWriteMask;
+  Desc.FrontFace.StencilFailOp := D3D11_STENCIL_OP(Ord(AState.FrontFace.Fail));
+  Desc.FrontFace.StencilDepthFailOp := D3D11_STENCIL_OP(Ord(AState.FrontFace.DepthFail));
+  Desc.FrontFace.StencilPassOp := D3D11_STENCIL_OP(Ord(AState.FrontFace.Pass));
+  Desc.FrontFace.StencilFunc := D3D11_COMPARISON_FUNC(Ord(AState.FrontFace.Func));
+  Desc.BackFace.StencilFailOp := D3D11_STENCIL_OP(Ord(AState.BackFace.Fail));
+  Desc.BackFace.StencilDepthFailOp := D3D11_STENCIL_OP(Ord(AState.BackFace.DepthFail));
+  Desc.BackFace.StencilPassOp := D3D11_STENCIL_OP(Ord(AState.BackFace.Pass));
+  Desc.BackFace.StencilFunc := D3D11_COMPARISON_FUNC(Ord(AState.BackFace.Func));
+  Check(Device.CreateDepthStencilState(Desc, Result), 'CreateDepthStencilState (raw)');
+  RawDepths.Add(Key, Result);
+end;
+
+function TShared.RawRaster(const AState: TFastRawState; const AScissor: Boolean): ID3D11RasterizerState;
+var
+  Key: UInt64;
+  Desc: TD3D11_RASTERIZER_DESC;
+begin
+  Key := FastHash(@AState.Cull, SizeOf(AState) - (NativeInt(@AState.Cull) - NativeInt(@AState)), Ord(AScissor));
+  if RawRasters.TryGetValue(Key, Result) then
+    Exit;
+  FillChar(Desc, SizeOf(Desc), 0);
+  if AState.Wireframe then
+    Desc.FillMode := D3D11_FILL_WIREFRAME
+  else
+    Desc.FillMode := D3D11_FILL_SOLID;
+  Desc.CullMode := D3D11_CULL_MODE(Ord(AState.Cull));
+  Desc.FrontCounterClockwise := AState.FrontCounterClockwise;
+  Desc.DepthBias := AState.DepthBias;
+  Desc.DepthBiasClamp := AState.DepthBiasClamp;
+  Desc.SlopeScaledDepthBias := AState.SlopeScaledDepthBias;
+  Desc.DepthClipEnable := True;
+  Desc.ScissorEnable := AScissor;
+  Desc.MultisampleEnable := True;
+  Check(Device.CreateRasterizerState(Desc, Result), 'CreateRasterizerState (raw)');
+  RawRasters.Add(Key, Result);
+end;
+
+function TShared.RawSampler(const ASampler: TFastSampler): ID3D11SamplerState;
+var
+  Key: UInt64;
+  Desc: TD3D11_SAMPLER_DESC;
+begin
+  Key := FastHash(@ASampler, SizeOf(ASampler));
+  if RawSamplers.TryGetValue(Key, Result) then
+    Exit;
+  FillChar(Desc, SizeOf(Desc), 0);
+  Desc.Filter := D3D11_FILTER(ASampler.Filter);
+  Desc.AddressU := D3D11_TEXTURE_ADDRESS_MODE(ASampler.AddressU);
+  Desc.AddressV := D3D11_TEXTURE_ADDRESS_MODE(ASampler.AddressV);
+  Desc.AddressW := D3D11_TEXTURE_ADDRESS_MODE(ASampler.AddressW);
+  Desc.MipLODBias := ASampler.MipLODBias;
+  Desc.MaxAnisotropy := Max(1, ASampler.MaxAnisotropy);
+  Desc.ComparisonFunc := D3D11_COMPARISON_NEVER;
+  Move(ASampler.BorderColor, Desc.BorderColor, SizeOf(Desc.BorderColor));
+  Desc.MinLOD := ASampler.MinLOD;
+  Desc.MaxLOD := ASampler.MaxLOD;
+  Check(Device.CreateSamplerState(Desc, Result), 'CreateSamplerState (raw)');
+  RawSamplers.Add(Key, Result);
 end;
 
 function TShared.Blend: ID3D11BlendState;
@@ -666,22 +846,39 @@ begin
   end;
 end;
 
-procedure TFastContext3D11.BindTarget;
+procedure TFastContext3D11.SetViewport(const ARect: TRect);
 var
-  View: ID3D11RenderTargetView;
   VP: D3D11_VIEWPORT;
   Px: TSize;
 begin
-  View := ID3D11RenderTargetView(TargetView);
-  G.DC.OMSetRenderTargets(1, View, ID3D11DepthStencilView(FDepthView));
-  Px := TargetPixels;
-  VP.TopLeftX := 0;
-  VP.TopLeftY := 0;
-  VP.Width := Px.Width;
-  VP.Height := Px.Height;
+  if ARect.IsEmpty then
+  begin
+    Px := TargetPixels;
+    VP.TopLeftX := 0;
+    VP.TopLeftY := 0;
+    VP.Width := Px.Width;
+    VP.Height := Px.Height;
+  end
+  else
+  begin
+    VP.TopLeftX := ARect.Left;
+    VP.TopLeftY := ARect.Top;
+    VP.Width := ARect.Width;
+    VP.Height := ARect.Height;
+  end;
   VP.MinDepth := 0;
   VP.MaxDepth := 1;
   G.DC.RSSetViewports(1, @VP);
+  G.ViewportChanged := not ARect.IsEmpty;
+end;
+
+procedure TFastContext3D11.BindTarget;
+var
+  View: ID3D11RenderTargetView;
+begin
+  View := ID3D11RenderTargetView(TargetView);
+  G.DC.OMSetRenderTargets(1, View, ID3D11DepthStencilView(FDepthView));
+  SetViewport(TRect.Empty);
   FScissorDirty := True;
 end;
 
@@ -805,6 +1002,9 @@ begin
   PSObj := TShader11(FPS.Native as TObject);
   if (VSObj = nil) or (PSObj = nil) then
     Exit;
+  // A raw draw left a viewport of its own.
+  if S.ViewportChanged then
+    SetViewport(TRect.Empty);
   Layout := S.Layout(FVS, VertexLayout(VertexDeclaration));
   if Layout = nil then
     Exit;
@@ -909,6 +1109,407 @@ begin
     FUnitsDirty := False;
   end;
   DC.DrawIndexed(IndexCount, 0, 0);
+  Recorded;
+end;
+
+{ Raw draws }
+
+/// <summary>The FastCanvas shader of a TContextShader (made on first use).</summary>
+function RawShader(const AShader: TContextShader): TFastShader;
+begin
+  Result := nil;
+  if AShader = nil then
+    Exit;
+  if AShader.Handle = 0 then
+    TContextManager.InitializeShader(AShader);
+  Result := TFastShader(AShader.Handle);
+end;
+
+procedure TFastContext3D11.DrawRaw(const ADraw: TFastRawDraw);
+const
+  Topologies: array[TPrimitivesKind] of D3D11_PRIMITIVE_TOPOLOGY = (D3D11_PRIMITIVE_TOPOLOGY_POINTLIST,
+    D3D11_PRIMITIVE_TOPOLOGY_LINELIST, D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+  BlendFactor: TFourSingleArray = (1, 1, 1, 1);
+var
+  S: TShared;
+  DC: ID3D11DeviceContext;
+  VS, PS: TFastShader;
+  VSObj, PSObj: TShader11;
+  Layout: ID3D11InputLayout;
+  VB, IB, CB: ID3D11Buffer;
+  VOffset, IOffset, Stride: Cardinal;
+  Views: array[0..7] of ID3D11ShaderResourceView;
+  Samps: array[0..7] of ID3D11SamplerState;
+  I, N: Integer;
+  T: TRawTexture11;
+  Rect: D3D11_RECT;
+  Scissor: Boolean;
+begin
+  if (BeginSceneCount = 0) or (ADraw.IndexCount <= 0) then
+    Exit;
+  VS := RawShader(ADraw.VertexShader);
+  PS := RawShader(ADraw.PixelShader);
+  if (VS = nil) or (PS = nil) or (VS.Native = nil) or (PS.Native = nil) then
+    Exit;
+  VSObj := TShader11(VS.Native as TObject);
+  PSObj := TShader11(PS.Native as TObject);
+  S := Shared;
+  DC := S.DC;
+  Layout := S.Layout(VS, ADraw.Layout);
+  if Layout = nil then
+    Exit;
+  // geometry
+  Stride := ADraw.Stride;
+  if ((ADraw.VertexBuffer <> nil) and (ADraw.VertexBuffer.Native = nil)) or
+    ((ADraw.IndexBuffer <> nil) and (ADraw.IndexBuffer.Native = nil)) then
+    Exit;
+  if ADraw.VertexBuffer <> nil then
+  begin
+    VB := TRawBuffer11(ADraw.VertexBuffer.Native as TObject).Buffer;
+    VOffset := ADraw.VertexOffset;
+  end
+  else
+  begin
+    if (ADraw.Vertices = nil) or (ADraw.VertexCount <= 0) then
+      Exit;
+    VOffset := S.Upload(S.Vertices, D3D11_BIND_VERTEX_BUFFER, ADraw.Vertices, ADraw.Stride * ADraw.VertexCount);
+    VB := S.Vertices.Buffer;
+  end;
+  if ADraw.IndexBuffer <> nil then
+  begin
+    IB := TRawBuffer11(ADraw.IndexBuffer.Native as TObject).Buffer;
+    IOffset := ADraw.IndexOffset;
+  end
+  else
+  begin
+    if ADraw.Indices = nil then
+      Exit;
+    IOffset := S.Upload(S.Indices, D3D11_BIND_INDEX_BUFFER, ADraw.Indices,
+      ADraw.IndexCount * (2 + 2 * Ord(ADraw.Index32)));
+    IB := S.Indices.Buffer;
+  end;
+  DC.IASetVertexBuffers(0, 1, VB, @Stride, @VOffset);
+  if ADraw.Index32 then
+    DC.IASetIndexBuffer(IB, DXGI_FORMAT_R32_UINT, IOffset)
+  else
+    DC.IASetIndexBuffer(IB, DXGI_FORMAT_R16_UINT, IOffset);
+  if Layout <> S.BoundLayout then
+  begin
+    DC.IASetInputLayout(Layout);
+    S.BoundLayout := Layout;
+  end;
+  if Topologies[ADraw.Kind] <> S.BoundTopology then
+  begin
+    DC.IASetPrimitiveTopology(Topologies[ADraw.Kind]);
+    S.BoundTopology := Topologies[ADraw.Kind];
+  end;
+  if VSObj.VS <> S.BoundVS then
+  begin
+    DC.VSSetShader(VSObj.VS, nil, 0);
+    S.BoundVS := VSObj.VS;
+  end;
+  if PSObj.PS <> S.BoundPS then
+  begin
+    DC.PSSetShader(PSObj.PS, nil, 0);
+    S.BoundPS := PSObj.PS;
+  end;
+  // constants (FMX's draws set theirs again)
+  if (ADraw.VSConstants <> nil) and (ADraw.VSConstantSize > 0) then
+  begin
+    CB := S.Constants(True, ADraw.VSConstants, ADraw.VSConstantSize);
+    DC.VSSetConstantBuffers(0, 1, CB);
+    S.BoundVSConstants := CB;
+  end;
+  if (ADraw.PSConstants <> nil) and (ADraw.PSConstantSize > 0) then
+  begin
+    CB := S.Constants(False, ADraw.PSConstants, ADraw.PSConstantSize);
+    DC.PSSetConstantBuffers(0, 1, CB);
+    S.BoundPSConstants := CB;
+  end;
+  FVSDirty := True;
+  FPSDirty := True;
+  // state
+  Scissor := not ADraw.Scissor.IsEmpty;
+  S.BoundBlend := S.RawBlend(ADraw.State);
+  DC.OMSetBlendState(S.BoundBlend, BlendFactor, $FFFFFFFF);
+  S.BoundDepth := S.RawDepth(ADraw.State);
+  S.BoundRef := ADraw.StencilRef;
+  DC.OMSetDepthStencilState(S.BoundDepth, ADraw.StencilRef);
+  S.BoundRaster := S.RawRaster(ADraw.State, Scissor);
+  DC.RSSetState(S.BoundRaster);
+  FStateDirty := True;
+  if Scissor then
+  begin
+    Rect.Left := ADraw.Scissor.Left;
+    Rect.Top := ADraw.Scissor.Top;
+    Rect.Right := ADraw.Scissor.Right;
+    Rect.Bottom := ADraw.Scissor.Bottom;
+    DC.RSSetScissorRects(1, @Rect);
+  end;
+  FScissorDirty := True;
+  if not ADraw.Viewport.IsEmpty or S.ViewportChanged then
+    SetViewport(ADraw.Viewport);
+  // textures: the units the pixel shader samples, and any set beyond them
+  N := PS.TextureUnits;
+  for I := 0 to High(ADraw.Textures) do
+    if ADraw.Textures[I] <> nil then
+      N := Max(N, I + 1);
+  if N > 0 then
+  begin
+    for I := 0 to N - 1 do
+    begin
+      if (ADraw.Textures[I] <> nil) and (ADraw.Textures[I].Native <> nil) then
+      begin
+        T := TRawTexture11(ADraw.Textures[I].Native as TObject);
+        Views[I] := T.View;
+      end
+      else
+        Views[I] := S.Blank.View;
+      Samps[I] := S.RawSampler(ADraw.Samplers[I]);
+    end;
+    DC.PSSetShaderResources(0, N, Views[0]);
+    DC.PSSetSamplers(0, N, Samps[0]);
+  end;
+  FUnitsDirty := True;
+  if ADraw.IndexBuffer <> nil then
+    DC.DrawIndexed(ADraw.IndexCount, 0, ADraw.BaseVertex)
+  else
+    DC.DrawIndexed(ADraw.IndexCount, 0, 0);
+  Recorded;
+end;
+
+/// <summary>The texture the scene draws into (resolved, without multisampling).</summary>
+function TFastContext3D11.TargetTexture: IInterface;
+var
+  T: TTexture11;
+  Back: ID3D11Texture2D;
+begin
+  Result := nil;
+  if (Texture <> nil) and (Texture.Handle <> 0) then
+  begin
+    T := TTexture11(Texture.Handle);
+    T.Used := True;
+    if FMSColor <> nil then
+      G.DC.ResolveSubresource(T.Texture, 0, ID3D11Texture2D(FMSColor), 0, T.Format);
+    Result := T.Texture;
+  end
+  else if FSwapChain <> nil then
+  begin
+    IDXGISwapChain1(FSwapChain).GetBuffer(0, ID3D11Texture2D, Back);
+    if FMSColor <> nil then
+      G.DC.ResolveSubresource(Back, 0, ID3D11Texture2D(FMSColor), 0, DXGI_FORMAT_B8G8R8A8_UNORM);
+    Result := Back;
+  end;
+end;
+
+procedure TFastContext3D11.CopyToTexture(const ADest: TFastTexture; const ADestX, ADestY: Integer;
+  const ASource: TRect; const ADepth: Boolean);
+var
+  Src: ID3D11Texture2D;
+  Dst: TRawTexture11;
+  Box: D3D11_BOX;
+begin
+  if ADest = nil then
+    Exit;
+  TCanvas.Lock;
+  try
+    Dst := TRawTexture11(ADest.Native as TObject);
+    if Dst = nil then
+      Exit;
+    if ADepth then
+    begin
+      // A depth buffer is copied whole (Direct3D 11 copies depth-stencil resources only so).
+      if (FDepth = nil) or (FSamples > 1) then
+        Exit;
+      Shared.DC.CopyResource(Dst.Texture, ID3D11Texture2D(FDepth));
+    end
+    else
+    begin
+      Src := ID3D11Texture2D(TargetTexture);
+      if Src = nil then
+        Exit;
+      Box.left := ASource.Left;
+      Box.top := ASource.Top;
+      Box.front := 0;
+      Box.right := ASource.Right;
+      Box.bottom := ASource.Bottom;
+      Box.back := 1;
+      Shared.DC.CopySubresourceRegion(Dst.Texture, 0, ADestX, ADestY, 0, Src, 0, @Box);
+    end;
+    Recorded;
+  finally
+    TCanvas.Unlock;
+  end;
+end;
+
+procedure TFastContext3D11.ReadTarget(const ARect: TRect; const AKind: TFastReadKind; const ADest: Pointer;
+  const APitch: Integer);
+var
+  Src, Staging: ID3D11Texture2D;
+  Desc: TD3D11_TEXTURE2D_DESC;
+  Mapped: D3D11_MAPPED_SUBRESOURCE;
+  Ctx: ID3D11DeviceContext;
+  R: TRect;
+  X, Y: Integer;
+  Texel: Cardinal;
+  Row: PByte;
+begin
+  TCanvas.Lock;
+  try
+    if AKind = TFastReadKind.Color then
+      Src := ID3D11Texture2D(TargetTexture)
+    else if FSamples <= 1 then
+      Src := ID3D11Texture2D(FDepth)
+    else
+      Src := nil;
+    if Src = nil then
+      Exit;
+    // Everything recorded so far has to run before the read.
+    FastFlushDeferred;
+  finally
+    TCanvas.Unlock;
+  end;
+  FastBridge.Sync();
+  Src.GetDesc(Desc);
+  R := TRect.Intersect(ARect, TRect.Create(0, 0, Desc.Width, Desc.Height));
+  if R.IsEmpty then
+    Exit;
+  Desc.MipLevels := 1;
+  Desc.ArraySize := 1;
+  Desc.SampleDesc.Count := 1;
+  Desc.SampleDesc.Quality := 0;
+  Desc.Usage := D3D11_USAGE_STAGING;
+  Desc.BindFlags := 0;
+  Desc.CPUAccessFlags := D3D11_CPU_ACCESS_READ;
+  Desc.MiscFlags := 0;
+  Check(Shared.Device.CreateTexture2D(Desc, nil, Staging), 'CreateTexture2D (staging)');
+  FastBridge.Lock();
+  try
+    Shared.Device.GetImmediateContext(Ctx);
+    Ctx.CopyResource(Staging, Src);
+    Check(Ctx.Map(Staging, 0, D3D11_MAP_READ, 0, Mapped), 'Map (staging)');
+    try
+      for Y := R.Top to R.Bottom - 1 do
+      begin
+        Row := PByte(Mapped.pData) + Cardinal(Y) * Mapped.RowPitch;
+        case AKind of
+          TFastReadKind.Color:
+            Move((Row + R.Left * 4)^, (PByte(ADest) + (Y - R.Top) * APitch)^, R.Width * 4);
+          TFastReadKind.Depth:
+            for X := R.Left to R.Right - 1 do
+            begin
+              Texel := PCardinal(Row + X * 4)^;
+              PSingle(PByte(ADest) + (Y - R.Top) * APitch + (X - R.Left) * 4)^ := (Texel and $FFFFFF) / $FFFFFF;
+            end;
+        else
+          for X := R.Left to R.Right - 1 do
+            (PByte(ADest) + (Y - R.Top) * APitch + (X - R.Left))^ := PCardinal(Row + X * 4)^ shr 24;
+        end;
+      end;
+    finally
+      Ctx.Unmap(Staging, 0);
+    end;
+  finally
+    FastBridge.Unlock();
+  end;
+end;
+
+class function TFastContext3D11.NewTextureObject(const ATexture: TFastTexture): IInterface;
+var
+  T: TRawTexture11;
+  Desc: TD3D11_TEXTURE2D_DESC;
+  View: TD3D11_SHADER_RESOURCE_VIEW_DESC;
+begin
+  T := TRawTexture11.Create;
+  Result := T;
+  FillChar(Desc, SizeOf(Desc), 0);
+  Desc.Width := ATexture.Width;
+  Desc.Height := ATexture.Height;
+  Desc.MipLevels := ATexture.Mips;
+  Desc.Format := DXGI_FORMAT(FastTextureDxgiFormat(ATexture.Format, False));
+  Desc.SampleDesc.Count := 1;
+  Desc.Usage := D3D11_USAGE_DEFAULT;
+  Desc.BindFlags := D3D11_BIND_SHADER_RESOURCE;
+  FillChar(View, SizeOf(View), 0);
+  View.Format := DXGI_FORMAT(FastTextureDxgiFormat(ATexture.Format, True));
+  if ATexture.Kind = TFastTextureKind.Cube then
+  begin
+    Desc.ArraySize := 6;
+    Desc.MiscFlags := Ord(D3D11_RESOURCE_MISC_TEXTURECUBE);
+    View.ViewDimension := D3D11_SRV_DIMENSION_TEXTURECUBE;
+    View.TextureCube.MipLevels := ATexture.Mips;
+  end
+  else
+  begin
+    Desc.ArraySize := 1;
+    View.ViewDimension := D3D11_SRV_DIMENSION_TEXTURE2D;
+    View.Texture2D.MipLevels := ATexture.Mips;
+  end;
+  Check(Shared.Device.CreateTexture2D(Desc, nil, T.Texture), 'CreateTexture2D (raw)');
+  Check(G.Device.CreateShaderResourceView(T.Texture, @View, T.View), 'CreateShaderResourceView (raw)');
+end;
+
+class procedure TFastContext3D11.UploadTextureObject(const ATexture: TFastTexture; const AObject: IInterface;
+  const AFace, AMip, X, Y, AWidth, AHeight: Integer; const AData: Pointer; const ARowPitch: Integer);
+var
+  T: TRawTexture11;
+  Box: D3D11_BOX;
+  Src: PByte;
+begin
+  T := TRawTexture11(AObject as TObject);
+  Box.left := X;
+  Box.top := Y;
+  Box.front := 0;
+  Box.right := X + AWidth;
+  Box.bottom := Y + AHeight;
+  Box.back := 1;
+  Src := AData;
+  // UpdateSubresource of a deferred context without the driver's command lists offsets the source by the box
+  // (documented workaround: the source pointer goes back by as much).
+  if not Shared.DriverCommandLists then
+  begin
+    if FastTextureCompressed(ATexture.Format) then
+      Dec(Src, (Y div 4) * ARowPitch + (X div 4) * FastTextureBlockBytes(ATexture.Format))
+    else
+      Dec(Src, Y * ARowPitch + X * FastTextureBlockBytes(ATexture.Format));
+  end;
+  G.DC.UpdateSubresource(T.Texture, Cardinal(AMip + AFace * ATexture.Mips), @Box, Src, ARowPitch, 0);
+  Recorded;
+end;
+
+class function TFastContext3D11.NewBufferObject(const ABuffer: TFastBuffer): IInterface;
+var
+  B: TRawBuffer11;
+  Desc: TD3D11_BUFFER_DESC;
+begin
+  B := TRawBuffer11.Create;
+  Result := B;
+  FillChar(Desc, SizeOf(Desc), 0);
+  Desc.ByteWidth := (ABuffer.Size + 15) and not 15;
+  Desc.Usage := D3D11_USAGE_DEFAULT;
+  if ABuffer.IsIndex then
+    Desc.BindFlags := D3D11_BIND_INDEX_BUFFER
+  else
+    Desc.BindFlags := D3D11_BIND_VERTEX_BUFFER;
+  Check(Shared.Device.CreateBuffer(Desc, nil, B.Buffer), 'CreateBuffer (raw)');
+end;
+
+class procedure TFastContext3D11.WriteBufferObject(const ABuffer: TFastBuffer; const AObject: IInterface;
+  const AOffset: Integer; const AData: Pointer; const ASize: Integer);
+var
+  Box: D3D11_BOX;
+  Src: PByte;
+begin
+  Box.left := AOffset;
+  Box.top := 0;
+  Box.front := 0;
+  Box.right := AOffset + ASize;
+  Box.bottom := 1;
+  Box.back := 1;
+  Src := AData;
+  if not Shared.DriverCommandLists then
+    Dec(Src, AOffset);
+  G.DC.UpdateSubresource(TRawBuffer11(AObject as TObject).Buffer, 0, @Box, Src, 0, 0);
   Recorded;
 end;
 
@@ -1171,6 +1772,8 @@ var
   C: TFastContext3D11;
 begin
   FastDeferredPending := False;
+  // Raw textures and buffers get new (empty) objects on the new device when used next.
+  TFastContext3D.RawDeviceLost;
   if G = nil then
     Exit;
   for C in GContexts do
@@ -1244,6 +1847,7 @@ begin
     GScenes := TList<TFastContext3D11>.Create;
   end;
   TFastContext3D.ResetDeviceState;
+  TFastContext3D.SetInstalled(TFastContext3D11);
   InstallContextService(TFastContext3D11, Shutdown);
   FastBridge.DeviceLost := ContextsDeviceLost;
   FastBridge.DeviceReset := ContextsDeviceReset;

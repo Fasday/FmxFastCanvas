@@ -329,6 +329,46 @@ Limitations:
   motion vectors on cards without DLSS. `HelloForm3D` takes these switches from environment variables (see
   `example/HelloForm3D.dpr`).
 
+## Raw draws (3D contexts)
+
+FMX's `TContext3D` has one blend mode, `LESS_EQUAL` depth, single-sided stencil, all-or-nothing color writes and
+`DrawPrimitives` with FMX's vertex formats. Programs that bring their own renderer (a game engine's back end) draw
+through `TFastContext3D` (`FastCanvas.Context3D`) instead, on the context of a `TForm3D`, a `TViewport3D` or a texture
+target (`TContextManager.CreateFromTexture`), between its `BeginScene` and `EndScene`:
+
+- `DrawRaw(const TFastRawDraw)`: one indexed draw (triangles, lines or points) with
+  - the program's shaders: `TContextShader`s with `DX11` / `DX10` bytecode (shader model 4 or 5, e.g. from `fxc`),
+    their constants in `cbuffer` register `b0` (`VSConstants` / `PSConstants`, `VSConstantSize` / `PSConstantSize`
+    bytes, multiples of 16), textures at `t0`–`t7` with their samplers at `s0`–`s7`;
+  - its vertex layout (`TFastVertexLayout.Create` of `TFastVertexElement`s: semantic, index, `DXGI_FORMAT`, byte
+    offset) and `Stride`;
+  - geometry from memory (`Vertices` / `VertexCount`, `Indices`: copied when recorded) or from `TFastBuffer`s
+    (`VertexBuffer` / `VertexOffset`, `IndexBuffer` / `IndexOffset` in bytes, `BaseVertex`), 16- or 32-bit indices;
+  - `TFastTexture`s with `TFastSampler`s (D3D filter value, address modes, border color, anisotropy, LOD range);
+  - `TFastRawState`: blend factors and ops for color and alpha, write mask per channel, depth enable / write / compare
+    function, two-sided stencil (separate front and back operations and functions, read / write masks) with
+    `StencilRef`, cull mode, front face winding, wireframe, depth bias and slope-scaled depth bias. Start from
+    `TFastRawState.Default`;
+  - `Scissor` and `Viewport` in pixels of the target (top-left origin; empty: none / the whole target).
+- `CopyToTexture`: what the scene has drawn so far (a rectangle of the color target, or the whole depth buffer into a
+  `Depth24` texture) into a `TFastTexture`, recorded in order with the draws (render-to-texture effects that sample
+  the screen: `_currentRender`, `_currentDepth`).
+- `ReadTarget`: waits for the recorded work and reads a rectangle of the target's color (BGRA), depth (`Single`) or
+  stencil (bytes), rows from the top (tests, screenshots).
+- `TFastTexture`: 2D or cube, `RGBA8`, `BGRA8`, `R8`, `RG8`, `R16`, `RG16`, `RGBA16F`, `RGBA32F`, `BC1`–`BC5` or
+  `Depth24`, with explicit mip levels; `Upload` of a rectangle of a mip level of a face (compressed formats in 4 x 4
+  blocks). `TFastBuffer`: a vertex or index buffer; `Write` of a byte range. Uploads and writes are recorded in
+  program order with the draws: a write after a draw does not change what that draw reads.
+
+Raw draws need an installed context class (`InstallFastContext3D11` / `InstallFastContext3D12`); textures and
+buffers belong to its device. FMX's own state (`SetContextState`, the material of the next `DrawPrimitives`) is not
+changed by them, so FMX objects and raw draws can be mixed in one scene. After a device loss textures and buffers get
+new, zeroed GPU memory and a higher `Generation`: upload them again. Pipeline states are made once per combination of
+shaders, layout, state, topology and target format and kept.
+
+A program without FMX forms (a console test) shuts FastCanvas down as FMX's `FinalizeForms` does:
+`TContextManager.UnInitialize` and `TCanvasManager.UnInitialize` after its last context is freed.
+
 ## Threads
 
 - Draw with a canvas only between `BeginScene` and `EndScene`, as FMX requires. `TBitmap.Canvas` can be used on any

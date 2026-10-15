@@ -262,6 +262,18 @@ type
     /// decides whether to use them, and so whether to turn multisampling off (they need a target without it):
     /// RayPassesAvailable is False while a context is multisampled.</summary>
     class function RayTracingSupported: Boolean;
+    { Raw draws (FastCanvas.Context3D) }
+    procedure DrawRaw(const ADraw: TFastRawDraw); override;
+    procedure CopyToTexture(const ADest: TFastTexture; const ADestX, ADestY: Integer; const ASource: TRect;
+      const ADepth: Boolean); override;
+    procedure ReadTarget(const ARect: TRect; const AKind: TFastReadKind; const ADest: Pointer;
+      const APitch: Integer); override;
+    class function NewTextureObject(const ATexture: TFastTexture): IInterface; override;
+    class procedure UploadTextureObject(const ATexture: TFastTexture; const AObject: IInterface;
+      const AFace, AMip, X, Y, AWidth, AHeight: Integer; const AData: Pointer; const ARowPitch: Integer); override;
+    class function NewBufferObject(const ABuffer: TFastBuffer): IInterface; override;
+    class procedure WriteBufferObject(const ABuffer: TFastBuffer; const AObject: IInterface; const AOffset: Integer;
+      const AData: Pointer; const ASize: Integer); override;
     /// <summary>Ray-traced effects; a new context starts with FastContext3DRayTracing. Read at every scene.</summary>
     property RayTracing: TFastRayTracing read FRay write FRay;
     /// <summary>Native NVIDIA DLSS SR in window contexts. Off preserves the stock resolution/MSAA path.
@@ -379,7 +391,12 @@ type
 const
   StateRead = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
   SamplerHeapSize = 2048;
+  /// <summary>Distinct sampler descriptions of raw draws.</summary>
+  RawSamplerCount = 256;
   SwapBuffers = 3;
+  /// <summary>Raw texture uploads and buffer writes up to this size travel in the command stream, larger ones in a
+  /// blob.</summary>
+  RawInlineData = 64 * 1024;
 
 type
   /// <summary>Texture of a TTexture (its Handle holds one reference), a buffer of a target, or a bitmap of the canvas
@@ -462,6 +479,13 @@ type
     SamplerTables: TDictionary<Cardinal, UInt64>;
     SamplerSource: ID3D12DescriptorHeap;
     SamplerSourceCpu: TD3D12_CPU_DESCRIPTOR_HANDLE;
+    // Raw draws: pipelines by the hash of their key, samplers (one descriptor per description in RawSamplerSource)
+    // and tables of eight of them in SamplerHeap (dropped with FMX's when it is full).
+    RawPsos: TDictionary<UInt64, ID3D12PipelineState>;
+    RawSamplers: TDictionary<UInt64, Integer>;
+    RawSamplerTables: TDictionary<UInt64, UInt64>;
+    RawSamplerSource: ID3D12DescriptorHeap;
+    RawSamplerSourceCpu: TD3D12_CPU_DESCRIPTOR_HANDLE;
     Blank: TTexture12;
     BlankRef: IInterface;
     /// <summary>Render thread: the blank texture holds its white pixel.</summary>
@@ -474,6 +498,39 @@ type
     /// <summary>The samplers of 8 texture units (2 bits of AFilters each: SamplerFilters); ABias: their texture LOD
     /// bias (the scene of DLSS).</summary>
     function SamplerTable(const AFilters: Cardinal; const ABias: Single = 0): UInt64;
+    /// <summary>Eight descriptors of SamplerHeap for a new table (the heap starts over when full).</summary>
+    function NewSamplerTable: Integer;
+    function RawSamplerTable(const ASamplers: array of TFastSampler; const ACount: Integer): UInt64;
+    function RawPso(const AKey: Pointer; const AKeySize: Integer; const AVS, APS: TFastShader;
+      const ALayout: TFastVertexLayout; const AState: TFastRawState; const ATopology: TD3D12_PRIMITIVE_TOPOLOGY_TYPE;
+      const ASamples: Integer; const ADepth: Boolean; const AFormat: TDXGI_FORMAT): ID3D12PipelineState;
+  end;
+
+  /// <summary>The texture of a TFastTexture (raw draws). State and view belong to the render thread.</summary>
+  TRawTexture12 = class(TInterfacedObject)
+  public
+    Resource: ID3D12Resource;
+    Format, ViewFormat: TDXGI_FORMAT;
+    Width, Height, Mips: Integer;
+    Cube: Boolean;
+    State: TD3D12_RESOURCE_STATES;
+    Owner: TGpu12Context;
+    Srv: TD3D12_CPU_DESCRIPTOR_HANDLE;
+    destructor Destroy; override;
+    procedure Use(const AState: TD3D12_RESOURCE_STATES);
+    function ShaderView: TD3D12_CPU_DESCRIPTOR_HANDLE;
+  end;
+
+  /// <summary>The buffer of a TFastBuffer (raw draws). Buffers go back to the common state after every list.</summary>
+  TRawBuffer12 = class(TInterfacedObject)
+  public
+    Resource: ID3D12Resource;
+    Bytes: UInt64;
+    State: TD3D12_RESOURCE_STATES;
+    StateCtx: Pointer;
+    StateGen: Integer;
+    destructor Destroy; override;
+    procedure Use(const AState: TD3D12_RESOURCE_STATES);
   end;
 
   // Commands (payloads of FastBridge.RecordNative).
@@ -667,6 +724,62 @@ type
     Flags: Cardinal;
   end;
 
+  PCmdRawDraw = ^TCmdRawDraw;
+  /// <summary>A raw draw. Followed by the vertices and the indices when they are not in buffers, then the constants of
+  /// the two stages.</summary>
+  TCmdRawDraw = packed record
+    Pso: Pointer;
+    Topology: TD3D_PRIMITIVE_TOPOLOGY;
+    StencilRef: Cardinal;
+    Scissor, Viewport: TRect;
+    VertexBuffer, IndexBuffer: Pointer;   // TRawBuffer12, kept alive by the command; nil: the data follows
+    VertexOffset, IndexOffset: Integer;
+    VertexBytes, IndexBytes, VertexStride, IndexCount, BaseVertex: Integer;
+    IndexFormat: TDXGI_FORMAT;
+    VSBytes, PSBytes: Integer;
+    UnitCount: Integer;
+    Units: array[0..7] of Pointer;   // TRawTexture12, kept alive by the command; nil: the blank texture
+    Samplers: UInt64;
+  end;
+
+  PCmdRawUpload = ^TCmdRawUpload;
+  /// <summary>Pixels (or blocks) into a rectangle of a subresource of a raw texture: from Blob (a TBlob), or
+  /// following the command when it is nil.</summary>
+  TCmdRawUpload = packed record
+    Texture: Pointer;   // TRawTexture12
+    Blob: Pointer;
+    Subresource, X, Y, Width, Height: Integer;
+    /// <summary>Rows of the data (block rows for compressed formats), bytes per row, and the row pitch.</summary>
+    Rows, RowBytes, Pitch: Integer;
+    Compressed: Boolean;
+    Pad: array[0..2] of Byte;
+  end;
+
+  PCmdRawWrite = ^TCmdRawWrite;
+  TCmdRawWrite = packed record
+    Buffer: Pointer;   // TRawBuffer12
+    Blob: Pointer;
+    Offset, Size: Integer;
+  end;
+
+  PCmdRawCopy = ^TCmdRawCopy;
+  TCmdRawCopy = packed record
+    Source: Pointer;   // TTexture12 (the target or the depth buffer)
+    Dest: Pointer;     // TRawTexture12
+    Box: TD3D12_BOX;
+    X, Y: Integer;
+    Whole: Boolean;
+    Pad: array[0..2] of Byte;
+  end;
+
+  PCmdRawReadback = ^TCmdRawReadback;
+  TCmdRawReadback = packed record
+    Source: Pointer;
+    Dest: Pointer;   // ID3D12Resource (read-back buffer)
+    Subresource: Integer;
+    Footprint: TD3D12_PLACED_SUBRESOURCE_FOOTPRINT;
+  end;
+
   /// <summary>Render-thread state of the 3D commands on the canvas's open list.</summary>
   TReplay = record
     Ctx: Pointer;
@@ -679,6 +792,8 @@ type
     Topology: TD3D_PRIMITIVE_TOPOLOGY;
     StencilRef: Cardinal;
     Scissor: TRect;
+    /// <summary>The viewport a raw draw set (empty: the whole target).</summary>
+    Viewport: TRect;
     UnitIds: array[0..7] of Integer;
     UnitsBound: Boolean;
     Samplers: UInt64;
@@ -1018,6 +1133,9 @@ begin
   Layouts := TDictionary<UInt64, TFastVertexLayout>.Create;
   Offsets := TDictionary<UInt64, TLayoutOffsets>.Create;
   SamplerTables := TDictionary<Cardinal, UInt64>.Create;
+  RawPsos := TDictionary<UInt64, ID3D12PipelineState>.Create;
+  RawSamplers := TDictionary<UInt64, Integer>.Create;
+  RawSamplerTables := TDictionary<UInt64, UInt64>.Create;
 
   Ranges[0].Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 8, 0);
   Ranges[1].Init(D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER, 8, 0);
@@ -1046,6 +1164,10 @@ begin
   HeapDesc.Flags := D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
   Check(Device.CreateDescriptorHeap(@HeapDesc, IID_ID3D12DescriptorHeap, @SamplerSource), 'CreateDescriptorHeap');
   SamplerSource.GetCPUDescriptorHandleForHeapStart(SamplerSourceCpu);
+  HeapDesc.NumDescriptors := RawSamplerCount;
+  Check(Device.CreateDescriptorHeap(@HeapDesc, IID_ID3D12DescriptorHeap, @RawSamplerSource),
+    'CreateDescriptorHeap (raw samplers)');
+  RawSamplerSource.GetCPUDescriptorHandleForHeapStart(RawSamplerSourceCpu);
   for I := 0 to 3 do
   begin
     Sampler := SamplerDesc(I, 0);
@@ -1060,6 +1182,9 @@ begin
   Layouts.Free;
   Offsets.Free;
   SamplerTables.Free;
+  RawPsos.Free;
+  RawSamplers.Free;
+  RawSamplerTables.Free;
   inherited;
 end;
 
@@ -1098,9 +1223,24 @@ begin
   Offsets.Add(Key, AOffsets);
 end;
 
+function TShared.NewSamplerTable: Integer;
+begin
+  if SamplerNext + 8 > SamplerHeapSize then
+  begin
+    // A table per filter combination; FMX uses a handful. Start over when the heap is full.
+    FastBridge.Sync();
+    TGpu12Backend.WaitIdle;
+    SamplerTables.Clear;
+    RawSamplerTables.Clear;
+    SamplerNext := 0;
+  end;
+  Result := SamplerNext;
+  Inc(SamplerNext, 8);
+end;
+
 function TShared.SamplerTable(const AFilters: Cardinal; const ABias: Single): UInt64;
 var
-  I: Integer;
+  I, First: Integer;
   Dst: TD3D12_CPU_DESCRIPTOR_HANDLE;
   Key: Cardinal;
   Bias: SmallInt;
@@ -1110,26 +1250,150 @@ begin
   Key := AFilters or (Cardinal(Word(Bias)) shl 16);
   if SamplerTables.TryGetValue(Key, Result) then
     Exit;
-  if SamplerNext + 8 > SamplerHeapSize then
-  begin
-    // A table per filter combination; FMX uses a handful. Start over when the heap is full.
-    FastBridge.Sync();
-    TGpu12Backend.WaitIdle;
-    SamplerTables.Clear;
-    SamplerNext := 0;
-  end;
+  First := NewSamplerTable;
   for I := 0 to 7 do
   begin
-    Dst := Offset(SamplerCpu, SamplerNext + I, SamplerIncrement);
+    Dst := Offset(SamplerCpu, First + I, SamplerIncrement);
     if Bias = 0 then
       Device.CopyDescriptorsSimple(1, Dst, Offset(SamplerSourceCpu, (AFilters shr (2 * I)) and 3, SamplerIncrement),
         D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER)
     else
       Device.CreateSampler(SamplerDesc((AFilters shr (2 * I)) and 3, Bias / 256), Dst);
   end;
-  Result := SamplerGpu.ptr + UInt64(SamplerNext) * SamplerIncrement;
+  Result := SamplerGpu.ptr + UInt64(First) * SamplerIncrement;
   SamplerTables.Add(Key, Result);
-  Inc(SamplerNext, 8);
+end;
+
+function TShared.RawSamplerTable(const ASamplers: array of TFastSampler; const ACount: Integer): UInt64;
+var
+  Keys: array[0..7] of UInt64;
+  Key: UInt64;
+  I, First, Index: Integer;
+  Desc: TD3D12_SAMPLER_DESC;
+  S: TFastSampler;
+begin
+  for I := 0 to 7 do
+    if I < ACount then
+      Keys[I] := FastHash(@ASamplers[I], SizeOf(TFastSampler))
+    else
+      Keys[I] := 0;
+  Key := FastHash(@Keys, SizeOf(Keys));
+  if RawSamplerTables.TryGetValue(Key, Result) then
+    Exit;
+  First := NewSamplerTable;
+  for I := 0 to 7 do
+  begin
+    if I < ACount then
+      S := ASamplers[I]
+    else
+      S := TFastSampler.Default;
+    Keys[I] := FastHash(@S, SizeOf(S));
+    if not RawSamplers.TryGetValue(Keys[I], Index) then
+    begin
+      // One descriptor per sampler description the program uses (a few dozen at most in practice).
+      Index := RawSamplers.Count;
+      if Index >= RawSamplerCount then
+        raise EContext3DException.CreateFmt('FastContext3D12: more than %d raw samplers', [RawSamplerCount]);
+      FillChar(Desc, SizeOf(Desc), 0);
+      Desc.Filter := TD3D12_FILTER(S.Filter);
+      Desc.AddressU := TD3D12_TEXTURE_ADDRESS_MODE(S.AddressU);
+      Desc.AddressV := TD3D12_TEXTURE_ADDRESS_MODE(S.AddressV);
+      Desc.AddressW := TD3D12_TEXTURE_ADDRESS_MODE(S.AddressW);
+      Desc.MipLODBias := S.MipLODBias;
+      Desc.MaxAnisotropy := Max(1, S.MaxAnisotropy);
+      Desc.ComparisonFunc := D3D12_COMPARISON_FUNC_NEVER;
+      Move(S.BorderColor, Desc.BorderColor, SizeOf(Desc.BorderColor));
+      Desc.MinLOD := S.MinLOD;
+      Desc.MaxLOD := S.MaxLOD;
+      Device.CreateSampler(Desc, Offset(RawSamplerSourceCpu, Index, SamplerIncrement));
+      RawSamplers.Add(Keys[I], Index);
+    end;
+    Device.CopyDescriptorsSimple(1, Offset(SamplerCpu, First + I, SamplerIncrement),
+      Offset(RawSamplerSourceCpu, Index, SamplerIncrement), D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER);
+  end;
+  Result := SamplerGpu.ptr + UInt64(First) * SamplerIncrement;
+  RawSamplerTables.Add(Key, Result);
+end;
+
+function TShared.RawPso(const AKey: Pointer; const AKeySize: Integer; const AVS, APS: TFastShader;
+  const ALayout: TFastVertexLayout; const AState: TFastRawState; const ATopology: TD3D12_PRIMITIVE_TOPOLOGY_TYPE;
+  const ASamples: Integer; const ADepth: Boolean; const AFormat: TDXGI_FORMAT): ID3D12PipelineState;
+var
+  Hash: UInt64;
+  Desc: TD3D12_GRAPHICS_PIPELINE_STATE_DESC;
+  Elements: TArray<TD3D12_INPUT_ELEMENT_DESC>;
+  I: Integer;
+begin
+  Hash := FastHash(AKey, AKeySize);
+  if RawPsos.TryGetValue(Hash, Result) then
+    Exit;
+  SetLength(Elements, Length(ALayout.Elements));
+  for I := 0 to High(Elements) do
+  begin
+    Elements[I].SemanticName := ALayout.Elements[I].Semantic;
+    Elements[I].SemanticIndex := ALayout.Elements[I].SemanticIndex;
+    Elements[I].Format := TDXGI_FORMAT(ALayout.Elements[I].Format);
+    Elements[I].InputSlot := 0;
+    Elements[I].AlignedByteOffset := ALayout.Elements[I].Offset;
+    Elements[I].InputSlotClass := D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA;
+    Elements[I].InstanceDataStepRate := 0;
+  end;
+  Desc := Default(TD3D12_GRAPHICS_PIPELINE_STATE_DESC);
+  Desc.pRootSignature := Root;
+  Desc.VS := TD3D12_SHADER_BYTECODE.Create(@AVS.Code[0], Length(AVS.Code));
+  Desc.PS := TD3D12_SHADER_BYTECODE.Create(@APS.Code[0], Length(APS.Code));
+  Desc.BlendState.RenderTarget[0].BlendEnable := AState.BlendEnable;
+  Desc.BlendState.RenderTarget[0].SrcBlend := TD3D12_BLEND(Ord(AState.SrcBlend));
+  Desc.BlendState.RenderTarget[0].DestBlend := TD3D12_BLEND(Ord(AState.DestBlend));
+  Desc.BlendState.RenderTarget[0].BlendOp := TD3D12_BLEND_OP(Ord(AState.BlendOp));
+  Desc.BlendState.RenderTarget[0].SrcBlendAlpha := TD3D12_BLEND(Ord(AState.SrcBlendAlpha));
+  Desc.BlendState.RenderTarget[0].DestBlendAlpha := TD3D12_BLEND(Ord(AState.DestBlendAlpha));
+  Desc.BlendState.RenderTarget[0].BlendOpAlpha := TD3D12_BLEND_OP(Ord(AState.BlendOpAlpha));
+  Desc.BlendState.RenderTarget[0].LogicOp := D3D12_LOGIC_OP_NOOP;
+  Desc.BlendState.RenderTarget[0].RenderTargetWriteMask := AState.WriteMask and $F;
+  Desc.SampleMask := $FFFFFFFF;
+  Desc.RasterizerState := TD3D12_RASTERIZER_DESC.Create(D3D12_DEFAULT);
+  if AState.Wireframe then
+    Desc.RasterizerState.FillMode := D3D12_FILL_MODE_WIREFRAME;
+  Desc.RasterizerState.CullMode := TD3D12_CULL_MODE(Ord(AState.Cull));
+  Desc.RasterizerState.FrontCounterClockwise := AState.FrontCounterClockwise;
+  Desc.RasterizerState.DepthBias := AState.DepthBias;
+  Desc.RasterizerState.DepthBiasClamp := AState.DepthBiasClamp;
+  Desc.RasterizerState.SlopeScaledDepthBias := AState.SlopeScaledDepthBias;
+  Desc.RasterizerState.DepthClipEnable := True;
+  Desc.RasterizerState.MultisampleEnable := True;
+  Desc.DepthStencilState := TD3D12_DEPTH_STENCIL_DESC.Create(D3D12_DEFAULT);
+  Desc.DepthStencilState.DepthEnable := AState.DepthEnable and ADepth;
+  if AState.DepthWrite then
+    Desc.DepthStencilState.DepthWriteMask := D3D12_DEPTH_WRITE_MASK_ALL
+  else
+    Desc.DepthStencilState.DepthWriteMask := D3D12_DEPTH_WRITE_MASK_ZERO;
+  Desc.DepthStencilState.DepthFunc := TD3D12_COMPARISON_FUNC(Ord(AState.DepthFunc));
+  Desc.DepthStencilState.StencilEnable := AState.StencilEnable and ADepth;
+  Desc.DepthStencilState.StencilReadMask := AState.StencilReadMask;
+  Desc.DepthStencilState.StencilWriteMask := AState.StencilWriteMask;
+  Desc.DepthStencilState.FrontFace.StencilFailOp := TD3D12_STENCIL_OP(Ord(AState.FrontFace.Fail));
+  Desc.DepthStencilState.FrontFace.StencilDepthFailOp := TD3D12_STENCIL_OP(Ord(AState.FrontFace.DepthFail));
+  Desc.DepthStencilState.FrontFace.StencilPassOp := TD3D12_STENCIL_OP(Ord(AState.FrontFace.Pass));
+  Desc.DepthStencilState.FrontFace.StencilFunc := TD3D12_COMPARISON_FUNC(Ord(AState.FrontFace.Func));
+  Desc.DepthStencilState.BackFace.StencilFailOp := TD3D12_STENCIL_OP(Ord(AState.BackFace.Fail));
+  Desc.DepthStencilState.BackFace.StencilDepthFailOp := TD3D12_STENCIL_OP(Ord(AState.BackFace.DepthFail));
+  Desc.DepthStencilState.BackFace.StencilPassOp := TD3D12_STENCIL_OP(Ord(AState.BackFace.Pass));
+  Desc.DepthStencilState.BackFace.StencilFunc := TD3D12_COMPARISON_FUNC(Ord(AState.BackFace.Func));
+  if Length(Elements) > 0 then
+    Desc.InputLayout.pInputElementDescs := @Elements[0];
+  Desc.InputLayout.NumElements := Length(Elements);
+  Desc.PrimitiveTopologyType := ATopology;
+  Desc.NumRenderTargets := 1;
+  Desc.RTVFormats[0] := AFormat;
+  if ADepth then
+    Desc.DSVFormat := DXGI_FORMAT_D24_UNORM_S8_UINT
+  else
+    Desc.DSVFormat := DXGI_FORMAT_UNKNOWN;
+  Desc.SampleDesc.Count := ASamples;
+  Check(Device.CreateGraphicsPipelineState(@Desc, IID_ID3D12PipelineState, Result),
+    'CreateGraphicsPipelineState (raw)');
+  RawPsos.Add(Hash, Result);
 end;
 
 function TShared.Pso(const AKey: TPsoKey; const ALayout: TFastVertexLayout): ID3D12PipelineState;
@@ -1285,7 +1549,35 @@ begin
     VP.MinDepth := 0;
     VP.MaxDepth := 1;
     Result.RSSetViewports(1, @VP);
+    R.Viewport := TRect.Empty;
   end;
+end;
+
+/// <summary>The viewport of the commands that follow (empty: the whole target).</summary>
+procedure SetReplayViewport(const L: ID3D12GraphicsCommandList; const ARect: TRect);
+var
+  VP: TD3D12_VIEWPORT;
+begin
+  if ARect = R.Viewport then
+    Exit;
+  if ARect.IsEmpty then
+  begin
+    VP.TopLeftX := 0;
+    VP.TopLeftY := 0;
+    VP.Width := R.Width;
+    VP.Height := R.Height;
+  end
+  else
+  begin
+    VP.TopLeftX := ARect.Left;
+    VP.TopLeftY := ARect.Top;
+    VP.Width := ARect.Width;
+    VP.Height := ARect.Height;
+  end;
+  VP.MinDepth := 0;
+  VP.MaxDepth := 1;
+  L.RSSetViewports(1, @VP);
+  R.Viewport := ARect;
 end;
 
 /// <summary>The target and depth buffer in the states for drawing.</summary>
@@ -1458,6 +1750,8 @@ begin
   C := AData;
   Ctx := Gpu12;
   L := Begin3D;
+  // A raw draw left a viewport of its own.
+  SetReplayViewport(L, TRect.Empty);
   NeedTable := not R.UnitsBound;
   if not NeedTable then
     for I := 0 to C.UnitCount - 1 do
@@ -1701,6 +1995,336 @@ begin
   Gpu12.Submit;
   // A removed device is found by the canvas at its next scene (TFastDevice.RemovedReason).
   IDXGISwapChain3(C.SwapChain).Present(0, C.Flags);
+end;
+
+{ TRawTexture12 }
+
+destructor TRawTexture12.Destroy;
+var
+  C: TGpu12Context;
+begin
+  // Any thread: the last reference may go with a command chunk on the render thread.
+  if (Resource <> nil) or (Owner <> nil) then
+  begin
+    TFastDevice.Lock;
+    try
+      C := Gpu12Current;
+      if (C <> nil) and (C = Owner) then
+        C.SrvPool.Release(Srv);
+      if C <> nil then
+        C.Retire(Resource);
+      Resource := nil;
+    finally
+      TFastDevice.Unlock;
+    end;
+  end;
+  inherited;
+end;
+
+procedure TRawTexture12.Use(const AState: TD3D12_RESOURCE_STATES);
+begin
+  Gpu12.Transition(Resource, State, AState);
+end;
+
+function TRawTexture12.ShaderView: TD3D12_CPU_DESCRIPTOR_HANDLE;
+var
+  C: TGpu12Context;
+  Desc: TD3D12_SHADER_RESOURCE_VIEW_DESC;
+begin
+  C := Gpu12;
+  if Owner <> C then
+  begin
+    Owner := C;
+    Srv.ptr := 0;
+  end;
+  if Srv.ptr = 0 then
+  begin
+    FillChar(Desc, SizeOf(Desc), 0);
+    Desc.Format := ViewFormat;
+    Desc.Shader4ComponentMapping := D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    if Cube then
+    begin
+      Desc.ViewDimension := D3D12_SRV_DIMENSION_TEXTURECUBE;
+      Desc.TextureCube.MipLevels := Mips;
+    end
+    else
+    begin
+      Desc.ViewDimension := D3D12_SRV_DIMENSION_TEXTURE2D;
+      Desc.Texture2D.MipLevels := Mips;
+    end;
+    Srv := C.SrvPool.Alloc;
+    C.Device.CreateShaderResourceView(Resource, @Desc, Srv);
+  end;
+  Result := Srv;
+end;
+
+{ TRawBuffer12 }
+
+destructor TRawBuffer12.Destroy;
+var
+  C: TGpu12Context;
+begin
+  if Resource <> nil then
+  begin
+    TFastDevice.Lock;
+    try
+      C := Gpu12Current;
+      if C <> nil then
+        C.Retire(Resource);
+      Resource := nil;
+    finally
+      TFastDevice.Unlock;
+    end;
+  end;
+  inherited;
+end;
+
+procedure TRawBuffer12.Use(const AState: TD3D12_RESOURCE_STATES);
+var
+  C: TGpu12Context;
+begin
+  C := Gpu12;
+  // The open list: a buffer's state is the common state again in a list after the one that set it.
+  C.List;
+  if (StateCtx <> Pointer(C)) or (StateGen <> C.ListGen) then
+    State := D3D12_RESOURCE_STATE_COMMON;
+  StateCtx := C;
+  StateGen := C.ListGen;
+  C.Transition(Resource, State, AState);
+end;
+
+{ Raw draws (render thread) }
+
+procedure HandleRawDraw(const AData: Pointer);
+var
+  C: PCmdRawDraw;
+  Ctx: TGpu12Context;
+  L: ID3D12GraphicsCommandList;
+  P, Src: PByte;
+  Res: ID3D12Resource;
+  Off, Gpu: UInt64;
+  VB: TD3D12_VERTEX_BUFFER_VIEW;
+  IB: TD3D12_INDEX_BUFFER_VIEW;
+  Table: TD3D12_CPU_DESCRIPTOR_HANDLE;
+  TableGpu: TD3D12_GPU_DESCRIPTOR_HANDLE;
+  I: Integer;
+  View: TD3D12_CPU_DESCRIPTOR_HANDLE;
+  VBuf, IBuf: TRawBuffer12;
+begin
+  C := AData;
+  Ctx := Gpu12;
+  L := Begin3D;
+  if not G.BlankReady then
+    EnsureBlank;
+  if C.UnitCount > 0 then
+  begin
+    // May hand the list to the GPU when the descriptor ring is full: then the next list is set up again.
+    Table := Ctx.AllocTable(8, TableGpu);
+    L := Begin3D;
+    for I := 0 to 7 do
+    begin
+      if (I < C.UnitCount) and (C.Units[I] <> nil) then
+        View := TRawTexture12(C.Units[I]).ShaderView
+      else
+        View := G.Blank.ShaderView;
+      Ctx.Device.CopyDescriptorsSimple(1, Offset(Table, I, Ctx.SrvIncrement), View,
+        D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+    end;
+    L.SetGraphicsRootDescriptorTable(2, TableGpu);
+    // FMX's draws bind their own table and samplers again.
+    R.UnitsBound := False;
+    TableGpu.ptr := C.Samplers;
+    L.SetGraphicsRootDescriptorTable(3, TableGpu);
+    R.Samplers := 0;
+  end;
+  UseTarget;
+  for I := 0 to C.UnitCount - 1 do
+    if C.Units[I] <> nil then
+      TRawTexture12(C.Units[I]).Use(StateRead);
+  G.Blank.Use(StateRead);
+  VBuf := C.VertexBuffer;
+  IBuf := C.IndexBuffer;
+  if VBuf <> nil then
+    VBuf.Use(D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER);
+  if IBuf <> nil then
+    IBuf.Use(D3D12_RESOURCE_STATE_INDEX_BUFFER);
+  Ctx.FlushBarriers;
+  if C.Pso <> Pointer(R.Pso) then
+  begin
+    R.Pso := ID3D12PipelineState(C.Pso);
+    L.SetPipelineState(R.Pso);
+  end;
+  if C.Topology <> R.Topology then
+  begin
+    L.IASetPrimitiveTopology(C.Topology);
+    R.Topology := C.Topology;
+  end;
+  if C.StencilRef <> R.StencilRef then
+  begin
+    L.OMSetStencilRef(C.StencilRef);
+    R.StencilRef := C.StencilRef;
+  end;
+  if C.Scissor <> R.Scissor then
+  begin
+    L.RSSetScissorRects(1, @C.Scissor);
+    R.Scissor := C.Scissor;
+  end;
+  SetReplayViewport(L, C.Viewport);
+  Src := PByte(C) + SizeOf(TCmdRawDraw);
+  if VBuf <> nil then
+  begin
+    VB.BufferLocation := VBuf.Resource.GetGPUVirtualAddress + UInt64(C.VertexOffset);
+    VB.SizeInBytes := VBuf.Bytes - UInt64(C.VertexOffset);
+  end
+  else
+  begin
+    P := Ctx.Upload(C.VertexBytes, 16, Res, Off, Gpu);
+    Move(Src^, P^, C.VertexBytes);
+    Inc(Src, C.VertexBytes);
+    VB.BufferLocation := Gpu;
+    VB.SizeInBytes := C.VertexBytes;
+  end;
+  VB.StrideInBytes := C.VertexStride;
+  L.IASetVertexBuffers(0, 1, @VB);
+  if IBuf <> nil then
+  begin
+    IB.BufferLocation := IBuf.Resource.GetGPUVirtualAddress + UInt64(C.IndexOffset);
+    IB.SizeInBytes := IBuf.Bytes - UInt64(C.IndexOffset);
+  end
+  else
+  begin
+    P := Ctx.Upload(C.IndexBytes, 16, Res, Off, Gpu);
+    Move(Src^, P^, C.IndexBytes);
+    Inc(Src, AlignUp(C.IndexBytes, 4));
+    IB.BufferLocation := Gpu;
+    IB.SizeInBytes := C.IndexBytes;
+  end;
+  IB.Format := C.IndexFormat;
+  L.IASetIndexBuffer(IB);
+  if C.VSBytes > 0 then
+  begin
+    P := Ctx.Upload(AlignUp(C.VSBytes, 256), 256, Res, Off, Gpu);
+    Move(Src^, P^, C.VSBytes);
+    L.SetGraphicsRootConstantBufferView(0, Gpu);
+    Inc(Src, C.VSBytes);
+  end;
+  if C.PSBytes > 0 then
+  begin
+    P := Ctx.Upload(AlignUp(C.PSBytes, 256), 256, Res, Off, Gpu);
+    Move(Src^, P^, C.PSBytes);
+    L.SetGraphicsRootConstantBufferView(1, Gpu);
+  end;
+  // FMX's draws bind their constants again.
+  R.VSBound := False;
+  R.PSBound := False;
+  L.DrawIndexedInstanced(C.IndexCount, 1, 0, C.BaseVertex, 0);
+end;
+
+procedure HandleRawUpload(const AData: Pointer);
+var
+  C: PCmdRawUpload;
+  T: TRawTexture12;
+  Ctx: TGpu12Context;
+  Src, P: PByte;
+  Res: ID3D12Resource;
+  Off, Gpu: UInt64;
+  Pitch, I: Integer;
+  DstLoc, SrcLoc: TD3D12_TEXTURE_COPY_LOCATION;
+begin
+  C := AData;
+  T := C.Texture;
+  if T.Resource = nil then
+    Exit;
+  if C.Blob <> nil then
+    Src := @TBlob(C.Blob).Data[0]
+  else
+    Src := PByte(C) + SizeOf(TCmdRawUpload);
+  Ctx := Gpu12;
+  Pitch := AlignUp(C.RowBytes, D3D12_TEXTURE_DATA_PITCH_ALIGNMENT);
+  P := Ctx.Upload(NativeInt(Pitch) * C.Rows, D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT, Res, Off, Gpu);
+  for I := 0 to C.Rows - 1 do
+    Move((Src + NativeInt(I) * C.Pitch)^, (P + NativeInt(I) * Pitch)^, C.RowBytes);
+  T.Use(D3D12_RESOURCE_STATE_COPY_DEST);
+  Ctx.FlushBarriers;
+  DstLoc := TD3D12_TEXTURE_COPY_LOCATION.Create(T.Resource, C.Subresource);
+  SrcLoc.pResource := Res;
+  SrcLoc._Type := D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+  SrcLoc.PlacedFootprint.Offset := Off;
+  SrcLoc.PlacedFootprint.Footprint.Format := T.Format;
+  if C.Compressed then
+  begin
+    // Whole blocks: the footprint of a level smaller than a block is the block.
+    SrcLoc.PlacedFootprint.Footprint.Width := AlignUp(C.Width, 4);
+    SrcLoc.PlacedFootprint.Footprint.Height := AlignUp(C.Height, 4);
+  end
+  else
+  begin
+    SrcLoc.PlacedFootprint.Footprint.Width := C.Width;
+    SrcLoc.PlacedFootprint.Footprint.Height := C.Height;
+  end;
+  SrcLoc.PlacedFootprint.Footprint.Depth := 1;
+  SrcLoc.PlacedFootprint.Footprint.RowPitch := Pitch;
+  Ctx.List.CopyTextureRegion(@DstLoc, C.X, C.Y, 0, @SrcLoc, nil);
+end;
+
+procedure HandleRawWrite(const AData: Pointer);
+var
+  C: PCmdRawWrite;
+  B: TRawBuffer12;
+  Src: PByte;
+begin
+  C := AData;
+  B := C.Buffer;
+  if B.Resource = nil then
+    Exit;
+  if C.Blob <> nil then
+    Src := @TBlob(C.Blob).Data[0]
+  else
+    Src := PByte(C) + SizeOf(TCmdRawWrite);
+  B.Use(D3D12_RESOURCE_STATE_COPY_DEST);
+  Gpu12.CopyToBuffer(B.Resource, B.State, C.Offset, Src, C.Size);
+end;
+
+procedure HandleRawCopy(const AData: Pointer);
+var
+  C: PCmdRawCopy;
+  S: TTexture12;
+  D: TRawTexture12;
+  DstLoc, SrcLoc: TD3D12_TEXTURE_COPY_LOCATION;
+begin
+  C := AData;
+  S := C.Source;
+  D := C.Dest;
+  if (S.GpuResource = nil) or (D.Resource = nil) then
+    Exit;
+  S.Use(D3D12_RESOURCE_STATE_COPY_SOURCE);
+  D.Use(D3D12_RESOURCE_STATE_COPY_DEST);
+  Gpu12.FlushBarriers;
+  if C.Whole then
+    Gpu12.List.CopyResource(D.Resource, S.GpuResource)
+  else
+  begin
+    DstLoc := TD3D12_TEXTURE_COPY_LOCATION.Create(D.Resource, 0);
+    SrcLoc := TD3D12_TEXTURE_COPY_LOCATION.Create(S.GpuResource, 0);
+    Gpu12.List.CopyTextureRegion(@DstLoc, C.X, C.Y, 0, @SrcLoc, @C.Box);
+  end;
+end;
+
+procedure HandleRawReadback(const AData: Pointer);
+var
+  C: PCmdRawReadback;
+  S: TTexture12;
+  DstLoc, SrcLoc: TD3D12_TEXTURE_COPY_LOCATION;
+begin
+  C := AData;
+  S := C.Source;
+  if S.GpuResource = nil then
+    Exit;
+  S.Use(D3D12_RESOURCE_STATE_COPY_SOURCE);
+  Gpu12.FlushBarriers;
+  DstLoc := TD3D12_TEXTURE_COPY_LOCATION.Create(ID3D12Resource(C.Dest), C.Footprint);
+  SrcLoc := TD3D12_TEXTURE_COPY_LOCATION.Create(S.GpuResource, C.Subresource);
+  Gpu12.List.CopyTextureRegion(@DstLoc, 0, 0, 0, @SrcLoc, nil);
 end;
 
 /// <summary>Forgets the render-thread state (after a Sync: the render thread is idle).</summary>
@@ -2817,6 +3441,458 @@ end;
 
 { Textures }
 
+{ Raw draws (recording) }
+
+/// <summary>The FastCanvas shader of a TContextShader (made on first use).</summary>
+function RawShader(const AShader: TContextShader): TFastShader;
+begin
+  Result := nil;
+  if AShader = nil then
+    Exit;
+  if AShader.Handle = 0 then
+    TContextManager.InitializeShader(AShader);
+  Result := TFastShader(AShader.Handle);
+end;
+
+type
+  TRawPsoKey = packed record
+    VS, PS: Integer;
+    Layout: UInt64;
+    State: TFastRawState;
+    Topology: Byte;
+    Samples: Byte;
+    Depth: Boolean;
+    Pad: Byte;
+    Format: Integer;
+  end;
+
+procedure TFastContext3D12.DrawRaw(const ADraw: TFastRawDraw);
+const
+  Topologies: array[TPrimitivesKind] of TD3D_PRIMITIVE_TOPOLOGY = (D3D_PRIMITIVE_TOPOLOGY_POINTLIST,
+    D3D_PRIMITIVE_TOPOLOGY_LINELIST, D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+  Types: array[TPrimitivesKind] of TD3D12_PRIMITIVE_TOPOLOGY_TYPE = (D3D12_PRIMITIVE_TOPOLOGY_TYPE_POINT,
+    D3D12_PRIMITIVE_TOPOLOGY_TYPE_LINE, D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE);
+var
+  VS, PS: TFastShader;
+  S: TShared;
+  T: TTexture12;
+  Key: TRawPsoKey;
+  C: PCmdRawDraw;
+  VBytes, IBytes, VSBytes, PSBytes, I, N: Integer;
+  Dst: PByte;
+  Px: TSize;
+  VObj, IObj: IInterface;
+  Units: array[0..7] of IInterface;
+begin
+  if (BeginSceneCount = 0) or (ADraw.IndexCount <= 0) then
+    Exit;
+  VS := RawShader(ADraw.VertexShader);
+  PS := RawShader(ADraw.PixelShader);
+  if (VS = nil) or (PS = nil) or (Length(VS.Code) = 0) or (Length(PS.Code) = 0) then
+    Exit;
+  T := TTexture12(DrawTarget);
+  if T = nil then
+    Exit;
+  S := Shared;
+  FillChar(Key, SizeOf(Key), 0);
+  Key.VS := VS.Id;
+  Key.PS := PS.Id;
+  Key.Layout := ADraw.Layout.Hash;
+  Key.State := ADraw.State;
+  Key.Topology := Ord(Types[ADraw.Kind]);
+  Key.Samples := T.Samples;
+  Key.Depth := (FDepth <> nil) and ((FDlssState = nil) or not TDlssState(FDlssState as TObject).Active or FDlssPhase);
+  Key.Format := Ord(T.Format);
+  if ADraw.VertexBuffer <> nil then
+    VBytes := 0
+  else
+  begin
+    if (ADraw.Vertices = nil) or (ADraw.VertexCount <= 0) then
+      Exit;
+    VBytes := ADraw.Stride * ADraw.VertexCount;
+  end;
+  if ADraw.IndexBuffer <> nil then
+    IBytes := 0
+  else
+  begin
+    if ADraw.Indices = nil then
+      Exit;
+    IBytes := ADraw.IndexCount * (2 + 2 * Ord(ADraw.Index32));
+  end;
+  VSBytes := 0;
+  if ADraw.VSConstants <> nil then
+    VSBytes := ADraw.VSConstantSize;
+  PSBytes := 0;
+  if ADraw.PSConstants <> nil then
+    PSBytes := ADraw.PSConstantSize;
+  N := PS.TextureUnits;
+  for I := 0 to High(ADraw.Textures) do
+    if ADraw.Textures[I] <> nil then
+      N := Max(N, I + 1);
+  N := Min(N, 8);
+  // The GPU objects first: without one (no device right now) nothing is recorded.
+  VObj := nil;
+  IObj := nil;
+  if ADraw.VertexBuffer <> nil then
+  begin
+    VObj := ADraw.VertexBuffer.Native;
+    if VObj = nil then
+      Exit;
+  end;
+  if ADraw.IndexBuffer <> nil then
+  begin
+    IObj := ADraw.IndexBuffer.Native;
+    if IObj = nil then
+      Exit;
+  end;
+  for I := 0 to 7 do
+  begin
+    Units[I] := nil;
+    if (I < N) and (ADraw.Textures[I] <> nil) then
+      Units[I] := ADraw.Textures[I].Native;
+  end;
+  C := Rec(HandleRawDraw, SizeOf(TCmdRawDraw) + VBytes + AlignUp(IBytes, 4) + VSBytes + PSBytes);
+  C.Pso := Pointer(S.RawPso(@Key, SizeOf(Key), VS, PS, ADraw.Layout, ADraw.State, Types[ADraw.Kind], T.Samples,
+    Key.Depth, T.Format));
+  C.Topology := Topologies[ADraw.Kind];
+  C.StencilRef := ADraw.StencilRef;
+  Px := TargetPixels;
+  if ADraw.Scissor.IsEmpty then
+    C.Scissor := TRect.Create(0, 0, Px.Width, Px.Height)
+  else
+    C.Scissor := ADraw.Scissor;
+  C.Viewport := ADraw.Viewport;
+  C.VertexBuffer := nil;
+  C.IndexBuffer := nil;
+  if VObj <> nil then
+  begin
+    C.VertexBuffer := VObj as TObject;
+    Keep(VObj);
+  end;
+  if IObj <> nil then
+  begin
+    C.IndexBuffer := IObj as TObject;
+    Keep(IObj);
+  end;
+  C.VertexOffset := ADraw.VertexOffset;
+  C.IndexOffset := ADraw.IndexOffset;
+  C.VertexBytes := VBytes;
+  C.IndexBytes := IBytes;
+  C.VertexStride := ADraw.Stride;
+  C.IndexCount := ADraw.IndexCount;
+  if ADraw.IndexBuffer <> nil then
+    C.BaseVertex := ADraw.BaseVertex
+  else
+    C.BaseVertex := 0;
+  if ADraw.Index32 then
+    C.IndexFormat := DXGI_FORMAT_R32_UINT
+  else
+    C.IndexFormat := DXGI_FORMAT_R16_UINT;
+  C.VSBytes := VSBytes;
+  C.PSBytes := PSBytes;
+  C.UnitCount := N;
+  for I := 0 to 7 do
+  begin
+    C.Units[I] := nil;
+    if Units[I] <> nil then
+    begin
+      C.Units[I] := Units[I] as TObject;
+      Keep(Units[I]);
+    end;
+  end;
+  C.Samplers := 0;
+  if N > 0 then
+    C.Samplers := S.RawSamplerTable(ADraw.Samplers, N);
+  Dst := PByte(C) + SizeOf(TCmdRawDraw);
+  if VBytes > 0 then
+  begin
+    Move(ADraw.Vertices^, Dst^, VBytes);
+    Inc(Dst, VBytes);
+  end;
+  if IBytes > 0 then
+  begin
+    Move(ADraw.Indices^, Dst^, IBytes);
+    Inc(Dst, AlignUp(IBytes, 4));
+  end;
+  if VSBytes > 0 then
+  begin
+    Move(ADraw.VSConstants^, Dst^, VSBytes);
+    Inc(Dst, VSBytes);
+  end;
+  if PSBytes > 0 then
+    Move(ADraw.PSConstants^, Dst^, PSBytes);
+  // FMX's next draw sends its constants again.
+  FVSDirty := True;
+  FPSDirty := True;
+end;
+
+procedure TFastContext3D12.CopyToTexture(const ADest: TFastTexture; const ADestX, ADestY: Integer;
+  const ASource: TRect; const ADepth: Boolean);
+var
+  Src: TTexture12;
+  Obj: IInterface;
+  C: PCmdRawCopy;
+begin
+  if (ADest = nil) or (BeginSceneCount = 0) then
+    Exit;
+  TCanvas.Lock;
+  try
+    Obj := ADest.Native;
+    if Obj = nil then
+      Exit;
+    if ADepth then
+    begin
+      if (FDepth = nil) or (FSamples > 1) then
+        Exit;
+      Src := TTexture12(FDepth as TObject);
+    end
+    else
+    begin
+      if FMSColor <> nil then
+        Exit;
+      Src := TTexture12(DrawTarget);
+    end;
+    if Src = nil then
+      Exit;
+    Src.Used := True;
+    C := Rec(HandleRawCopy, SizeOf(TCmdRawCopy), Obj);
+    C.Source := Src;
+    Keep(Src);
+    C.Dest := Obj as TObject;
+    C.Box.left := ASource.Left;
+    C.Box.top := ASource.Top;
+    C.Box.front := 0;
+    C.Box.right := ASource.Right;
+    C.Box.bottom := ASource.Bottom;
+    C.Box.back := 1;
+    C.X := ADestX;
+    C.Y := ADestY;
+    C.Whole := ADepth;
+  finally
+    TCanvas.Unlock;
+  end;
+end;
+
+procedure TFastContext3D12.ReadTarget(const ARect: TRect; const AKind: TFastReadKind; const ADest: Pointer;
+  const APitch: Integer);
+var
+  Src: TTexture12;
+  Desc: TD3D12_RESOURCE_DESC;
+  Footprint: TD3D12_PLACED_SUBRESOURCE_FOOTPRINT;
+  Total, Size: UInt64;
+  Props: TD3D12_HEAP_PROPERTIES;
+  Buf: TD3D12_RESOURCE_DESC;
+  Readback: ID3D12Resource;
+  C: PCmdRawReadback;
+  Range: TD3D12_RANGE;
+  P: Pointer;
+  R: TRect;
+  X, Y, Sub: Integer;
+  Row: PByte;
+begin
+  if AKind = TFastReadKind.Color then
+  begin
+    if FHdrColor <> nil then
+      Src := TTexture12(FHdrColor as TObject)
+    else if (Texture <> nil) and (Texture.Handle <> 0) then
+      Src := TTexture12(Texture.Handle)
+    else if FBuffer <> nil then
+      Src := TTexture12(FBuffer as TObject)
+    else
+      Exit;
+    Desc := TD3D12_RESOURCE_DESC.CreateTex2D(Src.Format, Src.Width, Src.Height, 1, 1);
+    Sub := 0;
+  end
+  else
+  begin
+    if (FDepth = nil) or (FSamples > 1) then
+      Exit;
+    Src := TTexture12(FDepth as TObject);
+    Desc := TD3D12_RESOURCE_DESC.CreateTex2D(DXGI_FORMAT_D24_UNORM_S8_UINT, Src.Width, Src.Height, 1, 1);
+    // plane 0: depth, plane 1: stencil
+    Sub := Ord(AKind = TFastReadKind.Stencil);
+  end;
+  R := TRect.Intersect(ARect, TRect.Create(0, 0, Src.Width, Src.Height));
+  if R.IsEmpty or (Src.Resource = nil) and (Src.Canvas = nil) then
+    Exit;
+  Shared.Device.GetCopyableFootprints(@Desc, Sub, 1, 0, @Footprint, nil, nil, Total);
+  Size := Max(Total, UInt64(Footprint.Footprint.RowPitch) * Cardinal(Src.Height));
+  Props := TD3D12_HEAP_PROPERTIES.Create(D3D12_HEAP_TYPE_READBACK);
+  Buf := TD3D12_RESOURCE_DESC.CreateBuffer(Size);
+  Check(G.Device.CreateCommittedResource(@Props, D3D12_HEAP_FLAG_NONE, @Buf, D3D12_RESOURCE_STATE_COPY_DEST, nil,
+    IID_ID3D12Resource, Readback), 'CreateCommittedResource (read-back)');
+  TCanvas.Lock;
+  try
+    Src.Used := True;
+    C := Rec(HandleRawReadback, SizeOf(TCmdRawReadback), Src);
+    C.Source := Src;
+    C.Dest := Pointer(Readback);
+    C.Subresource := Sub;
+    C.Footprint := Footprint;
+    Keep(Readback);
+  finally
+    TCanvas.Unlock;
+  end;
+  // Everything recorded so far runs, then the GPU finishes it.
+  FastBridge.Sync();
+  TGpu12Backend.WaitIdle;
+  Range._Begin := 0;
+  Range._End := Size;
+  Check(Readback.Map(0, @Range, P), 'Map (read-back)');
+  try
+    for Y := R.Top to R.Bottom - 1 do
+    begin
+      Row := PByte(P) + NativeInt(Y) * NativeInt(Footprint.Footprint.RowPitch);
+      case AKind of
+        TFastReadKind.Color:
+          if Src.Format = DXGI_FORMAT_R16G16B16A16_FLOAT then
+            for X := R.Left to R.Right - 1 do
+              PCardinal(PByte(ADest) + NativeInt(Y - R.Top) * APitch + (X - R.Left) * 4)^ :=
+                GpuHalfTexelToBgra(PWord(Row + X * 8))
+          else
+            Move((Row + R.Left * 4)^, (PByte(ADest) + NativeInt(Y - R.Top) * APitch)^, R.Width * 4);
+        TFastReadKind.Depth:
+          for X := R.Left to R.Right - 1 do
+            PSingle(PByte(ADest) + NativeInt(Y - R.Top) * APitch + (X - R.Left) * 4)^ :=
+              (PCardinal(Row + X * 4)^ and $FFFFFF) / $FFFFFF;
+      else
+        Move((Row + R.Left)^, (PByte(ADest) + NativeInt(Y - R.Top) * APitch)^, R.Width);
+      end;
+    end;
+  finally
+    Range._End := 0;
+    Readback.Unmap(0, @Range);
+  end;
+end;
+
+class function TFastContext3D12.NewTextureObject(const ATexture: TFastTexture): IInterface;
+var
+  T: TRawTexture12;
+  Props: TD3D12_HEAP_PROPERTIES;
+  Desc: TD3D12_RESOURCE_DESC;
+  Arrays: Integer;
+begin
+  TFastDevice.Ensure;
+  if TFastDevice.D3D12 = nil then
+    raise EContext3DException.Create('FastContext3D12: raw textures need the Direct3D 12 canvas');
+  T := TRawTexture12.Create;
+  Result := T;
+  T.Format := TDXGI_FORMAT(FastTextureDxgiFormat(ATexture.Format, False));
+  T.ViewFormat := TDXGI_FORMAT(FastTextureDxgiFormat(ATexture.Format, True));
+  T.Width := ATexture.Width;
+  T.Height := ATexture.Height;
+  T.Mips := ATexture.Mips;
+  T.Cube := ATexture.Kind = TFastTextureKind.Cube;
+  T.State := D3D12_RESOURCE_STATE_COPY_DEST;
+  if T.Cube then
+    Arrays := 6
+  else
+    Arrays := 1;
+  Props := TD3D12_HEAP_PROPERTIES.Create(D3D12_HEAP_TYPE_DEFAULT);
+  Desc := TD3D12_RESOURCE_DESC.CreateTex2D(T.Format, T.Width, T.Height, Arrays, T.Mips, 1, 0, D3D12_RESOURCE_FLAG_NONE);
+  // Committed resources of the default heap come zeroed.
+  Check(TFastDevice.D3D12.CreateCommittedResource(@Props, D3D12_HEAP_FLAG_NONE, @Desc, T.State, nil,
+    IID_ID3D12Resource, T.Resource), 'CreateCommittedResource (raw texture)');
+end;
+
+class procedure TFastContext3D12.UploadTextureObject(const ATexture: TFastTexture; const AObject: IInterface;
+  const AFace, AMip, X, Y, AWidth, AHeight: Integer; const AData: Pointer; const ARowPitch: Integer);
+var
+  C: PCmdRawUpload;
+  B: TBlob;
+  BRef: IInterface;
+  Rows, RowBytes, I: Integer;
+  Dst: PByte;
+  Compressed: Boolean;
+begin
+  Compressed := FastTextureCompressed(ATexture.Format);
+  if Compressed then
+  begin
+    Rows := (AHeight + 3) div 4;
+    RowBytes := ((AWidth + 3) div 4) * FastTextureBlockBytes(ATexture.Format);
+  end
+  else
+  begin
+    Rows := AHeight;
+    RowBytes := AWidth * FastTextureBlockBytes(ATexture.Format);
+  end;
+  if NativeInt(Rows) * RowBytes <= RawInlineData then
+  begin
+    C := Rec(HandleRawUpload, SizeOf(TCmdRawUpload) + AlignUp(Rows * RowBytes, 4), AObject);
+    C.Blob := nil;
+    Dst := PByte(C) + SizeOf(TCmdRawUpload);
+  end
+  else
+  begin
+    B := TBlob.Create;
+    BRef := B;
+    SetLength(B.Data, NativeInt(Rows) * RowBytes);
+    C := Rec(HandleRawUpload, SizeOf(TCmdRawUpload), AObject);
+    C.Blob := B;
+    Keep(BRef);
+    Dst := @B.Data[0];
+  end;
+  for I := 0 to Rows - 1 do
+    Move((PByte(AData) + NativeInt(I) * ARowPitch)^, (Dst + NativeInt(I) * RowBytes)^, RowBytes);
+  C.Texture := AObject as TObject;
+  C.Subresource := AMip + AFace * ATexture.Mips;
+  C.X := X;
+  C.Y := Y;
+  C.Width := AWidth;
+  C.Height := AHeight;
+  C.Rows := Rows;
+  C.RowBytes := RowBytes;
+  C.Pitch := RowBytes;
+  C.Compressed := Compressed;
+end;
+
+class function TFastContext3D12.NewBufferObject(const ABuffer: TFastBuffer): IInterface;
+var
+  B: TRawBuffer12;
+  Props: TD3D12_HEAP_PROPERTIES;
+  Desc: TD3D12_RESOURCE_DESC;
+begin
+  TFastDevice.Ensure;
+  if TFastDevice.D3D12 = nil then
+    raise EContext3DException.Create('FastContext3D12: raw buffers need the Direct3D 12 canvas');
+  B := TRawBuffer12.Create;
+  Result := B;
+  B.State := D3D12_RESOURCE_STATE_COMMON;
+  B.Bytes := AlignUp(Max(ABuffer.Size, 16), 16);
+  Props := TD3D12_HEAP_PROPERTIES.Create(D3D12_HEAP_TYPE_DEFAULT);
+  Desc := TD3D12_RESOURCE_DESC.CreateBuffer(B.Bytes);
+  Check(TFastDevice.D3D12.CreateCommittedResource(@Props, D3D12_HEAP_FLAG_NONE, @Desc, D3D12_RESOURCE_STATE_COMMON,
+    nil, IID_ID3D12Resource, B.Resource), 'CreateCommittedResource (raw buffer)');
+end;
+
+class procedure TFastContext3D12.WriteBufferObject(const ABuffer: TFastBuffer; const AObject: IInterface;
+  const AOffset: Integer; const AData: Pointer; const ASize: Integer);
+var
+  C: PCmdRawWrite;
+  B: TBlob;
+  BRef: IInterface;
+begin
+  if ASize <= RawInlineData then
+  begin
+    C := Rec(HandleRawWrite, SizeOf(TCmdRawWrite) + AlignUp(ASize, 4), AObject);
+    C.Blob := nil;
+    Move(AData^, (PByte(C) + SizeOf(TCmdRawWrite))^, ASize);
+  end
+  else
+  begin
+    B := TBlob.Create;
+    BRef := B;
+    SetLength(B.Data, ASize);
+    Move(AData^, B.Data[0], ASize);
+    C := Rec(HandleRawWrite, SizeOf(TCmdRawWrite), AObject);
+    C.Blob := B;
+    Keep(BRef);
+  end;
+  C.Buffer := AObject as TObject;
+  C.Offset := AOffset;
+  C.Size := ASize;
+end;
+
 function BytesPerPixel(const AFormat: TDXGI_FORMAT): Integer;
 begin
   case AFormat of
@@ -3351,8 +4427,10 @@ var
   C: TFastContext3D12;
   Res: TFastRayResource;
 begin
-  // Ray buffers and images get GPU memory on the new device when they are used next (Generation tells).
+  // Ray buffers and images get GPU memory on the new device when they are used next (Generation tells), raw textures
+  // and buffers too.
   Inc(GRayDeviceGen);
+  TFastContext3D.RawDeviceLost;
   if GRayResources <> nil then
     for Res in GRayResources do
       Res.FNative := nil;
@@ -3450,6 +4528,7 @@ begin
     GSharedLock := TObject.Create;
   end;
   TFastContext3D.ResetDeviceState;
+  TFastContext3D.SetInstalled(TFastContext3D12);
   InstallContextService(TFastContext3D12, Shutdown);
   FastBridge.DeviceLost := ContextsDeviceLost;
   FastBridge.DeviceReset := ContextsDeviceReset;
