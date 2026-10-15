@@ -104,6 +104,7 @@ type
     FDebug: Boolean;
     FLost: Boolean;
     FDualSource: Boolean;
+    FFeatures: TVkPhysicalDeviceFeatures;
     FBufferDeviceAddress, FAccelerationStructure, FRayQuery: Boolean;
     FFifoLatestReady: Boolean;
     FPushDescriptor: Boolean;
@@ -196,6 +197,9 @@ type
     property Lost: Boolean read FLost;
     /// <summary>Dual-source blending (ClearType text).</summary>
     property DualSource: Boolean read FDualSource;
+    /// <summary>The core features enabled where the device has them: dualSrcBlend, and for the 3D context's raw draws
+    /// samplerAnisotropy, fillModeNonSolid, depthBiasClamp, textureCompressionBC.</summary>
+    property Features: TVkPhysicalDeviceFeatures read FFeatures;
     /// <summary>Features of the 3D context's ray-traced effects (RayQuery: with descriptor indexing).</summary>
     property BufferDeviceAddress: Boolean read FBufferDeviceAddress;
     property AccelerationStructure: Boolean read FAccelerationStructure;
@@ -245,6 +249,7 @@ const
   NoPushVariable = 'FASTCANVAS_VK_NOPUSH';
   LegacyVariable = 'FASTCANVAS_VK_LEGACY';
   NoTimelineVariable = 'FASTCANVAS_VK_NOTIMELINE';
+  NoBCVariable = 'FASTCANVAS_VK_NOBC';
   ValidationLayer: AnsiString = 'VK_LAYER_KHRONOS_validation';
   /// <summary>Messages logged per process at most.</summary>
   MaxMessages = 2000;
@@ -464,6 +469,8 @@ type
   /// <summary>What a device has of the optional features (DeviceCaps).</summary>
   TFastVkCaps = record
     DynamicRendering, Synchronization2, Timeline, DualSource: Boolean;
+    /// <summary>The core features of Vulkan 1.0 the device has.</summary>
+    Core: TVkPhysicalDeviceFeatures;
   end;
 
 /// <summary>The optional features of a device used at AVersion (the device's version, at most the instance's): those
@@ -534,6 +541,7 @@ begin
   Result.Timeline := ((AVersion >= VK_API_VERSION_1_2) and (F12.timelineSemaphore <> VK_FALSE)) or
     (TimelineExt and (Timeline.timelineSemaphore <> VK_FALSE));
   Result.DualSource := Features.features.dualSrcBlend <> VK_FALSE;
+  Result.Core := Features.features;
 end;
 
 /// <summary>What the formats of a device lack of what the canvas uses (mandatory in Vulkan, asked all the same);
@@ -920,6 +928,15 @@ begin
       FQueueFamily := Family;
       FProperties := Props;
       FDualSource := Caps.DualSource;
+      // What the 3D context's raw draws use where the device has it.
+      FillChar(FFeatures, SizeOf(FFeatures), 0);
+      FFeatures.dualSrcBlend := Caps.Core.dualSrcBlend;
+      FFeatures.samplerAnisotropy := Caps.Core.samplerAnisotropy;
+      FFeatures.fillModeNonSolid := Caps.Core.fillModeNonSolid;
+      FFeatures.depthBiasClamp := Caps.Core.depthBiasClamp;
+      // FASTCANVAS_VK_NOBC=1: raw textures of BC formats decoded on the CPU as on phones (a test of that path).
+      if GetEnvironmentVariable(NoBCVariable) <> '1' then
+        FFeatures.textureCompressionBC := Caps.Core.textureCompressionBC;
       FLegacy := Version < VK_API_VERSION_1_3;
       // FASTCANVAS_VK_LEGACY=1, FASTCANVAS_VK_NOTIMELINE=1: the paths of devices without them, on any device.
       FDynamicRendering := Caps.DynamicRendering and (GetEnvironmentVariable(LegacyVariable) <> '1');
@@ -1063,8 +1080,8 @@ begin
   FillChar(Features, SizeOf(Features), 0);
   Features.sType := VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
   Features.pNext := @F13;
-  if FDualSource then
-    Features.features.dualSrcBlend := VK_TRUE;
+  // Dual-source blending (ClearType), and what raw draws use (anisotropy, wireframe, depth bias clamp, BC formats).
+  Features.features := FFeatures;
   // FASTCANVAS_VK_NOPUSH=1 or FASTCANVAS_VK_LEGACY=1: the 3D context's path without push descriptors (a test of that
   // path).
   FPushDescriptor := HasExtension(Exts, VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME) and
@@ -1214,8 +1231,8 @@ begin
   FillChar(Features, SizeOf(Features), 0);
   Features.sType := VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
   Features.pNext := Chain;
-  if FDualSource then
-    Features.features.dualSrcBlend := VK_TRUE;
+  // Dual-source blending (ClearType), and what raw draws use (anisotropy, wireframe, depth bias clamp, BC formats).
+  Features.features := FFeatures;
   Priority := 1;
   FillChar(Queue, SizeOf(Queue), 0);
   Queue.sType := VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
