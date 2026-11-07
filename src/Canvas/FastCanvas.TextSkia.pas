@@ -19,6 +19,10 @@ unit FastCanvas.TextSkia;
 
 interface
 
+// Compiled without overflow checks, which a program's options may turn on: hashes, random numbers and counters
+// of FastCanvas wrap on purpose.
+{$OVERFLOWCHECKS OFF}
+
 uses
   System.Types, System.UITypes, System.SysUtils, System.Math, System.Generics.Collections, System.Skia, FMX.Types,
   FMX.Graphics, FMX.TextLayout, FastCanvas.Text;

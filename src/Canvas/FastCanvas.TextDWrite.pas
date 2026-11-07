@@ -10,6 +10,10 @@ unit FastCanvas.TextDWrite;
 
 interface
 
+// Compiled without overflow checks, which a program's options may turn on: hashes, random numbers and counters
+// of FastCanvas wrap on purpose.
+{$OVERFLOWCHECKS OFF}
+
 uses
   Winapi.Windows, Winapi.D2D1, System.Types, System.UITypes, System.SysUtils, System.Math, System.Math.Vectors,
   System.Generics.Collections, FMX.Types, FMX.Graphics, FMX.TextLayout, FastCanvas.DWriteExt, FastCanvas.Text;

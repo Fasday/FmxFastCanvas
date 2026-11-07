@@ -30,6 +30,9 @@ unit Vulkan;
 // TVkInt32 sets); the FastCanvas build is kept free of warnings.
 {$warnings off}
 {$hints off}
+// FastCanvas patch: no range checks, which a program's options may turn on: the flag bits $80000000 of the
+// enumerations are errors (E2026) under them.
+{$rangechecks off}
 {$ifdef fpc}
  {$mode delphi}
  {$z4}

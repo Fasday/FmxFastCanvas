@@ -17,6 +17,10 @@ unit FastCanvas.Gpu12;
 
 interface
 
+// Compiled without overflow checks, which a program's options may turn on: hashes, random numbers and counters
+// of FastCanvas wrap on purpose.
+{$OVERFLOWCHECKS OFF}
+
 uses
   DX12.D3D12, DX12.D3DCommon, DX12.DXGI, DX12.DXGI1_2, DX12.DXGI1_4,
   Winapi.Windows, System.SysUtils, System.Types, System.Math, System.Generics.Collections,

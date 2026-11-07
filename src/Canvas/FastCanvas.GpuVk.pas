@@ -65,6 +65,10 @@ unit FastCanvas.GpuVk;
 
 interface
 
+// Compiled without overflow checks, which a program's options may turn on: hashes, random numbers and counters
+// of FastCanvas wrap on purpose.
+{$OVERFLOWCHECKS OFF}
+
 uses
   {$IFDEF MSWINDOWS}Winapi.Windows, {$ENDIF}System.SysUtils, System.Types, System.Math, System.Classes,
   System.SyncObjs, System.Generics.Collections, Vulkan, FastCanvas.Device, FastCanvas.DeviceVk, FastCanvas.Gpu;

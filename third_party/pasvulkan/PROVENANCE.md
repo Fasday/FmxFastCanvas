@@ -16,6 +16,7 @@ Marked `FastCanvas patch` in the source; the generated declarations are untouche
 
 - `{$warnings off}` and `{$hints off}` after the `unit` line: W1012 subrange warnings of flag bits `$80000000` in
   `TVkInt32` enumerations in Delphi 37 (the bits are kept).
+- `{$rangechecks off}` after them: in a program built with range checks, the same flag bits are errors (E2026).
 - `CPU64` is defined for Delphi from `CPU64BITS` (FPC defines `CPU64`): the X11 and XCB handle types are 64-bit on
   Linux64.
 - `uses`: `Winapi.Windows` for Delphi (unit scope names need not be set), `Posix.Dlfcn` for Delphi on Android and

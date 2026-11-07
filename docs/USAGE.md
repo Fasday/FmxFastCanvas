@@ -70,6 +70,12 @@ too (bitmaps then cross between the devices through the CPU, which is slower).
 Nothing else changes in the program: forms, controls, styles, `TBitmap`, `TTextLayout` and `Canvas` calls are the
 standard FMX ones.
 
+The program's compiler options may have range and overflow checks on (`{$R+}`, `{$Q+}`, as debug builds often do):
+the units of `src\Canvas` turn overflow checks off for themselves (their hashes, random numbers and counters wrap on
+purpose), and the vendored headers range checks (values such as `$FFFFFFFF` in their enumerations). Checked
+(2026-11-07) with both on: the stress test on Direct3D 11, Direct3D 12 and Vulkan with simulated device losses
+(Win64), PortProbe and TextProbe on Linux64.
+
 ## Settings
 
 All settings are global variables, set before `Application.Initialize` unless noted.

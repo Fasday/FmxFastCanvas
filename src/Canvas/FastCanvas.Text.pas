@@ -15,6 +15,10 @@ unit FastCanvas.Text;
 
 interface
 
+// Compiled without overflow checks, which a program's options may turn on: hashes, random numbers and counters
+// of FastCanvas wrap on purpose.
+{$OVERFLOWCHECKS OFF}
+
 uses
   System.Types, System.UITypes, System.SysUtils, System.Math, System.Generics.Collections, FMX.Types, FMX.Graphics,
   FMX.TextLayout, FastCanvas.Geometry;

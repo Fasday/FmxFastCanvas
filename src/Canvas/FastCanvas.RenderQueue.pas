@@ -27,6 +27,10 @@ unit FastCanvas.RenderQueue;
 
 interface
 
+// Compiled without overflow checks, which a program's options may turn on: hashes, random numbers and counters
+// of FastCanvas wrap on purpose.
+{$OVERFLOWCHECKS OFF}
+
 uses
   {$IFDEF MSWINDOWS}Winapi.Windows, {$ELSE}Posix.Pthread, {$ENDIF}System.SysUtils, System.Classes, System.SyncObjs,
   System.Generics.Collections;

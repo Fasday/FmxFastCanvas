@@ -17,6 +17,10 @@ unit FastCanvas.Gpu;
 
 interface
 
+// Compiled without overflow checks, which a program's options may turn on: hashes, random numbers and counters
+// of FastCanvas wrap on purpose.
+{$OVERFLOWCHECKS OFF}
+
 uses
 {$IFDEF MSWINDOWS}
   Winapi.Windows, Winapi.D2D1, System.SysUtils, System.Types, System.Math, FastCanvas.DWriteExt, FastCanvas.DCompExt,

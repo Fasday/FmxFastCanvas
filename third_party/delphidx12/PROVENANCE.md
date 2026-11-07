@@ -38,7 +38,8 @@ Minimal; upstream copyright and license headers are kept.
   takes its description `const` (by reference, as D3D12 takes a pointer): declared by value, Win32 pushed the record
   onto the stack (Win64 passes records of more than 8 bytes by reference anyway), and the device read garbage.
 - Every unit: `{$WARNINGS OFF}` and `{$HINTS OFF}` after its `unit` line (the translation produces W1012 subrange
-  warnings in Delphi 37; the FastCanvas build is kept free of warnings).
+  warnings in Delphi 37; the FastCanvas build is kept free of warnings), and `{$RANGECHECKS OFF}`: in a program
+  built with range checks, enumeration values such as `DXGI_FORMAT_FORCE_UINT = $ffffffff` are errors (E2026).
 
 Known layout issue, not patched: `DX12.D3D12SDKLayers` is compiled with `{$A4}`, so records with pointers
 (`D3D12_MESSAGE`, `D3D12_INFO_QUEUE_FILTER_DESC`) do not have the C layout on Win64. `FastCanvas.Gpu12` uses its own

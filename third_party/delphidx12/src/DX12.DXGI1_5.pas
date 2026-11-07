@@ -39,6 +39,9 @@ unit DX12.DXGI1_5;
 // FmxCanvasTest: vendored header translation, compiled without its warnings and hints (see PROVENANCE.md).
 {$WARNINGS OFF}
 {$HINTS OFF}
+// Nor with range checks, which a program's options may turn on: values such as $FFFFFFFF in its
+// enumerations are errors (E2026) under them.
+{$RANGECHECKS OFF}
 
 
 {$IFDEF FPC}

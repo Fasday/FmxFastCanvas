@@ -19,6 +19,10 @@ unit FastCanvas.D2D1Ext;
 
 interface
 
+// Compiled without overflow checks, which a program's options may turn on: hashes, random numbers and counters
+// of FastCanvas wrap on purpose.
+{$OVERFLOWCHECKS OFF}
+
 uses
   Winapi.Windows, Winapi.DXGI, Winapi.DXGI1_2, Winapi.DXGI1_4, Winapi.D2D1, Winapi.DxgiFormat;
 

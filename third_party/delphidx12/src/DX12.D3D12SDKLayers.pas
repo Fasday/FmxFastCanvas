@@ -37,6 +37,9 @@ unit DX12.D3D12SDKLayers;
 // FmxCanvasTest: vendored header translation, compiled without its warnings and hints (see PROVENANCE.md).
 {$WARNINGS OFF}
 {$HINTS OFF}
+// Nor with range checks, which a program's options may turn on: values such as $FFFFFFFF in its
+// enumerations are errors (E2026) under them.
+{$RANGECHECKS OFF}
 
 {$IFDEF FPC}
 {$mode delphi}
