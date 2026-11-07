@@ -565,7 +565,7 @@ type
     FStale: Boolean;
     FCheckedW, FCheckedH: Integer;
     procedure WaitValue(const AValue: UInt64);
-    procedure ReleaseChain(const ADestroyOld: Boolean);
+    procedure ReleaseChain;
     function CreateChain(const AWidth, AHeight: Integer): Boolean;
     /// <summary>The surface is lost: the swap chain goes, FSurfaceLost is set.</summary>
     procedure LoseSurface;
@@ -3738,7 +3738,7 @@ end;
 
 procedure TGpuVkPresenter.LoseSurface;
 begin
-  ReleaseChain(True);
+  ReleaseChain;
   Lock;
   FSurfaceLost := True;
   FPending := False;
@@ -3761,9 +3761,9 @@ begin
   FTimeline.Wait(AValue);
 end;
 
-/// <summary>The images, semaphores and command buffers of the swap chain go (and the swap chain when ADestroyOld),
-/// once the queue and the presentation engine are done with them.</summary>
-procedure TGpuVkPresenter.ReleaseChain(const ADestroyOld: Boolean);
+/// <summary>The swap chain goes with its images, semaphores and command buffers, once the queue and the presentation
+/// engine are done with them.</summary>
+procedure TGpuVkPresenter.ReleaseChain;
 var
   S: TVkSemaphore;
 begin
@@ -3787,7 +3787,7 @@ begin
   FCmds := nil;
   FCmdGens := nil;
   FCmdValues := nil;
-  if ADestroyOld and (FSwapchain <> VK_NULL_HANDLE) then
+  if FSwapchain <> VK_NULL_HANDLE then
   begin
     FVk.DestroySwapchainKHR(FDevice, FSwapchain, nil);
     FSwapchain := VK_NULL_HANDLE;
@@ -3798,7 +3798,7 @@ procedure TGpuVkPresenter.Release;
 begin
   if FTimeline = nil then
     Exit;
-  ReleaseChain(True);
+  ReleaseChain;
   FVk.DestroyCommandPool(FDevice, FPool, nil);
   FreeAndNil(FTimeline);
   FVk.DestroyFence(FDevice, FAcquired, nil);
@@ -3813,7 +3813,7 @@ var
   AllocInfo: TVkCommandBufferAllocateInfo;
   SemInfo: TVkSemaphoreCreateInfo;
   PoolInfo: TVkQueryPoolCreateInfo;
-  Old, Chain: TVkSwapchainKHR;
+  Chain: TVkSwapchainKHR;
   Count: Cardinal;
   K: Integer;
   Res: TVkResult;
@@ -3835,23 +3835,20 @@ begin
     (Extent.height = FExtent.height) then
     Exit(True);
   FFormat := ChooseFormat(FFast, FWindow.FVkSurface);
-  Old := FSwapchain;
-  ReleaseChain(False);
+  // The old swap chain goes before the new one is made, not passed as oldSwapchain: AMD's Windows driver
+  // (32.0.31041) kept about 190 KB of process memory for every swap chain made so, after both were destroyed.
+  ReleaseChain;
   FillChainInfo(Info, FWindow.FVkSurface, Caps, FFormat);
   Info.imageExtent := Extent;
   Info.presentMode := FWindow.PresentMode;
-  Info.oldSwapchain := Old;
   Chain := VK_NULL_HANDLE;
   Res := FFast.Track(FVk.CreateSwapchainKHR(FDevice, @Info, nil, @Chain));
   if (Res = VK_ERROR_SURFACE_LOST_KHR) or (Res = VK_ERROR_NATIVE_WINDOW_IN_USE_KHR) then
   begin
-    // The old swap chain is retired all the same: it goes with the surface.
     LoseSurface;
     Exit;
   end;
   FFast.Check(Res, 'vkCreateSwapchainKHR');
-  if Old <> VK_NULL_HANDLE then
-    FVk.DestroySwapchainKHR(FDevice, Old, nil);
   FSwapchain := Chain;
   Count := 0;
   FVk.GetSwapchainImagesKHR(FDevice, FSwapchain, @Count, nil);
