@@ -645,6 +645,11 @@ Linux:
   Skia, or lightly hinted (`FastPangoLightHinting`); rotated and large text from FreeType's outlines. Variable fonts
   (Ubuntu's) at every weight and width. Fonts added through FMX's `TFontManager` are found (FMX's GTK library adds
   them to fontconfig's configuration; the engine looks at it again when their number changed), unlike with Skia.
+  A font size not seen before costs no more than another text: the layout is made in one of ten font sizes (the
+  power of two at or below the font's) and scaled, since Pango asks fontconfig for the fonts of every size (1.5 to
+  2.5 ms each on the main thread: a zoom that changes the font sizes was slow by them). Text in bitmap fonts and in
+  variable fonts with an optical size axis is laid out at its own size, at that cost (`ARCHITECTURE.md`, "Text on
+  Linux").
 - **Without Skia**: a Linux program that leaves the Skia units out runs without `libsk4d.so`
   (`tools\build-linux.ps1 -Define FASTCANVAS_NOSKIA` builds the probes so and does not copy it). PortProbe: 15.5 MB
   alone; with the Skia engines linked 16.0 MB and `libsk4d.so` (26.7 MB) next to it (MB of 2^20 bytes).

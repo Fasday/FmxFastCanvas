@@ -202,6 +202,26 @@ asserted by size at compile time.
   of the line (Pango's log attributes) and lays out the shortened text with "…" in place again, keeping a map of its
   indices to the layout's; Pango widens an ellipsis to the box's edge, which the text's width leaves out (the
   glyph's own advance from HarfBuzz). The vertical alignment moves the layout in the box.
+- **Layout sizes**: Pango asks fontconfig for the fonts of every font size it has not seen, 1.5 to 2.5 ms on the main
+  thread each (WSL, 481 fonts installed), which a program whose font sizes follow a zoom paid with every frame. So the
+  `PangoLayout` is made in one of ten font sizes, the power of two at or below the font's (1 to 512, the sizes a
+  `TFont` has), in a box as much smaller, and what it tells is multiplied by the ratio (1 to 2): extents, baselines,
+  glyph advances and offsets, decoration metrics, positions and regions of hit testing; the fonts of ranges are
+  scaled alike, and glyphs are made at the font's own size. The positions are not rounded and the outlines not
+  hinted, so a layout is the same at every size but for its scale: against the layout at the size itself (the
+  engine with and without this on 28080 layouts with Pango 1.57, 18720 with Pango 1.50) the same glyphs and line
+  breaks, the same numbers at the powers of two, and elsewhere numbers apart by the rounding (Pango's units are 1/1024
+  pixel at either size, and the size itself was cut to them: a label thousandths of a pixel, a line of 300 characters
+  up to 0.2 pixels). Two things differ more: a centered line in a box may lie half a pixel elsewhere (Pango rounds
+  the centering to a whole pixel when the widths of the box and of the line both are whole pixels, which happens to
+  other lines now), and a character no font has takes Pango's approximate character width of the layout size, scaled
+  (it is not proportional to the size: up to 0.08 em apart). A font that is another one at another size is laid out
+  at its own size as before, at that cost: a bitmap font (its strikes are drawn as large as they are) and a variable
+  font with an optical size axis (`opsz`, which fontconfig sets from the size; HarfBuzz tells, before 2.2 every
+  variable font counts); a layout is made again at the size itself when a run turns out to be in such a font (Terminus
+  and Inter: the same numbers as before). Families whose files are for ranges of sizes (the optical sizes of OS/2) get
+  the file of the layout size. 2000 labels laid out in 64 font sizes never seen before took 98 ms and take 12, as in
+  one size.
 - **Runs**: the layout iterator's runs, in visual order, become the glyph runs at once (origin: the run's logical x
   and the line's baseline; glyph x from the advances and offsets, y offsets downwards), with the underline and
   strikeout rectangles from the font's metrics and the ink of the layout as the overhang. The PangoLayout is released
@@ -210,7 +230,8 @@ asserted by size at compile time.
 - **Faces**: the fontconfig pattern of a run's PangoFont (`pango_fc_font_get_pattern`) names its file and face index,
   synthetic emboldening and the slant matrix; each such face is one object (the glyph cache's key) with an `FT_Face`
   of the engine's own `FT_Library`, used under a lock of its own (glyphs are made on the render thread). The em size of
-  a run is the scale of Pango's HarfBuzz font (for bitmap fonts the requested size, not the strike's).
+  a run is the scale of Pango's HarfBuzz font (for bitmap fonts the requested size, not the strike's) times the
+  scale of the layout.
 - **Glyphs**: `FT_Load_Glyph` at the em size, translated by the subpixel position with `FT_Set_Transform` (after the
   hinting), unhinted or lightly hinted, `FT_Render_Glyph` into 8-bit coverage (1-bit for aliased text); outlines by
   `FT_Outline_Decompose` (quadratic segments as the cubics of the same curves). Layouts with color glyphs (fonts with

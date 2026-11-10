@@ -5,7 +5,10 @@ unit FastCanvas.TextPango;
 
   TFastPangoTextLayout lays text out with a PangoLayout on a PangoFT2 font map (fontconfig's fonts and font fallback,
   HarfBuzz shaping, line breaking, bidi, ellipsizing) with absolute font sizes (FMX's sizes are pixels) and glyph
-  positions that are not rounded. The layout's runs become the glyph runs right away; the PangoFont of a run is told
+  positions that are not rounded. The PangoLayout is in one of ten font sizes, the power of two at or below the font's,
+  and what it tells is scaled to the font's size (LayoutFontSize: Pango asks fontconfig for the fonts of every size it
+  has not seen); text in a font that is another one at another size (bitmap strikes, an optical size axis) is laid out
+  at its own size. The layout's runs become the glyph runs right away; the PangoFont of a run is told
   by its fontconfig pattern (font file, face index, synthetic emboldening and slant) and the position of its HarfBuzz
   font on the axes of a variable font, and gets an FT_Face of this unit's own FreeType library at that position,
   which makes the glyph coverage (unhinted outlines rendered at the canvas's subpixel positions: plain coverage, which
@@ -77,6 +80,10 @@ type
     FUtf8: TBytes;
     FByteToChar, FCharToByte: TArray<Integer>;
     FRtl: Boolean;
+    /// <summary>The PangoLayout has the text in fonts FScale times smaller than the layout's (LayoutFontSize), in a
+    /// box as much smaller: what it tells is that much larger in the layout. FUnit: the pixels of the layout that
+    /// one of its Pango units is.</summary>
+    FScale, FUnit: Double;
     /// <summary>PangoAlignment; the width in Pango units (-1: lines as long as they are); with ellipsizing the height
     /// in Pango units (the lines that fit), -1: every paragraph one line.</summary>
     FAlign, FWidth, FHeight: Integer;
@@ -84,12 +91,17 @@ type
     /// <summary>The PangoLayout (used under the Pango lock); nil until asked for again.</summary>
     FLayout: Pointer;
     procedure SetText(const AText: string; const ACharStyles: TArray<Integer>);
+    /// <summary>The scale of the PangoLayout, and the width and height of its box from those of the layout's in
+    /// pixels (negative: none).</summary>
+    procedure SetScale(const AScale, AWidth, AHeight: Double);
+    /// <summary>A font size of the layout in the Pango units of the PangoLayout.</summary>
+    function PangoFontSize(const ASize: Single): Double;
     function MakeLayout: Pointer;
     function Layout: Pointer;
     procedure Shorten(const ACuts: TArray<TPoint>; const AKeepRest: Boolean);
     function EllipsizeOmitted: Boolean;
     function TrimWords: Boolean;
-    procedure Analyse;
+    function Analyse(const AScaled: Boolean): Boolean;
     /// <summary>The index in FText of an index of the layout's text.</summary>
     function ShownIndex(const AIndex: Integer): Integer;
     /// <summary>The index in the layout's text of an index of FText.</summary>
@@ -195,8 +207,14 @@ const
   MaxPangoSize = 1E6;
   /// <summary>PangoFonts the table of fonts keeps before it starts over.</summary>
   MaxFonts = 1024;
-  /// <summary>The smallest font size given to Pango (pixels; it takes no size of 0).</summary>
+  /// <summary>The smallest font size laid out (pixels).</summary>
   MinFontSize = 0.1;
+  /// <summary>The smallest and largest font size given to Pango (LayoutFontSize; pixels): the sizes an FMX font has
+  /// (TFont).</summary>
+  MinLayoutFontSize = 1;
+  MaxLayoutFontSize = 512;
+  /// <summary>The tag of the optical size axis of a variable font (HarfBuzz's).</summary>
+  HB_TAG_OPSZ = $6F70737A;
 
 type
   // Pango's structs (pango-glyph.h, pango-item.h, pango-layout.h; x86-64, offsets checked with offsetof).
@@ -422,6 +440,9 @@ var
   hb_font_get_scale: procedure(AFont: Pointer; out AXScale, AYScale: Integer); cdecl;
   hb_font_get_glyph_h_advance: function(AFont: Pointer; AGlyph: Cardinal): Integer; cdecl;
   hb_font_get_var_coords_normalized: function(AFont: Pointer; out ALength: Cardinal): PInteger; cdecl;
+  hb_font_get_face: function(AFont: Pointer): Pointer; cdecl;
+  /// <summary>HarfBuzz 2.2 and later; AInfo: hb_ot_var_axis_info_t (32 bytes).</summary>
+  hb_ot_var_find_axis_info: function(AFace: Pointer; ATag: Cardinal; AInfo: Pointer): Integer; cdecl;
   // fontconfig.
   FcPatternGetString: function(APattern: Pointer; AObject: PAnsiChar; AN: Integer; out AValue: PAnsiChar): Integer;
     cdecl;
@@ -481,6 +502,10 @@ type
   TPangoFontInfo = record
     Face: IInterface;
     EmSize: Single;
+    /// <summary>The font is not the same at another size, scaled: the strike of a bitmap font (drawn as large as it
+    /// is), or a variable font with an optical size axis (fontconfig puts it at the font's size). Text in it is
+    /// laid out at its own size.</summary>
+    SizeBound: Boolean;
   end;
 
 var
@@ -606,6 +631,8 @@ begin
   @hb_font_get_scale := Sym(HarfBuzz, 'hb_font_get_scale');
   @hb_font_get_glyph_h_advance := Sym(HarfBuzz, 'hb_font_get_glyph_h_advance');
   @hb_font_get_var_coords_normalized := Sym(HarfBuzz, 'hb_font_get_var_coords_normalized');
+  @hb_font_get_face := Sym(HarfBuzz, 'hb_font_get_face', True);
+  @hb_ot_var_find_axis_info := Sym(HarfBuzz, 'hb_ot_var_find_axis_info', True);
   @FcPatternGetString := Sym(Fc, 'FcPatternGetString');
   @FcPatternGetInteger := Sym(Fc, 'FcPatternGetInteger');
   @FcPatternGetBool := Sym(Fc, 'FcPatternGetBool');
@@ -813,6 +840,7 @@ var
   Sx, Sy, I: Integer;
   Coords: PInteger;
   CoordCount: Cardinal;
+  Axis: array[0..7] of Cardinal;
 begin
   if (AFont = nil) or GFonts.TryGetValue(AFont, Result) then
   begin
@@ -844,6 +872,11 @@ begin
   begin
     hb_font_get_scale(Hb, Sx, Sy);
     Coords := hb_font_get_var_coords_normalized(Hb, CoordCount);
+    if Assigned(hb_font_get_face) and Assigned(hb_ot_var_find_axis_info) then
+      Result.SizeBound := hb_ot_var_find_axis_info(hb_font_get_face(Hb), HB_TAG_OPSZ, @Axis) <> 0
+    else
+      // HarfBuzz before 2.2 does not tell: any variable font may have the axis.
+      Result.SizeBound := (Coords <> nil) and (CoordCount > 0);
   end;
   Result.EmSize := Abs(Sy) / PANGO_SCALE;
   FileName := nil;
@@ -894,6 +927,9 @@ begin
       end;
       GFaces.Add(Key, Result.Face);
     end;
+    Face := FaceObject(Result.Face);
+    if (Face.FFace <> nil) and not Face.FScalable and not Face.FColor then
+      Result.SizeBound := True;
   end;
   g_object_ref(AFont);
   GFonts.Add(AFont, Result);
@@ -987,6 +1023,32 @@ begin
     (A.HasColor = B.HasColor) and (A.Color = B.Color);
 end;
 
+/// <summary>The size a font of ASize pixels is laid out in.</summary>
+function FontSizeOf(const ASize: Single): Single;
+begin
+  Result := Max(ASize, MinFontSize);
+  Result := Min(Result, MaxPangoSize);
+end;
+
+/// <summary>The font size given to Pango for text in a font of ASize pixels: the power of two at or below it, from 1
+/// to 512. The text is laid out at that size and the result scaled (the positions are not rounded and the outlines
+/// not hinted: a layout is the same at every size but for its scale). Pango asks fontconfig for the fonts of every
+/// size it has not seen, which takes milliseconds: a program whose font sizes follow a zoom paid them with every
+/// frame, and of these sizes there are ten. With AExact the size itself: for text in a font that is another one at
+/// another size (TPangoFontInfo.SizeBound).</summary>
+function LayoutFontSize(const ASize: Single; const AExact: Boolean): Single;
+begin
+  if AExact then
+  begin
+    Result := Max(ASize, MinLayoutFontSize);
+    Result := Min(Result, MaxLayoutFontSize);
+    Exit;
+  end;
+  Result := MinLayoutFontSize;
+  while (Result < MaxLayoutFontSize) and (ASize >= 2 * Result) do
+    Result := 2 * Result;
+end;
+
 function PangoStyle(const ASlant: TFontSlant): Integer;
 begin
   case ASlant of
@@ -1067,6 +1129,23 @@ begin
       Break;
 end;
 
+procedure TFastPangoLayoutData.SetScale(const AScale, AWidth, AHeight: Double);
+begin
+  FScale := AScale;
+  FUnit := AScale / PANGO_SCALE;
+  FWidth := -1;
+  FHeight := -1;
+  if AWidth >= 0 then
+    FWidth := Round(Min(AWidth / AScale, MaxPangoSize) * PANGO_SCALE);
+  if AHeight >= 0 then
+    FHeight := Round(Min(AHeight / AScale, MaxPangoSize) * PANGO_SCALE);
+end;
+
+function TFastPangoLayoutData.PangoFontSize(const ASize: Single): Double;
+begin
+  Result := FontSizeOf(ASize) / FUnit;
+end;
+
 /// <summary>A PangoLayout of the text with the layout's parameters (under the Pango lock).</summary>
 function TFastPangoLayoutData.MakeLayout: Pointer;
 var
@@ -1085,7 +1164,7 @@ begin
   Desc := pango_font_description_new;
   Family := UTF8String(Base.Family);
   pango_font_description_set_family(Desc, PAnsiChar(Family));
-  pango_font_description_set_absolute_size(Desc, Max(Base.Size, MinFontSize) * PANGO_SCALE);
+  pango_font_description_set_absolute_size(Desc, PangoFontSize(Base.Size));
   pango_font_description_set_weight(Desc, FontWeights[Base.Weight]);
   pango_font_description_set_style(Desc, PangoStyle(Base.Slant));
   pango_font_description_set_stretch(Desc, Ord(Base.Stretch));
@@ -1114,7 +1193,8 @@ begin
         InsertAttr(Attrs, pango_attr_family_new(PAnsiChar(Family)), B0, B1);
       end;
       if S.Size <> Base.Size then
-        InsertAttr(Attrs, pango_attr_size_new_absolute(Round(Max(S.Size, MinFontSize) * PANGO_SCALE)), B0, B1);
+        InsertAttr(Attrs, pango_attr_size_new_absolute(EnsureRange(Round(PangoFontSize(S.Size)), 1, MaxInt)), B0,
+          B1);
       if S.Weight <> Base.Weight then
         InsertAttr(Attrs, pango_attr_weight_new(FontWeights[S.Weight]), B0, B1);
       if S.Slant <> Base.Slant then
@@ -1372,8 +1452,10 @@ begin
   // Collected when the layout is made (Analyse).
 end;
 
-/// <summary>Runs, decorations and ink of FLayout, moved by Dx, Dy (under the Pango lock).</summary>
-procedure TFastPangoLayoutData.Analyse;
+/// <summary>Runs, decorations and ink of FLayout, moved by Dx, Dy (under the Pango lock). False, with AScaled (the
+/// PangoLayout is not in the layout's font sizes), when a font of it is another one at another size (TPangoFontInfo.
+/// SizeBound): nothing is taken from it, the caller lays the text out at its own size.</summary>
+function TFastPangoLayoutData.Analyse(const AScaled: Boolean): Boolean;
 var
   RunList: TList<TFastGlyphRun>;
   DecoList: TList<TFastTextDecoration>;
@@ -1391,6 +1473,8 @@ var
   HasInk: Boolean;
   Face: TPangoFace;
 begin
+  Result := True;
+  ColorGlyphs := False;
   RunList := TList<TFastGlyphRun>.Create;
   DecoList := TList<TFastTextDecoration>.Create;
   try
@@ -1400,6 +1484,11 @@ begin
       if (Run = nil) or (Run.Glyphs.NumGlyphs <= 0) then
         Continue;
       Info := FontInfo(Run.Item.Analysis.Font);
+      if AScaled and Info.SizeBound then
+      begin
+        Result := False;
+        Break;
+      end;
       Face := FaceObject(Info.Face);
       if Face = nil then
         Continue;
@@ -1411,13 +1500,13 @@ begin
         Style := FStyles[0];
       R := Default(TFastGlyphRun);
       R.FontFace := Info.Face;
-      R.EmSize := Info.EmSize;
+      R.EmSize := Info.EmSize * FScale;
       R.BidiLevel := Run.Item.Analysis.Level;
       // The run's start on the line's baseline; glyph strings are in visual order, left to right.
-      R.OriginX := Dx + Logical.X / PANGO_SCALE;
-      R.OriginY := Dy + pango_layout_iter_get_baseline(Iter) / PANGO_SCALE;
+      R.OriginX := Dx + Logical.X * FUnit;
+      R.OriginY := Dy + pango_layout_iter_get_baseline(Iter) * FUnit;
       if GPangoVersion >= 15000 then
-        R.OriginY := R.OriginY - Run.YOffset / PANGO_SCALE;
+        R.OriginY := R.OriginY - Run.YOffset * FUnit;
       SetLength(R.Glyphs, Run.Glyphs.NumGlyphs);
       SetLength(R.X, Run.Glyphs.NumGlyphs);
       SetLength(R.Y, Run.Glyphs.NumGlyphs);
@@ -1434,8 +1523,8 @@ begin
             R.Glyphs[N] := 0
           else
             R.Glyphs[N] := Word(G.Glyph);
-          R.X[N] := (Pen + G.XOffset) / PANGO_SCALE;
-          R.Y[N] := G.YOffset / PANGO_SCALE;
+          R.X[N] := (Pen + G.XOffset) * FUnit;
+          R.Y[N] := G.YOffset * FUnit;
           Inc(N);
         end;
         Inc(Pen, G.Width);
@@ -1457,13 +1546,13 @@ begin
         // Pango's positions are the tops of the lines above the baseline.
         Metrics := pango_font_get_metrics(Run.Item.Analysis.Font, nil);
         X0 := R.OriginX;
-        X1 := R.OriginX + Logical.Width / PANGO_SCALE;
+        X1 := R.OriginX + Logical.Width * FUnit;
         D.Color := Style.Color;
         D.HasColor := Style.HasColor;
         if Style.Underline then
         begin
-          Pos := pango_font_metrics_get_underline_position(Metrics) / PANGO_SCALE;
-          Thickness := pango_font_metrics_get_underline_thickness(Metrics) / PANGO_SCALE;
+          Pos := pango_font_metrics_get_underline_position(Metrics) * FUnit;
+          Thickness := pango_font_metrics_get_underline_thickness(Metrics) * FUnit;
           if Thickness <= 0 then
             Thickness := Max(R.EmSize / 14, 1);
           D.Rect := TRectF.Create(X0, R.OriginY - Pos, X1, R.OriginY - Pos + Thickness);
@@ -1471,8 +1560,8 @@ begin
         end;
         if Style.StrikeOut then
         begin
-          Pos := pango_font_metrics_get_strikethrough_position(Metrics) / PANGO_SCALE;
-          Thickness := pango_font_metrics_get_strikethrough_thickness(Metrics) / PANGO_SCALE;
+          Pos := pango_font_metrics_get_strikethrough_position(Metrics) * FUnit;
+          Thickness := pango_font_metrics_get_strikethrough_thickness(Metrics) * FUnit;
           if Thickness <= 0 then
             Thickness := Max(R.EmSize / 14, 1);
           D.Rect := TRectF.Create(X0, R.OriginY - Pos, X1, R.OriginY - Pos + Thickness);
@@ -1482,6 +1571,8 @@ begin
       end;
     until pango_layout_iter_next_run(Iter) = 0;
     pango_layout_iter_free(Iter);
+    if not Result then
+      Exit;
     Runs := RunList.ToArray;
     Decorations := DecoList.ToArray;
   finally
@@ -1508,12 +1599,12 @@ begin
     Left := LayoutLogical.X;
     Right := LayoutLogical.X;
   end;
-  TextRect := TRectF.Create(Dx + Left / PANGO_SCALE, Dy + LayoutLogical.Y / PANGO_SCALE, Dx + Right / PANGO_SCALE,
-    Dy + (LayoutLogical.Y + LayoutLogical.Height) / PANGO_SCALE);
+  TextRect := TRectF.Create(Dx + Left * FUnit, Dy + LayoutLogical.Y * FUnit, Dx + Right * FUnit,
+    Dy + (LayoutLogical.Y + LayoutLogical.Height) * FUnit);
   HasInk := (LayoutInk.Width > 0) and (LayoutInk.Height > 0);
   if HasInk then
-    Ink := TRectF.Create(Dx + LayoutInk.X / PANGO_SCALE, Dy + LayoutInk.Y / PANGO_SCALE,
-      Dx + (LayoutInk.X + LayoutInk.Width) / PANGO_SCALE, Dy + (LayoutInk.Y + LayoutInk.Height) / PANGO_SCALE)
+    Ink := TRectF.Create(Dx + LayoutInk.X * FUnit, Dy + LayoutInk.Y * FUnit,
+      Dx + (LayoutInk.X + LayoutInk.Width) * FUnit, Dy + (LayoutInk.Y + LayoutInk.Height) * FUnit)
   else
     Ink := TextRect;
   for I := 0 to High(Decorations) do
@@ -1761,7 +1852,9 @@ var
   Key: string;
   Cached: Boolean;
   D: TFastPangoLayoutData;
-  W, H, HAlign: Single;
+  W, H, HAlign, Size: Single;
+  Scale, Exact, BoxW, BoxH: Double;
+  Done: Boolean;
   I, J, K: Integer;
   Attr: TTextAttributedRange;
   S: TFastPangoStyle;
@@ -1842,43 +1935,57 @@ begin
     D.LayoutHeight := H;
     // Lines as long as they are without WordWrap and Trimming; else wrapped or ellipsized at the box's width, and
     // with both the lines that fit in its height (half a pixel to spare, as FastCanvas.TextSkia).
-    D.FWidth := -1;
-    D.FHeight := -1;
+    BoxW := -1;
+    BoxH := -1;
     if WordWrap or (Trimming <> TTextTrimming.None) then
-      D.FWidth := Round(Min(W, MaxPangoSize) * PANGO_SCALE);
+      BoxW := W;
     D.FEllipsize := Trimming <> TTextTrimming.None;
     if D.FEllipsize and WordWrap then
-      D.FHeight := Round(Min(H + 0.5, MaxPangoSize) * PANGO_SCALE);
+      BoxH := H + 0.5;
+    // The PangoLayout in a font size of a few, what it tells scaled to the layout's (LayoutFontSize).
+    Size := FontSizeOf(Font.Size);
+    Scale := Size / LayoutFontSize(Size, False);
+    Exact := Size / LayoutFontSize(Size, True);
+    D.SetScale(Scale, BoxW, BoxH);
     TMonitor.Enter(GPangoLock);
     try
-      D.FLayout := D.MakeLayout;
-      if D.EllipsizeOmitted then
-      begin
-        g_object_unref(D.FLayout);
+      repeat
         D.FLayout := D.MakeLayout;
-      end;
-      if (Trimming = TTextTrimming.Word) and D.TrimWords then
-      begin
+        if D.EllipsizeOmitted then
+        begin
+          g_object_unref(D.FLayout);
+          D.FLayout := D.MakeLayout;
+        end;
+        if (Trimming = TTextTrimming.Word) and D.TrimWords then
+        begin
+          g_object_unref(D.FLayout);
+          D.FLayout := D.MakeLayout;
+        end;
+        pango_layout_get_extents(D.FLayout, @Ink, @Logical);
+        // Lines as long as they are: Pango aligns them with the longest; the alignment moves that in the box.
+        if D.FWidth < 0 then
+          D.Dx := (W - Logical.Width * D.FUnit) * HAlign - Logical.X * D.FUnit
+        else
+          D.Dx := 0;
+        case VerticalAlign of
+          TTextAlign.Center: D.Dy := (H - Logical.Height * D.FUnit) / 2;
+          TTextAlign.Trailing: D.Dy := H - Logical.Height * D.FUnit;
+        else
+          D.Dy := 0;
+        end;
+        D.Dy := D.Dy - Logical.Y * D.FUnit;
+        Done := D.Analyse(D.FScale <> Exact);
+        // Made again for hit testing: cached layouts do not keep it.
         g_object_unref(D.FLayout);
-        D.FLayout := D.MakeLayout;
-      end;
-      pango_layout_get_extents(D.FLayout, @Ink, @Logical);
-      // Lines as long as they are: Pango aligns them with the longest; the alignment moves that in the box.
-      if D.FWidth < 0 then
-        D.Dx := (W - Logical.Width / PANGO_SCALE) * HAlign - Logical.X / PANGO_SCALE
-      else
-        D.Dx := 0;
-      case VerticalAlign of
-        TTextAlign.Center: D.Dy := (H - Logical.Height / PANGO_SCALE) / 2;
-        TTextAlign.Trailing: D.Dy := H - Logical.Height / PANGO_SCALE;
-      else
-        D.Dy := 0;
-      end;
-      D.Dy := D.Dy - Logical.Y / PANGO_SCALE;
-      D.Analyse;
-      // Made again for hit testing: cached layouts do not keep it.
-      g_object_unref(D.FLayout);
-      D.FLayout := nil;
+        D.FLayout := nil;
+        if not Done then
+        begin
+          // A font of the text is another one at another size: the text as it was, laid out at its own size.
+          D.FMap := nil;
+          D.SetText(Text, CharStyles);
+          D.SetScale(Exact, BoxW, BoxH);
+        end;
+      until Done;
     finally
       TMonitor.Exit(GPangoLock);
     end;
@@ -1952,8 +2059,7 @@ begin
   Trailing := 0;
   TMonitor.Enter(GPangoLock);
   try
-    pango_layout_xy_to_index(D.Layout, Round((P.X - D.Dx) * PANGO_SCALE), Round((P.Y - D.Dy) * PANGO_SCALE), Index,
-      Trailing);
+    pango_layout_xy_to_index(D.Layout, Round((P.X - D.Dx) / D.FUnit), Round((P.Y - D.Dy) / D.FUnit), Index, Trailing);
   finally
     TMonitor.Exit(GPangoLock);
   end;
@@ -1997,8 +2103,8 @@ begin
       S0 := D.ShownIndex(EnsureRange(ARange.Pos, 0, Text.Length));
       pango_layout_index_to_pos(L, D.FCharToByte[S0], @Pos);
       SetLength(Result, 1);
-      Result[0] := TRectF.Create(O.X + Pos.X / PANGO_SCALE, O.Y + Pos.Y / PANGO_SCALE, O.X + Pos.X / PANGO_SCALE,
-        O.Y + (Pos.Y + Pos.Height) / PANGO_SCALE);
+      Result[0] := TRectF.Create(O.X + Pos.X * D.FUnit, O.Y + Pos.Y * D.FUnit, O.X + Pos.X * D.FUnit,
+        O.Y + (Pos.Y + Pos.Height) * D.FUnit);
       Exit;
     end;
     S0 := D.ShownIndex(EnsureRange(ARange.Pos, 0, Text.Length));
@@ -2022,8 +2128,8 @@ begin
           // The ranges are relative to the layout, left to right.
           pango_layout_line_get_x_ranges(Line, Max(B0, Line.StartIndex), Min(B1, LineEnd), Ranges, N);
           for K := 0 to N - 1 do
-            List.Add(TRectF.Create(O.X + Ranges[2 * K] / PANGO_SCALE, O.Y + Y0 / PANGO_SCALE,
-              O.X + Ranges[2 * K + 1] / PANGO_SCALE, O.Y + Y1 / PANGO_SCALE));
+            List.Add(TRectF.Create(O.X + Ranges[2 * K] * D.FUnit, O.Y + Y0 * D.FUnit,
+              O.X + Ranges[2 * K + 1] * D.FUnit, O.Y + Y1 * D.FUnit));
           g_free(Ranges);
         end;
       until pango_layout_iter_next_line(Iter) = 0;
