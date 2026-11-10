@@ -391,6 +391,7 @@ type
     procedure RecD2D(const AShape: TD2DShape; const AFill: Boolean; const R: TRectF; const Rx, Ry: Single;
       const APath: TPathData; const ABrush: TBrush; const AOpacity: Single);
     procedure IntersectDeviceClip(const R: TRectF; const AExclude: Boolean);
+    function ExcludeWithoutEntry(const E: TRectF): Boolean;
     procedure DrawText(const AData: TFastLayoutData; const AOrigin, AMaxSize: TPointF; const AColor: TAlphaColor;
       const AOpacity: Single);
 
@@ -2970,12 +2971,136 @@ begin
   C.Clip := Clip;
 end;
 
+/// <summary>An entry of a clip as a rectangle of pixels left out: an excluded rectangle with its sides along the
+/// pixel rows and columns (the pixels whose centers are in it, right and bottom exclusive).</summary>
+function ExcludedBox(const AEntry: TGpuOrientedRect; out ABox: TRectF): Boolean;
+begin
+  Result := AEntry.Exclude and (Abs(AEntry.Fwd.M12) < 1E-5) and (Abs(AEntry.Fwd.M21) < 1E-5) and
+    (AEntry.Fwd.M11 > 0) and (AEntry.Fwd.M22 > 0);
+  if Result then
+    ABox := TRectF.Create(AEntry.Fwd.Dx, AEntry.Fwd.Dy, AEntry.Fwd.Dx + AEntry.Width * AEntry.Fwd.M11,
+      AEntry.Fwd.Dy + AEntry.Height * AEntry.Fwd.M22);
+end;
+
+/// <summary>The clip entry that leaves out a rectangle of pixels (see ExcludedBox).</summary>
+function ExcludedEntry(const ABox: TRectF): TGpuOrientedRect;
+begin
+  Result.Fwd := Default(TGpuAffine);
+  Result.Fwd.M11 := 1;
+  Result.Fwd.M22 := 1;
+  Result.Fwd.Dx := ABox.Left;
+  Result.Fwd.Dy := ABox.Top;
+  Result.Inv := Result.Fwd.Inverse;
+  Result.Width := ABox.Width;
+  Result.Height := ABox.Height;
+  Result.Exclude := True;
+end;
+
+/// <summary>ExcludeClipRect of a rectangle along the pixel rows and columns (E, in pixels), where the clip can do
+/// without a new entry for it: a clip has room for two rectangles besides its box. True: done. Nothing of the
+/// rectangle in the box, or all of it in a rectangle left out already: nothing to do. With both entries taken: the
+/// rectangle takes a whole side off the box, or it makes one rectangle with one left out already (side by side, one
+/// above the other, one in the other); or the two left out already make one, or one of them takes a side off the
+/// box, and an entry is free again. False: the rectangle needs an entry (when none is left, for a third rectangle
+/// apart from the others, it is not left out: as before).</summary>
+function TFastCanvas.ExcludeWithoutEntry(const E: TRectF): Boolean;
+var
+  B, X, Y, C: TRectF;
+  I: Integer;
+
+  /// <summary>The part of a rectangle in the box: beyond the box nothing is drawn anyway.</summary>
+  function InBox(const A: TRectF): TRectF;
+  begin
+    Result := TRectF.Create(Max(A.Left, B.Left), Max(A.Top, B.Top), Min(A.Right, B.Right), Min(A.Bottom, B.Bottom));
+    if (Result.Right <= Result.Left) or (Result.Bottom <= Result.Top) then
+      Result := TRectF.Empty;
+  end;
+
+  /// <summary>Two rectangles that make one: one in the other, or with one pair of sides in common and no gap
+  /// between them.</summary>
+  function Joined(const A1, A2: TRectF; out AUnion: TRectF): Boolean;
+  begin
+    AUnion := TRectF.Create(Min(A1.Left, A2.Left), Min(A1.Top, A2.Top), Max(A1.Right, A2.Right),
+      Max(A1.Bottom, A2.Bottom));
+    Result := A1.IsEmpty or A2.IsEmpty or (AUnion = A1) or (AUnion = A2) or
+      ((A1.Top = A2.Top) and (A1.Bottom = A2.Bottom) and (A1.Left <= A2.Right) and (A2.Left <= A1.Right)) or
+      ((A1.Left = A2.Left) and (A1.Right = A2.Right) and (A1.Top <= A2.Bottom) and (A2.Top <= A1.Bottom));
+    if A1.IsEmpty then
+      AUnion := A2
+    else if A2.IsEmpty then
+      AUnion := A1;
+  end;
+
+  /// <summary>A rectangle in the box that reaches over a whole side of it: the box without it.</summary>
+  function TakesSide(const A: TRectF): Boolean;
+  begin
+    Result := True;
+    if (A.Top <= B.Top) and (A.Bottom >= B.Bottom) and (A.Left <= B.Left) and (A.Right >= B.Right) then
+      B := TRectF.Empty
+    else if (A.Top <= B.Top) and (A.Bottom >= B.Bottom) and (A.Left <= B.Left) then
+      B.Left := A.Right
+    else if (A.Top <= B.Top) and (A.Bottom >= B.Bottom) and (A.Right >= B.Right) then
+      B.Right := A.Left
+    else if (A.Left <= B.Left) and (A.Right >= B.Right) and (A.Top <= B.Top) then
+      B.Top := A.Bottom
+    else if (A.Left <= B.Left) and (A.Right >= B.Right) and (A.Bottom >= B.Bottom) then
+      B.Bottom := A.Top
+    else
+      Result := False;
+    if Result then
+    begin
+      FClip.Clip.Box := B;
+      FClip.Index := -1;
+    end;
+  end;
+
+begin
+  B := FClip.Clip.Box;
+  C := InBox(E);
+  if C.IsEmpty then
+    Exit(True);
+  for I := 0 to FClip.Clip.Count - 1 do
+    if ExcludedBox(FClip.Clip.Oriented[I], X) and (X.Left <= C.Left) and (X.Top <= C.Top) and (X.Right >= C.Right) and
+      (X.Bottom >= C.Bottom) then
+      Exit(True);
+  Result := False;
+  if FClip.Clip.Count < Length(FClip.Clip.Oriented) then
+    Exit;
+  if TakesSide(C) then
+    Exit(True);
+  for I := 0 to FClip.Clip.Count - 1 do
+    if ExcludedBox(FClip.Clip.Oriented[I], X) and Joined(InBox(X), C, Y) then
+    begin
+      FClip.Clip.Oriented[I] := ExcludedEntry(Y);
+      FClip.Index := -1;
+      Exit(True);
+    end;
+  // An entry made free: the rectangle is looked at again, and takes the entry when it still needs one.
+  if ExcludedBox(FClip.Clip.Oriented[0], X) and ExcludedBox(FClip.Clip.Oriented[1], Y) and
+    Joined(InBox(X), InBox(Y), C) then
+  begin
+    FClip.Clip.Oriented[0] := ExcludedEntry(C);
+    FClip.Clip.Count := 1;
+    FClip.Index := -1;
+    Exit(ExcludeWithoutEntry(E));
+  end;
+  for I := 0 to FClip.Clip.Count - 1 do
+    if ExcludedBox(FClip.Clip.Oriented[I], X) and TakesSide(InBox(X)) then
+    begin
+      FClip.Clip.Oriented[I] := FClip.Clip.Oriented[FClip.Clip.Count - 1];
+      Dec(FClip.Clip.Count);
+      Exit(ExcludeWithoutEntry(E));
+    end;
+end;
+
 procedure TFastCanvas.IntersectDeviceClip(const R: TRectF; const AExclude: Boolean);
 var
   O: TGpuOrientedRect;
   T: TGpuAffine;
 begin
   FClippingChangeCount := FClippingChangeCount + 1;
+  if AExclude and FAxis and (FDev.M11 > 0) and (FDev.M22 > 0) and ExcludeWithoutEntry(DeviceBox(R)) then
+    Exit;
   FClip.Index := -1;
   if FAxis and not AExclude then
   begin
