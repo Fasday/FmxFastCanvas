@@ -423,6 +423,7 @@ type
     procedure Unmap(const AWritten: Boolean); override;
     procedure CopyFrom(const ASource: TGpuSurface); override;
     procedure GpuWritten; override;
+    procedure DropReadback; override;
     property Image: TVkImage read FImage;
     property View: TVkImageView read FView;
     /// <summary>B8G8R8A8_UNORM, or a swap chain's format.</summary>
@@ -2740,6 +2741,22 @@ end;
 
 procedure TGpuVkSurface.GpuWritten;
 begin
+  FReadbackValid := False;
+end;
+
+procedure TGpuVkSurface.DropReadback;
+begin
+  if FReadback = VK_NULL_HANDLE then
+    Exit;
+  // The command buffer that copied into it may not be executed yet.
+  if GCtx <> nil then
+  begin
+    GCtx.Retire(TGpuVkObject.Buffer, FReadback);
+    GCtx.Retire(TGpuVkObject.Memory, MemoryHandle(FReadbackMemory));
+  end;
+  FReadback := VK_NULL_HANDLE;
+  FReadbackMemory := nil;
+  FReadbackData := nil;
   FReadbackValid := False;
 end;
 

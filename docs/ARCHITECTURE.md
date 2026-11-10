@@ -530,9 +530,18 @@ transform keeps orientation, so that a ray sees the same front face as the raste
 The render thread only records that the device is gone (`DXGI_ERROR_DEVICE_REMOVED` or `RESET` from `Present`,
 `VK_ERROR_DEVICE_LOST`, or an exception on a removed device). The next scene that is not nested in another waits for
 the render thread, sends `TContextLostMessage`, releases everything made on the old device, creates a new device,
-recreates the bitmap textures (bitmaps the CPU wrote get their pixels back), sends `TContextResetMessage`, and repaints
+recreates the bitmap textures (from the copies of their pixels, see below), sends `TContextResetMessage`, and repaints
 the forms. The 3D contexts make their buffers again on the main thread before their next scene.
 `FastCanvasSimulateDeviceLoss` exercises this path.
+
+A bitmap keeps a copy of its pixels for that (`FastCanvasKeepBitmapCopies`): what the CPU wrote at `Unmap`, and what
+its canvas drew once the program draws nothing any more. Drawing into a bitmap drops its copy and asks for the timer
+of `KeepDrawnBitmaps` (main thread, every 250 ms); a pass whose predecessor saw the same busy time of the render thread
+(nothing was executed in between) takes the canvas lock, lets the render thread finish, and maps the bitmaps without
+a copy for at most 8 ms, keeping their rows and letting go of what the map made (a staging texture or read-back buffer
+as large as the bitmap). While something is drawn no pass reads anything: a read-back waits for the render thread and
+the GPU. The timer goes when no bitmap is left; the copies of drawn bitmaps are capped (256 MB, 64 MB in a 32-bit
+program), and the image a 3D context copies into a bitmap and HDR content are not kept.
 
 ## Shutdown
 

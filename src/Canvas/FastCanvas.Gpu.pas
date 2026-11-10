@@ -193,6 +193,10 @@ type
     procedure CopyFrom(const ASource: TGpuSurface); virtual; abstract;
     /// <summary>The GPU drew into the surface: CPU copies of the content are stale.</summary>
     procedure GpuWritten; virtual;
+    /// <summary>Lets go of what Map made to hand the content to the CPU (memory of the size of the surface, which
+    /// stays for later maps otherwise); the next Map makes it again. Not while mapped; the device lock held.
+    /// </summary>
+    procedure DropReadback; virtual;
     property Width: Integer read FWidth;
     property Height: Integer read FHeight;
     property Hdr: Boolean read FHdr;
@@ -528,6 +532,10 @@ end;
 { TGpuSurface }
 
 procedure TGpuSurface.GpuWritten;
+begin
+end;
+
+procedure TGpuSurface.DropReadback;
 begin
 end;
 

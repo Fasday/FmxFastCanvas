@@ -35,6 +35,7 @@ type
     procedure Unmap(const AWritten: Boolean); override;
     procedure CopyFrom(const ASource: TGpuSurface); override;
     procedure GpuWritten; override;
+    procedure DropReadback; override;
     property Texture: ID3D11Texture2D read FTexture;
     property View: ID3D11ShaderResourceView read FView;
   end;
@@ -185,6 +186,12 @@ end;
 
 procedure TGpu11Surface.GpuWritten;
 begin
+  FStagingValid := False;
+end;
+
+procedure TGpu11Surface.DropReadback;
+begin
+  FStaging := nil;
   FStagingValid := False;
 end;
 

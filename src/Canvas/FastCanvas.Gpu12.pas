@@ -191,6 +191,7 @@ type
     procedure Unmap(const AWritten: Boolean); override;
     procedure CopyFrom(const ASource: TGpuSurface); override;
     procedure GpuWritten; override;
+    procedure DropReadback; override;
     property Resource: ID3D12Resource read FResource;
     property Srv: TD3D12_CPU_DESCRIPTOR_HANDLE read FSrv;
   end;
@@ -1155,6 +1156,17 @@ end;
 
 procedure TGpu12Surface.GpuWritten;
 begin
+  FReadbackValid := False;
+end;
+
+procedure TGpu12Surface.DropReadback;
+begin
+  if (FReadback = nil) or (FReadbackData <> nil) then
+    Exit;
+  // The command list that copied into it may not be executed yet.
+  if GCtx <> nil then
+    GCtx.Retire(FReadback);
+  FReadback := nil;
   FReadbackValid := False;
 end;
 

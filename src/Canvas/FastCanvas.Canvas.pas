@@ -99,9 +99,15 @@ var
   /// thread both allocate, so that showed as 10-25 ms frame spikes. Spinning is what FastMM advises when there are
   /// fewer busy threads than cores.</summary>
   FastCanvasNoHeapSleep: Boolean = True;
-  /// <summary>Bitmaps written by the CPU (Map for writing: loaded images, style bitmaps) keep a copy of their pixels,
-  /// so that a new device after a device removal gets them back (the stock Direct2D canvas loses them). Bitmaps the
-  /// GPU draws into do not keep one: FMX draws them again.</summary>
+  /// <summary>Bitmaps keep a copy of their pixels, so that a new device after a device removal gets them back (the
+  /// stock Direct2D canvas loses them). Bitmaps written by the CPU (Map for writing: loaded images, style bitmaps)
+  /// keep what was written. Bitmaps drawn through their canvas are read back while the program draws nothing: from
+  /// a quarter of a second after its last drawing on (a program with a message loop), for at most 8 ms every
+  /// quarter of a second until all are read. A drawing made once and shown since (a chart, a cached picture) comes
+  /// back so too; a bitmap drawn again and again is never read. These copies take 256 MB in all at most (64 MB in a
+  /// 32-bit program); what does not fit, a drawing not read back yet, the image a 3D context copied into a bitmap
+  /// and HDR content are transparent on a new device until they are drawn again (FMX repaints the forms and updates
+  /// the effects then).</summary>
   FastCanvasKeepBitmapCopies: Boolean = True;
   /// <summary>Direct3D 12 and Vulkan: the canvas reports TCanvasStyle.SupportClipRects, so FMX paints only the
   /// controls in the rectangles that changed (FMX.Forms.pas:6434-6464, :6509-6560); a window frame then starts from
@@ -156,13 +162,13 @@ uses
 {$IFDEF MSWINDOWS}
   Winapi.Windows, Winapi.DXGI, Winapi.D3D11, Winapi.D3DCommon, Winapi.DxgiFormat,
   Winapi.D2D1, System.Generics.Collections, System.Math.Vectors, System.Messaging,
-  FMX.Platform.Win, FMX.TextLayout,
+  FMX.Platform, FMX.Platform.Win, FMX.TextLayout,
   FMX.Types3D, FMX.Controls,
   FastCanvas.D2D1Ext, FastCanvas.DWriteExt, FastCanvas.Device, FastCanvas.Gpu11, FastCanvas.Gpu12,
   FastCanvas.GpuVk, FastCanvas.Text, FastCanvas.RenderQueue, FastCanvas.Service, FastCanvas.Bridge,
   FastCanvas.Geometry, FastCanvas.GeometryD2D, FastCanvas.TextDWrite, FastCanvas.Platform, FastCanvas.PathMesh;
 {$ELSE}
-  System.Generics.Collections, System.Math.Vectors, System.Messaging, System.Diagnostics, FMX.TextLayout,
+  System.Generics.Collections, System.Math.Vectors, System.Messaging, System.Diagnostics, FMX.Platform, FMX.TextLayout,
   FMX.Types3D, FMX.Controls, FastCanvas.Device, FastCanvas.GpuVk, FastCanvas.Text, FastCanvas.RenderQueue,
   FastCanvas.Service, FastCanvas.Bridge, FastCanvas.Geometry, FastCanvas.GeometryOwn,
 {$IFDEF LINUX}
@@ -189,6 +195,11 @@ const
   /// <summary>Rectangles of a scene that updates part of its target, each tested per pixel (TFastCanvas.RegionOf).
   /// </summary>
   MaxRegionRects = 32;
+  /// <summary>The passes that copy what the GPU drew into bitmaps (KeepDrawnBitmaps): their interval and the time
+  /// one of them takes at most, ms (a bitmap it has begun is finished); the bytes of all such copies.</summary>
+  KeepInterval = 250;
+  KeepPassMs = 8;
+  DrawnCopiesLimit = {$IFDEF CPU32BITS}64{$ELSE}256{$ENDIF} * 1024 * 1024;
   /// <summary>Paths kept in the GPU edge table (render thread).</summary>
   MaxEdgePaths = 4096;
   /// <summary>Horizontal bands of a path in the edge table (shader PathCoverage).</summary>
@@ -216,8 +227,15 @@ type
     FD2D: ID2D1Bitmap1;
 {$ENDIF}
     FAccess: TMapAccess;
-    /// <summary>Pixels last written by the CPU (FastCanvasKeepBitmapCopies), nil when the GPU wrote it since.</summary>
+    /// <summary>The content for a new device (FastCanvasKeepBitmapCopies): the pixels the CPU wrote last, or those
+    /// read back of what the GPU drew (KeepDrawn: FCopyDrawn, counted in GDrawnCopies); nil when the GPU wrote the
+    /// bitmap since.</summary>
     FCopy: TBytes;
+    FCopyDrawn: Boolean;
+    /// <summary>A canvas drew into it since its content was copied last: KeepDrawn reads it back.</summary>
+    FDrawn: Boolean;
+    /// <summary>Between Map and Unmap: the program holds the pointer Map gave it.</summary>
+    FMapped: Boolean;
     /// <summary>Scenes of canvases drawing into it that are open (the thread that holds the canvas lock).</summary>
     FScenes: Integer;
     /// <summary>HDR content (made on first use) and whether the content is there (render thread, in stream order).
@@ -226,7 +244,11 @@ type
     FHdrValid: Boolean;
     procedure CreateTexture(const AData: Pointer; const APitch: Integer);
     procedure ReleaseTexture;
-    procedure GpuWritten; inline;
+    procedure GpuWritten;
+    procedure DropCopy;
+    /// <summary>The device lock held, the render thread done with the bitmap: what the GPU drew as the copy for a new
+    /// device. False: there is nothing to read, or no room for it (FDrawn stays).</summary>
+    function KeepDrawn: Boolean;
   public
     /// <summary>Device lock held, render thread idle or on it: HDR content into the 8-bit surface (clipped at 1).
     /// </summary>
@@ -712,6 +734,13 @@ var
   GBitmapsLock: TObject;
   /// <summary>The canvas service shut down (ShutdownFastCanvas).</summary>
   GFinished: Boolean;
+  // Copies of what the GPU drew (KeepDrawnBitmaps): their bytes in all; a bitmap was drawn since the last pass found
+  // none left to copy (the timer runs, or is asked for); the timer of the passes (main thread) and the time the
+  // render thread had worked at the pass before.
+  GDrawnCopies: Int64;
+  GKeepArmed: Integer;
+  GKeepTimer: TFmxHandle;
+  GKeepBusy: Int64 = -1;
   // The canvas whose region is in force (a partial window frame, a bitmap scene with clip rectangles); with its
   // FOuterRegion chain, the regions recorded again after ResetTables.
   GRegionCanvas: TFastCanvas;
@@ -1199,6 +1228,8 @@ end;
 
 { TFastBitmap }
 
+procedure ArmKeeper; forward;
+
 function DeviceGone: Boolean;
 begin
   Result := (GDeviceLost <> 0) or (TFastDevice.Ready and (TFastDevice.RemovedReason <> S_OK));
@@ -1266,6 +1297,7 @@ destructor TFastBitmap.Destroy;
 begin
   Unregister(GBitmaps, Self);
   ReleaseTexture;
+  DropCopy;
   inherited;
 end;
 
@@ -1309,13 +1341,58 @@ begin
   FreeAndNil(FSurface);
   FreeAndNil(FHdr);
   FHdrValid := False;
+  // What was drawn into it went with the texture.
+  FDrawn := False;
+end;
+
+procedure TFastBitmap.DropCopy;
+begin
+  if FCopyDrawn then
+  begin
+    AtomicIncrement(GDrawnCopies, -Int64(Length(FCopy)));
+    FCopyDrawn := False;
+  end;
+  FCopy := nil;
 end;
 
 procedure TFastBitmap.GpuWritten;
 begin
   if FSurface <> nil then
     FSurface.GpuWritten;
-  FCopy := nil;
+  DropCopy;
+  // Read back when nothing is drawn any more (KeepDrawnBitmaps).
+  FDrawn := True;
+  if FastCanvasKeepBitmapCopies and (GKeepArmed = 0) then
+    ArmKeeper;
+end;
+
+function TFastBitmap.KeepDrawn: Boolean;
+var
+  P: Pointer;
+  Pitch, Y, Size: Integer;
+  Pixels: TBytes;
+begin
+  Result := False;
+  Size := FWidth * 4 * FHeight;
+  if (FSurface = nil) or FHdrValid or (Size <= 0) or (GDrawnCopies + Size > DrawnCopiesLimit) then
+    Exit;
+  if not FSurface.Map(P, Pitch) then
+    Exit;
+  try
+    SetLength(Pixels, Size);
+    for Y := 0 to FHeight - 1 do
+      Move((PByte(P) + NativeInt(Y) * Pitch)^, Pixels[Y * FWidth * 4], FWidth * 4);
+  finally
+    FSurface.Unmap(False);
+    // What Map made would stay with the surface for later maps, as large as the copy taken here.
+    FSurface.DropReadback;
+  end;
+  DropCopy;
+  FCopy := Pixels;
+  FCopyDrawn := True;
+  AtomicIncrement(GDrawnCopies, Int64(Size));
+  FDrawn := False;
+  Result := True;
 end;
 
 function TFastBitmap.Surface: TGpuSurface;
@@ -1332,7 +1409,7 @@ begin
     FHdr := Backend.CreateHdrSurface(FWidth, FHeight);
   FHdrValid := FHdr <> nil;
   if FHdrValid then
-    FCopy := nil;
+    DropCopy;
   Result := FHdr;
 end;
 
@@ -1496,6 +1573,168 @@ end;
 function FastCanvasDeviceResets: Integer;
 begin
   Result := GDeviceResets;
+end;
+
+{ Copies of what the GPU drew into bitmaps (FastCanvasKeepBitmapCopies) }
+
+type
+  /// <summary>FMX's timers call a method: a class method, so that no object has to outlive the timer.</summary>
+  TKeeper = class
+    class procedure Tick;
+  end;
+
+/// <summary>A clock that only goes on, ms (the time of a pass of KeepDrawnBitmaps).</summary>
+function ClockMs: Double;
+{$IFDEF MSWINDOWS}
+var
+  Count, Frequency: Int64;
+begin
+  if QueryPerformanceCounter(Count) and QueryPerformanceFrequency(Frequency) and (Frequency > 0) then
+    Result := Count * 1000 / Frequency
+  else
+    Result := GetTickCount64;
+end;
+{$ELSE}
+begin
+  Result := TStopwatch.GetTimeStamp * 1000 / TStopwatch.Frequency;
+end;
+{$ENDIF}
+
+/// <summary>Main thread: the passes end (the timer goes; a bitmap drawn later asks for it again, ArmKeeper).</summary>
+procedure StopKeeper;
+var
+  Service: IFMXTimerService;
+begin
+  if GKeepTimer = 0 then
+    Exit;
+  if (TPlatformServices.Current <> nil) and
+    TPlatformServices.Current.SupportsPlatformService(IFMXTimerService, Service) then
+    Service.DestroyTimer(GKeepTimer);
+  GKeepTimer := 0;
+end;
+
+/// <summary>Main thread, every KeepInterval while bitmaps hold what their canvases drew and no copy of it: when
+/// nothing has been drawn since the pass before, the content of some of them is read back and kept for a new device
+/// (TFastBitmap.KeepDrawn), as the pixels the CPU writes are. Never while something is drawn: reading a bitmap back
+/// waits for the render thread and for the GPU, and a frame of an animation would be late for it. A bitmap drawn
+/// again and again is so never read; one drawn once is read soon after the last drawing.</summary>
+procedure KeepDrawnBitmaps;
+var
+  P: TPair<Pointer, Boolean>;
+  B: TFastBitmap;
+  Busy: Int64;
+  Left, Count: Integer;
+  Still: Boolean;
+  Started: Double;
+begin
+  if GFinished or not FastCanvasKeepBitmapCopies then
+  begin
+    StopKeeper;
+    Exit;
+  end;
+  Busy := -1;
+  if GQueue <> nil then
+    Busy := GQueue.BusyTicks;
+  Still := Busy = GKeepBusy;
+  GKeepBusy := Busy;
+  if not Still or (GSceneDepth > 0) or not TFastDevice.Ready or DeviceGone then
+    Exit;
+  // The bitmaps left to copy. None: the passes end; a bitmap drawn from now on asks for them again.
+  AtomicExchange(GKeepArmed, 0);
+  Left := 0;
+  TMonitor.Enter(GBitmapsLock);
+  try
+    if GBitmaps <> nil then
+      for P in GBitmaps do
+        if TFastBitmap(P.Key).FDrawn then
+          Inc(Left);
+  finally
+    TMonitor.Exit(GBitmapsLock);
+  end;
+  if Left = 0 then
+  begin
+    StopKeeper;
+    Exit;
+  end;
+  AtomicExchange(GKeepArmed, 1);
+  // As a device reset takes them: no scene of any thread is open, the render thread has executed what was recorded,
+  // and no bitmap comes or goes meanwhile.
+  TCanvas.Lock;
+  try
+    if GSceneDepth > 0 then
+      Exit;
+    // As FastCanvasSync, but an error of the render thread is left for the scene that raises it.
+    FastFlushDeferred;
+    if GQueue <> nil then
+      GQueue.Sync;
+    if DeviceGone then
+      Exit;
+    TFastDevice.Lock;
+    TMonitor.Enter(GBitmapsLock);
+    try
+      Count := 0;
+      Started := ClockMs;
+      if GBitmaps <> nil then
+        for P in GBitmaps do
+        begin
+          B := TFastBitmap(P.Key);
+          // A bitmap the program has mapped waits for its Unmap.
+          if not B.FDrawn or B.FMapped or (B.FScenes > 0) then
+            Continue;
+          if (Count > 0) and (ClockMs - Started >= KeepPassMs) then
+            Break;
+          try
+            if B.KeepDrawn then
+              Inc(Count)
+            else
+              // Nothing to read, or no room for the copy: as it was before there were such copies, until it is
+              // drawn again.
+              B.FDrawn := False;
+          except
+            // No memory for the copy, or the device went: the same, and the pass ends.
+            B.FDrawn := False;
+            if DeviceGone then
+              MarkDeviceLost;
+            Break;
+          end;
+        end;
+    finally
+      TMonitor.Exit(GBitmapsLock);
+      TFastDevice.Unlock;
+    end;
+  finally
+    TCanvas.Unlock;
+  end;
+end;
+
+class procedure TKeeper.Tick;
+begin
+  KeepDrawnBitmaps;
+end;
+
+/// <summary>Main thread: the timer of the passes, where the platform has timers and a message loop runs them.
+/// </summary>
+procedure StartKeeper;
+var
+  Service: IFMXTimerService;
+begin
+  if GFinished or (GKeepTimer <> 0) or not FastCanvasKeepBitmapCopies then
+    Exit;
+  GKeepBusy := -1;
+  if (TPlatformServices.Current <> nil) and
+    TPlatformServices.Current.SupportsPlatformService(IFMXTimerService, Service) then
+    GKeepTimer := Service.CreateTimer(KeepInterval, TKeeper.Tick);
+end;
+
+/// <summary>Any thread: a bitmap was drawn into and the passes are not running (GKeepArmed).</summary>
+procedure ArmKeeper;
+begin
+  if AtomicExchange(GKeepArmed, 1) <> 0 then
+    Exit;
+  if GetCurrentThreadId = MainThreadID then
+    StartKeeper
+  else
+    TThread.ForceQueue(nil, StartKeeper);
 end;
 
 var
@@ -3079,6 +3318,7 @@ begin
     if B.FSurface.Map(P, Pitch) then
     begin
       B.FAccess := Access;
+      B.FMapped := True;
       Data.Data := P;
       Data.Pitch := Pitch;
       Result := True;
@@ -3096,14 +3336,22 @@ begin
   B := TFastBitmap(Bitmap);
   if (B.FAccess <> TMapAccess.Read) and FastCanvasKeepBitmapCopies then
   begin
-    // The pixels the CPU wrote, for a new device (FastCanvasKeepBitmapCopies).
-    if Length(B.FCopy) <> B.FWidth * 4 * B.FHeight then
+    // The pixels the CPU wrote, for a new device (FastCanvasKeepBitmapCopies): the whole content, also what the GPU
+    // had drawn of it.
+    if B.FCopyDrawn or (Length(B.FCopy) <> B.FWidth * 4 * B.FHeight) then
+    begin
+      B.DropCopy;
       SetLength(B.FCopy, B.FWidth * 4 * B.FHeight);
+    end;
     for I := 0 to B.FHeight - 1 do
       Move((PByte(Data.Data) + I * Data.Pitch)^, B.FCopy[I * B.FWidth * 4], B.FWidth * 4);
+    B.FDrawn := False;
   end;
   if B.FSurface = nil then
+  begin
+    B.FMapped := False;
     Exit;
+  end;
   TFastDevice.Lock;
   try
     B.FSurface.Unmap(B.FAccess <> TMapAccess.Read);
@@ -3112,6 +3360,8 @@ begin
     if B.FScenes > 0 then
       B.GpuWritten;
   finally
+    // Mapped until here, under the device lock: KeepDrawnBitmaps, which holds it, leaves a mapped bitmap alone.
+    B.FMapped := False;
     TFastDevice.Unlock;
   end;
 end;
@@ -3136,6 +3386,8 @@ begin
     D.FSurface.CopyFrom(S.FSurface);
     D.GpuWritten;
     D.FCopy := Copy(S.FCopy);
+    // With the source's copy there is nothing to read back.
+    D.FDrawn := D.FCopy = nil;
   finally
     TFastDevice.Unlock;
   end;
@@ -5143,13 +5395,18 @@ end;
 procedure BridgeWritten(const ABitmap: TBitmap);
 begin
   if (ABitmap <> nil) and ABitmap.HandleAllocated and ABitmap.CanvasClass.InheritsFrom(TFastCanvas) then
+  begin
     TFastBitmap(ABitmap.Handle).GpuWritten;
+    // The image of a 3D context: its viewport draws it again after a device loss; no copy is kept of it.
+    TFastBitmap(ABitmap.Handle).FDrawn := False;
+  end;
 end;
 
 { Installation }
 
 procedure ShutdownFastCanvas;
 begin
+  StopKeeper;
   // Executes what is left and stops the render thread before the device goes.
   FreeAndNil(GQueue);
   if TFastDevice.Ready then
