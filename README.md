@@ -21,8 +21,9 @@ Direct3D 11 or Direct3D 12. Programs stay standard FMX programs: forms, controls
 - **DLSS Super Resolution** (experimental; Direct3D 12, NVIDIA RTX, Win64): the 3D scene of a `TForm3D` drawn at a
   lower resolution and reconstructed by NVIDIA DLSS, the 2D panel on top at full resolution. It pays off on heavy scenes;
   on light ones DLSS costs more than it saves (about 0.9 ms per frame at 2560 x 1400 on an RTX 3090).
-- **Robust.** Device loss (driver update, GPU reset) is recovered and bitmaps keep their pixels; partial repaints on
-  Direct3D 12; stress runs and the Direct3D 12 debug layer stay clean; nothing leaks at shutdown.
+- **Robust.** Device loss (driver update, GPU reset) is recovered and bitmaps keep their pixels (bitmaps drawn through
+  their canvas with `FastCanvasKeepDrawnBitmaps`, see below); partial repaints on Direct3D 12; stress runs and the
+  Direct3D 12 debug layer stay clean; nothing leaks at shutdown.
 
 ## Speed
 
@@ -137,6 +138,7 @@ Global variables, set before `Application.Initialize`; all of them in [docs/USAG
 | `FastCanvasHdr` (`FastCanvas.Hdr`) | `Off` | HDR output of windows on HDR displays (`Auto`) |
 | `FastContext3DRayTracing` (`FastCanvas.Context3D12`) | all off | Shadows, soft shadows, ambient occlusion, reflections in 3D scenes |
 | `FastContext3DDlssMode` (`FastCanvas.Context3D12`) | `Off` | DLSS Super Resolution of new `TForm3D` windows (NVIDIA RTX); `DlssMode` of a context at run time |
+| `FastCanvasKeepDrawnBitmaps` | `False` | Bitmaps drawn through their canvas survive a device loss (a driver update or a GPU reset while the program runs) as loaded images do: a copy of what was drawn is read back while the program is idle. Turn it on when the program draws into bitmaps once and keeps showing them (a chart, a cached picture): without it they are transparent after a device loss until drawn again. The copies take memory as large as the bitmaps, 256 MB at most (64 MB in a 32-bit program) |
 
 ## Repository
 

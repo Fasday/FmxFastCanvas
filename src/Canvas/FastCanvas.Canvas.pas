@@ -100,15 +100,20 @@ var
   /// fewer busy threads than cores.</summary>
   FastCanvasNoHeapSleep: Boolean = True;
   /// <summary>Bitmaps keep a copy of their pixels, so that a new device after a device removal gets them back (the
-  /// stock Direct2D canvas loses them). Bitmaps written by the CPU (Map for writing: loaded images, style bitmaps)
-  /// keep what was written. Bitmaps drawn through their canvas are read back while the program draws nothing: from
-  /// a quarter of a second after its last drawing on (a program with a message loop), for at most 8 ms every
-  /// quarter of a second until all are read. A drawing made once and shown since (a chart, a cached picture) comes
-  /// back so too; a bitmap drawn again and again is never read. These copies take 256 MB in all at most (64 MB in a
-  /// 32-bit program); what does not fit, a drawing not read back yet, the image a 3D context copied into a bitmap
-  /// and HDR content are transparent on a new device until they are drawn again (FMX repaints the forms and updates
-  /// the effects then).</summary>
+  /// stock Direct2D canvas loses them): bitmaps written by the CPU (Map for writing: loaded images, style bitmaps)
+  /// keep what was written, and with FastCanvasKeepDrawnBitmaps bitmaps drawn through their canvas what was drawn.
+  /// A bitmap without a copy is transparent on a new device until it is drawn again (FMX repaints the forms and
+  /// updates the effects then).</summary>
   FastCanvasKeepBitmapCopies: Boolean = True;
+  /// <summary>With FastCanvasKeepBitmapCopies: bitmaps drawn through their canvas keep a copy of what was drawn too,
+  /// read back while the program draws nothing: from a quarter of a second after its last drawing on (a program with
+  /// a message loop), for at most 8 ms every quarter of a second until all are read. A drawing made once and shown
+  /// since (a chart, a cached picture) comes back so after a device loss; a bitmap drawn again and again is never
+  /// read. These copies take memory as large as their bitmaps, 256 MB in all at most (64 MB in a 32-bit program);
+  /// what does not fit, a drawing not read back yet, the image a 3D context copied into a bitmap and HDR content
+  /// are not kept. Off by default: every program would pay for it, for what is rare (a driver update, a GPU reset
+  /// while it runs). Read when a bitmap is drawn into and at every pass.</summary>
+  FastCanvasKeepDrawnBitmaps: Boolean = False;
   /// <summary>Direct3D 12 and Vulkan: the canvas reports TCanvasStyle.SupportClipRects, so FMX paints only the
   /// controls in the rectangles that changed (FMX.Forms.pas:6434-6464, :6509-6560); a window frame then starts from
   /// the one shown last and draws only inside those rectangles. As the stock Direct2D canvas. Measured 2026-10-08:
@@ -1363,7 +1368,7 @@ begin
   DropCopy;
   // Read back when nothing is drawn any more (KeepDrawnBitmaps).
   FDrawn := True;
-  if FastCanvasKeepBitmapCopies and (GKeepArmed = 0) then
+  if FastCanvasKeepBitmapCopies and FastCanvasKeepDrawnBitmaps and (GKeepArmed = 0) then
     ArmKeeper;
 end;
 
@@ -1576,7 +1581,7 @@ begin
   Result := GDeviceResets;
 end;
 
-{ Copies of what the GPU drew into bitmaps (FastCanvasKeepBitmapCopies) }
+{ Copies of what the GPU drew into bitmaps (FastCanvasKeepDrawnBitmaps) }
 
 type
   /// <summary>FMX's timers call a method: a class method, so that no object has to outlive the timer.</summary>
@@ -1628,7 +1633,7 @@ var
   Still: Boolean;
   Started: Double;
 begin
-  if GFinished or not FastCanvasKeepBitmapCopies then
+  if GFinished or not FastCanvasKeepBitmapCopies or not FastCanvasKeepDrawnBitmaps then
   begin
     StopKeeper;
     Exit;
@@ -1719,7 +1724,7 @@ procedure StartKeeper;
 var
   Service: IFMXTimerService;
 begin
-  if GFinished or (GKeepTimer <> 0) or not FastCanvasKeepBitmapCopies then
+  if GFinished or (GKeepTimer <> 0) or not FastCanvasKeepBitmapCopies or not FastCanvasKeepDrawnBitmaps then
     Exit;
   GKeepBusy := -1;
   if (TPlatformServices.Current <> nil) and
