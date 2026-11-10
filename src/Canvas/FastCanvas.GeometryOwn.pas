@@ -58,10 +58,11 @@ type
     FACount, FBCount: Integer;
     FPoly: TArray<TPointF>;
     FPolyCount: Integer;
-    { The dash pattern in path units, and dashes made of the figure so far. The first dash of a closed figure, held
-      for the last one, and its direction at its end. }
+    { The dash pattern in path units, dashes made of the stroke so far, and whether they became too many (MaxDashes).
+      The first dash of a closed figure, held for the last one, and its direction at its end. }
     FPattern: TArray<Single>;
     FDashes: Integer;
+    FTooMany: Boolean;
     FFirst: TArray<TPointF>;
     FFirstSmooth: TArray<Boolean>;
     FFirstEndTan: TPointF;
@@ -119,9 +120,12 @@ const
   /// best so (src\Probe\GeometryProbe.dpr). Round joins and caps take the tolerance as it is, as Direct2D's.
   /// </summary>
   Flatness = 0.6;
-  /// <summary>Dashes of one stroke at most (a dash pattern far finer than the path): about 500 000 edges, within what
-  /// the canvas draws of one path (GpuEdgesLimit).</summary>
-  MaxDashes = 50000;
+  /// <summary>Edges of the dashes of one stroke at most (a dash pattern far finer than the path): what the canvas
+  /// draws of one path (GpuEdgesLimit div 4), and the dashes that make them at four edges each. A stroke of more is
+  /// not outlined at all (Widen fails): the dashes made so far would be drawn as if they were the whole of it.
+  /// </summary>
+  MaxDashEdges = 1024 * 1024;
+  MaxDashes = MaxDashEdges div 4;
 
 type
   /// <summary>The figures of a geometry as FMX path points, and its fill rule.</summary>
@@ -1157,8 +1161,11 @@ begin
         else
           StrokePiece(False, True, StartTan, FigureTangent(I, Pos / L, AClosed));
         Inc(FDashes);
-        if FDashes > MaxDashes then
+        if (FDashes > MaxDashes) or (FSink.Count > MaxDashEdges) then
+        begin
+          FTooMany := True;
           Exit;
+        end;
       end
       else
         StartTan := FigureTangent(I, Pos / L, AClosed);
@@ -1206,6 +1213,7 @@ var
   Cur: TPointF;
   Dashes: PSingle;
   Period, Phase, StartRemain: Single;
+  Shift: Double;
 
   procedure EndFigure;
   begin
@@ -1251,6 +1259,7 @@ begin
   FCap := Min(AStroke.Cap, 1);
   FJoin := Min(AStroke.Join, 2);
   FDashes := 0;
+  FTooMany := False;
   // The dash patterns of Direct2D's dash styles in stroke widths (Custom: the brush's lengths; an odd count taken
   // twice, as dashes and gaps alternate).
   case AStroke.Dash of
@@ -1291,17 +1300,30 @@ begin
       FPattern := nil
     else
     begin
-      // A positive offset moves the pattern towards the start of the figure.
-      Phase := AStroke.DashOffset * AStroke.Width;
-      Phase := Phase - Floor(Phase / Period) * Period;
+      // A positive offset moves the pattern towards the start of the figure. Its remainder is taken in double
+      // precision and without an integer (Floor had no room for the quotient of a large offset: the offset stayed
+      // as large as it was, and the loop below, which takes one element of the pattern from it at a time, never
+      // ended); an offset that is not a number counts as none.
+      Shift := 0;
+      if not IsNan(AStroke.DashOffset) and not IsInfinite(AStroke.DashOffset) then
+        Shift := AStroke.DashOffset * Double(AStroke.Width);
+      Shift := Shift - Int(Shift / Period) * Period;
+      if Shift < 0 then
+        Shift := Shift + Period;
+      if not ((Shift >= 0) and (Shift < Period)) then
+        Shift := 0;
+      Phase := Shift;
       K := 0;
-      while (Phase > 0) and (Phase >= FPattern[K]) do
+      // Once through the pattern at most (rounding may leave a little of the offset after its last element).
+      for I := 0 to High(FPattern) do
       begin
+        if not ((Phase > 0) and (Phase >= FPattern[K])) then
+          Break;
         Phase := Phase - FPattern[K];
         K := (K + 1) mod Length(FPattern);
       end;
       StartIndex := K;
-      StartRemain := FPattern[K] - Max(Phase, 0);
+      StartRemain := Max(FPattern[K] - Max(Phase, 0), 0);
     end;
   end;
   FCount := 0;
@@ -1348,13 +1370,13 @@ begin
           Open := False;
         end;
     end;
-    if FDashes > MaxDashes then
+    if FTooMany then
       Break;
     Inc(I);
   end;
   EndFigure;
   FSink := nil;
-  Result := True;
+  Result := not FTooMany;
 end;
 
 initialization
