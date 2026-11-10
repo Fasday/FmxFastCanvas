@@ -4664,6 +4664,10 @@ begin
   // Four draws more pay for an inside of this many pixels of a small shader.
   Result := ((FPending[AIndex].Flags and 15) = GpuKindStrokeRect) and HollowBands(@FPending[AIndex], ABands, ACount,
     Area) and (Area * VariantCost[TGpuVkVariant.Shapes] > 4 * FSplitCost);
+  // No bands for an outline too small to pay for them: DrawPending draws by the count, and with the bands of such an
+  // outline it drew the outline alone and skipped the rest of the run it starts.
+  if not Result then
+    ACount := 0;
 end;
 
 function TGpuVkRenderer.NextRun(const AFirst: Integer; out AVariant: TGpuVkVariant): Integer;
