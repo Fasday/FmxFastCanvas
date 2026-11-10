@@ -135,10 +135,27 @@ type
     function Points: TArray<TPathPoint>;
   end;
 
+  /// <summary>What the family name of a TFont stands for (FamilyOf).</summary>
+  TFamily = record
+    /// <summary>The family as DirectWrite knows it, and the collection it is in: nil = the system collection (also
+    /// when the family is unknown: DirectWrite then falls back to a default font), or the collection of fonts added
+    /// through TFontManager.</summary>
+    Name: string;
+    Collection: IDWriteFontCollection;
+    /// <summary>The name is that of a face: GDI names the faces of a family beyond its regular, bold and italic ones
+    /// as families of their own ("Segoe UI Semibold", "Arial Narrow", "Arial Black"), and such names are what font
+    /// dialogs and Screen.Fonts list. The weight, the stretch and the style of that face: those of a font that asks
+    /// for none of its own (FontTraits).</summary>
+    Face: Boolean;
+    Weight: DWRITE_FONT_WEIGHT;
+    Stretch: DWRITE_FONT_STRETCH;
+    Style: DWRITE_FONT_STYLE;
+  end;
+
 var
   GLocale: string;
   GSystemFonts: IDWriteFontCollection;
-  GFamilies: TDictionary<string, IDWriteFontCollection>;
+  GFamilies: TDictionary<string, TFamily>;
   /// <summary>Guards GFamilies and GSystemFonts.</summary>
   GFontsLock: TObject;
   /// <summary>Render thread: the rendering parameters of the system (glyph rasterization) and the WIC factory (color
@@ -560,9 +577,56 @@ begin
   Result := GLocale;
 end;
 
-/// <summary>The collection a family is in: nil = the system collection (also when the family is unknown: DirectWrite
-/// then falls back to a default font), or the collection of fonts added through TFontManager.</summary>
-function FamilyCollection(const AFamily: string): IDWriteFontCollection;
+/// <summary>A name that is no family of DirectWrite's, taken as the name of a face of GDI: the font DirectWrite
+/// finds for it among the system's (IDWriteGdiInterop), its family, weight, stretch and style. False: no font has
+/// that name.</summary>
+function GdiFace(const AName: string; var AFamily: TFamily): Boolean;
+var
+  Interop: IDWriteGdiInterop;
+  Face: TLogFontW;
+  Font: IDWriteFont;
+  Family: IDWriteFontFamily;
+  Names: IDWriteLocalizedStrings;
+  Index, Len: Cardinal;
+  Exists: BOOL;
+  Name: string;
+begin
+  Result := False;
+  // The face names of GDI have 31 characters at most.
+  if AName.IsEmpty or (AName.Length >= LF_FACESIZE) then
+    Exit;
+  if Failed(TFastDevice.DWrite.GetGdiInterop(Interop)) then
+    Exit;
+  FillChar(Face, SizeOf(Face), 0);
+  Move(PChar(AName)^, Face.lfFaceName[0], AName.Length * SizeOf(Char));
+  Face.lfCharSet := DEFAULT_CHARSET;
+  if Failed(Interop.CreateFontFromLOGFONT(Face, Font)) or (Font = nil) then
+    Exit;
+  if Failed(Font.GetFontFamily(Family)) or Failed(Family.GetFamilyNames(Names)) then
+    Exit;
+  Index := 0;
+  Exists := False;
+  if Failed(Names.FindLocaleName(PWideChar(LocaleName), Index, Exists)) or not Exists then
+    if Failed(Names.FindLocaleName('en-us', Index, Exists)) or not Exists then
+      Index := 0;
+  Len := 0;
+  if Failed(Names.GetStringLength(Index, Len)) or (Len = 0) then
+    Exit;
+  SetLength(Name, Len);
+  if Failed(Names.GetString(Index, PWideChar(Name), Len + 1)) then
+    Exit;
+  AFamily.Name := Name;
+  AFamily.Face := True;
+  AFamily.Weight := Font.GetWeight;
+  AFamily.Stretch := Font.GetStretch;
+  AFamily.Style := Font.GetStyle;
+  Result := True;
+end;
+
+/// <summary>What a family name stands for: a family of the system collection, one of the fonts added through
+/// TFontManager, or a face of GDI (TFamily.Face); a name that is none of them stays as it is (DirectWrite then falls
+/// back to a default font).</summary>
+function FamilyOf(const AFamily: string): TFamily;
 var
   Index: Cardinal;
   Exists: BOOL;
@@ -573,22 +637,28 @@ begin
   TMonitor.Enter(GFontsLock);
   try
     if GFamilies = nil then
-      GFamilies := TDictionary<string, IDWriteFontCollection>.Create;
+      GFamilies := TDictionary<string, TFamily>.Create;
     if GFamilies.TryGetValue(AFamily, Result) then
       Exit;
-    Result := nil;
+    Result := Default(TFamily);
+    Result.Name := AFamily;
     if GSystemFonts = nil then
       TFastDevice.DWrite.GetSystemFontCollection(GSystemFonts);
     Exists := False;
-    if (GSystemFonts <> nil) and Succeeded(GSystemFonts.FindFamilyName(PWideChar(AFamily), Index, Exists)) and Exists then
-      Result := nil
-    else if TPlatformServices.Current.SupportsPlatformService(IFMXFontManagerService, Service) and
-      Supports(Service, IFontCollectionFactoryDW, Factory) then
+    if (GSystemFonts = nil) or Failed(GSystemFonts.FindFamilyName(PWideChar(AFamily), Index, Exists)) or not Exists then
     begin
-      Custom := Factory.CreateCustomFontCollection;
       Exists := False;
-      if (Custom <> nil) and Succeeded(Custom.FindFamilyName(PWideChar(AFamily), Index, Exists)) and Exists then
-        Result := Custom;
+      if TPlatformServices.Current.SupportsPlatformService(IFMXFontManagerService, Service) and
+        Supports(Service, IFontCollectionFactoryDW, Factory) then
+      begin
+        Custom := Factory.CreateCustomFontCollection;
+        if (Custom <> nil) and Succeeded(Custom.FindFamilyName(PWideChar(AFamily), Index, Exists)) and Exists then
+          Result.Collection := Custom
+        else
+          Exists := False;
+      end;
+      if not Exists then
+        GdiFace(AFamily, Result);
     end;
     GFamilies.Add(AFamily, Result);
   finally
@@ -596,23 +666,47 @@ begin
   end;
 end;
 
+/// <summary>Weight, style and stretch of a font for DirectWrite: its own, or those of the face its family name stands
+/// for when it has none of its own (a font named "Segoe UI Semibold" is semibold, one named so and bold is the bold
+/// of Segoe UI: what the stock canvas makes of such names).</summary>
+procedure FontTraits(const AFont: TFont; const AFamily: TFamily; out AWeight: DWRITE_FONT_WEIGHT;
+  out AStyle: DWRITE_FONT_STYLE; out AStretch: DWRITE_FONT_STRETCH);
+begin
+  if AFamily.Face and AFont.StyleExt.IsRegular then
+  begin
+    AWeight := AFamily.Weight;
+    AStyle := AFamily.Style;
+    AStretch := AFamily.Stretch;
+  end
+  else
+  begin
+    AWeight := FontWeightToDWrite(AFont.StyleExt.Weight);
+    AStyle := FontSlantToDWrite(AFont.StyleExt.Slant);
+    AStretch := FontStretchToDWrite(AFont.StyleExt.Stretch);
+  end;
+end;
+
 procedure ApplyFont(const ALayout: IDWriteTextLayout; const AFont: TFont; const ARange: TDwriteTextRange;
   const ABase: TFont);
 var
-  Collection: IDWriteFontCollection;
+  Family: TFamily;
+  Weight: DWRITE_FONT_WEIGHT;
+  Style: DWRITE_FONT_STYLE;
+  Stretch: DWRITE_FONT_STRETCH;
 begin
+  Family := FamilyOf(AFont.Family);
   if (ABase = nil) or (AFont.Family <> ABase.Family) then
   begin
-    Collection := FamilyCollection(AFont.Family);
-    ALayout.SetFontFamilyName(PWideChar(AFont.Family), ARange);
-    if Collection <> nil then
-      ALayout.SetFontCollection(Collection, ARange);
+    ALayout.SetFontFamilyName(PWideChar(Family.Name), ARange);
+    if Family.Collection <> nil then
+      ALayout.SetFontCollection(Family.Collection, ARange);
   end;
   if (ABase = nil) or not SameValue(AFont.Size, ABase.Size, TEpsilon.FontSize) then
     ALayout.SetFontSize(AFont.Size, ARange);
-  ALayout.SetFontWeight(FontWeightToDWrite(AFont.StyleExt.Weight), ARange);
-  ALayout.SetFontStyle(FontSlantToDWrite(AFont.StyleExt.Slant), ARange);
-  ALayout.SetFontStretch(FontStretchToDWrite(AFont.StyleExt.Stretch), ARange);
+  FontTraits(AFont, Family, Weight, Style, Stretch);
+  ALayout.SetFontWeight(Weight, ARange);
+  ALayout.SetFontStyle(Style, ARange);
+  ALayout.SetFontStretch(Stretch, ARange);
   ALayout.SetUnderline(TFontStyle.fsUnderline in AFont.StyleExt.SimpleStyle, ARange);
   ALayout.SetStrikethrough(TFontStyle.fsStrikeOut in AFont.StyleExt.SimpleStyle, ARange);
 end;
@@ -633,7 +727,10 @@ var
   Trim: TDwriteTrimming;
   Sign: IDWriteInlineObject;
   Range: TDwriteTextRange;
-  Collection: IDWriteFontCollection;
+  Family: TFamily;
+  Weight: DWRITE_FONT_WEIGHT;
+  Style: DWRITE_FONT_STYLE;
+  Stretch: DWRITE_FONT_STRETCH;
   I: Integer;
   Attr: TTextAttributedRange;
   W, H: Single;
@@ -656,10 +753,10 @@ begin
 
   D := TFastDWriteLayoutData.Create;
   try
-    Collection := FamilyCollection(Font.Family);
-    if Failed(TFastDevice.DWrite.CreateTextFormat(PWideChar(Font.Family), Collection,
-      FontWeightToDWrite(Font.StyleExt.Weight), FontSlantToDWrite(Font.StyleExt.Slant),
-      FontStretchToDWrite(Font.StyleExt.Stretch), Font.Size, PWideChar(LocaleName), Format)) then
+    Family := FamilyOf(Font.Family);
+    FontTraits(Font, Family, Weight, Style, Stretch);
+    if Failed(TFastDevice.DWrite.CreateTextFormat(PWideChar(Family.Name), Family.Collection, Weight, Style, Stretch,
+      Font.Size, PWideChar(LocaleName), Format)) then
     begin
       D.Free;
       SetData(nil);
