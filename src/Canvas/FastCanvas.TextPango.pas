@@ -101,7 +101,7 @@ type
     procedure Shorten(const ACuts: TArray<TPoint>; const AKeepRest: Boolean);
     function EllipsizeOmitted: Boolean;
     function TrimWords: Boolean;
-    function Analyse(const AScaled: Boolean): Boolean;
+    function Analyse(const AScaled: Boolean; out ANoAdvance: Pointer): Boolean;
     /// <summary>The index in FText of an index of the layout's text.</summary>
     function ShownIndex(const AIndex: Integer): Integer;
     /// <summary>The index in the layout's text of an index of FText.</summary>
@@ -258,6 +258,15 @@ type
   end;
   PPangoGlyphItem = ^TPangoGlyphItem;
 
+  /// <summary>PangoFontMetrics (pango-font.h, the same from Pango 1.44 to 1.57); written by MendCharWidth only after
+  /// its fields were found to be what the getters tell.</summary>
+  TPangoFontMetrics = record
+    RefCount: Cardinal;
+    Ascent, Descent, Height, ApproximateCharWidth, ApproximateDigitWidth, UnderlinePosition, UnderlineThickness,
+      StrikethroughPosition, StrikethroughThickness: Integer;
+  end;
+  PPangoFontMetrics = ^TPangoFontMetrics;
+
   PGSList = ^TGSList;
   TGSList = record
     Data: Pointer;
@@ -358,7 +367,8 @@ type
 
 // The layouts above, as offsetof and sizeof give them (explore.c, Pango 1.57, FreeType 2.14, x86-64).
 {$IF (SizeOf(TPangoGlyphInfo) <> 20) or (SizeOf(TPangoGlyphString) <> 32) or (SizeOf(TPangoAnalysis) <> 48) or
-  (SizeOf(TPangoItem) <> 64) or (SizeOf(TPangoGlyphItem) <> 32) or (SizeOf(TPangoLayoutLine) <> 32)}
+  (SizeOf(TPangoItem) <> 64) or (SizeOf(TPangoGlyphItem) <> 32) or (SizeOf(TPangoLayoutLine) <> 32) or
+  (SizeOf(TPangoFontMetrics) <> 40)}
   {$MESSAGE FATAL 'Pango struct layout'}
 {$ENDIF}
 {$IF (SizeOf(TFTBitmap) <> 40) or (SizeOf(TFTBitmapSize) <> 32) or (SizeOf(TFTOutline) <> 40) or
@@ -436,6 +446,16 @@ var
   pango_font_metrics_get_strikethrough_position: function(AMetrics: Pointer): Integer; cdecl;
   pango_font_metrics_get_strikethrough_thickness: function(AMetrics: Pointer): Integer; cdecl;
   pango_font_get_hb_font: function(AFont: Pointer): Pointer; cdecl;
+  // MendCharWidth (optional: without them a character no font has may lie on the next one, as before).
+  pango_font_describe_with_absolute_size: function(AFont: Pointer): Pointer; cdecl;
+  pango_language_get_sample_string: function(ALanguage: Pointer): PAnsiChar; cdecl;
+  pango_font_metrics_get_ascent: function(AMetrics: Pointer): Integer; cdecl;
+  pango_font_metrics_get_descent: function(AMetrics: Pointer): Integer; cdecl;
+  pango_font_metrics_get_height: function(AMetrics: Pointer): Integer; cdecl;
+  pango_font_metrics_get_approximate_char_width: function(AMetrics: Pointer): Integer; cdecl;
+  pango_font_metrics_get_approximate_digit_width: function(AMetrics: Pointer): Integer; cdecl;
+  g_unichar_iszerowidth: function(AChar: Cardinal): Integer; cdecl;
+  g_unichar_iswide: function(AChar: Cardinal): Integer; cdecl;
   // HarfBuzz.
   hb_font_get_scale: procedure(AFont: Pointer; out AXScale, AYScale: Integer); cdecl;
   hb_font_get_glyph_h_advance: function(AFont: Pointer; AGlyph: Cardinal): Integer; cdecl;
@@ -631,6 +651,16 @@ begin
   @pango_font_metrics_get_strikethrough_position := Sym(Pango, 'pango_font_metrics_get_strikethrough_position');
   @pango_font_metrics_get_strikethrough_thickness := Sym(Pango, 'pango_font_metrics_get_strikethrough_thickness');
   @pango_font_get_hb_font := Sym(Pango, 'pango_font_get_hb_font');
+  @pango_font_describe_with_absolute_size := Sym(Pango, 'pango_font_describe_with_absolute_size', True);
+  @pango_language_get_sample_string := Sym(Pango, 'pango_language_get_sample_string', True);
+  @pango_font_metrics_get_ascent := Sym(Pango, 'pango_font_metrics_get_ascent', True);
+  @pango_font_metrics_get_descent := Sym(Pango, 'pango_font_metrics_get_descent', True);
+  @pango_font_metrics_get_height := Sym(Pango, 'pango_font_metrics_get_height', True);
+  @pango_font_metrics_get_approximate_char_width := Sym(Pango, 'pango_font_metrics_get_approximate_char_width', True);
+  @pango_font_metrics_get_approximate_digit_width := Sym(Pango, 'pango_font_metrics_get_approximate_digit_width',
+    True);
+  @g_unichar_iszerowidth := Sym(GLib, 'g_unichar_iszerowidth', True);
+  @g_unichar_iswide := Sym(GLib, 'g_unichar_iswide', True);
   @hb_font_get_scale := Sym(HarfBuzz, 'hb_font_get_scale');
   @hb_font_get_glyph_h_advance := Sym(HarfBuzz, 'hb_font_get_glyph_h_advance');
   @hb_font_get_var_coords_normalized := Sym(HarfBuzz, 'hb_font_get_var_coords_normalized');
@@ -940,6 +970,115 @@ begin
   end;
   g_object_ref(AFont);
   GFonts.Add(AFont, Result);
+end;
+
+/// <summary>The width in character cells of nul-terminated UTF-8 text as Pango counts it for a font's approximate
+/// character width (pango_utf8_strwidth: none for a zero-width character, two for a wide one, one for the others).
+/// </summary>
+function CellWidth(const AText: PAnsiChar): Integer;
+var
+  P: PByte;
+  C: Cardinal;
+  N: Integer;
+begin
+  Result := 0;
+  P := PByte(AText);
+  while P^ <> 0 do
+  begin
+    if P^ < $80 then
+    begin
+      C := P^;
+      N := 1;
+    end
+    else if P^ < $E0 then
+    begin
+      C := P^ and $1F;
+      N := 2;
+    end
+    else if P^ < $F0 then
+    begin
+      C := P^ and $0F;
+      N := 3;
+    end
+    else
+    begin
+      C := P^ and $07;
+      N := 4;
+    end;
+    Inc(P);
+    while (N > 1) and (P^ and $C0 = $80) do
+    begin
+      C := (C shl 6) or (P^ and $3F);
+      Inc(P);
+      Dec(N);
+    end;
+    if g_unichar_iszerowidth(C) <> 0 then
+      Continue;
+    if g_unichar_iswide(C) <> 0 then
+      Inc(Result, 2)
+    else
+      Inc(Result);
+  end;
+end;
+
+/// <summary>A character no font has got no advance from AFont. Pango's FT2 fonts take the advance of such a
+/// character from the font's metrics, its approximate character width, which Pango measures on a sample text when
+/// the metrics are first asked for; but not for a font whose metrics are first asked for while Pango measures
+/// another font (pango_fc_font_get_metrics: the font is a fallback font of that font's sample text, and since Pango
+/// 1.50 the heights of its lines take the metrics of their fonts), and the font keeps a width of 0 for its life: the
+/// character lay on the next one. Measured here as Pango measures it (the width of the sample text of the default
+/// language in the font, in a context of the font map as made, by the text's width in character cells) into the
+/// metrics the font keeps, whose struct is written only when its fields are what the getters tell. True when the
+/// width was 0 and is not now: the text is laid out again (under the Pango lock).</summary>
+function MendCharWidth(const AFont: Pointer): Boolean;
+var
+  Metrics, Context, Layout, Desc: Pointer;
+  M: PPangoFontMetrics;
+  Sample: PAnsiChar;
+  Cells: Integer;
+  Logical: TPangoRectangle;
+begin
+  Result := False;
+  if not Assigned(pango_font_describe_with_absolute_size) or not Assigned(pango_language_get_sample_string) or
+    not Assigned(pango_font_metrics_get_ascent) or not Assigned(pango_font_metrics_get_descent) or
+    not Assigned(pango_font_metrics_get_height) or not Assigned(pango_font_metrics_get_approximate_char_width) or
+    not Assigned(pango_font_metrics_get_approximate_digit_width) or not Assigned(g_unichar_iszerowidth) or
+    not Assigned(g_unichar_iswide) then
+    Exit;
+  // The metrics the font keeps for the default language (what its glyph extents ask for).
+  Metrics := pango_font_get_metrics(AFont, nil);
+  if Metrics = nil then
+    Exit;
+  try
+    M := Metrics;
+    if (M.Ascent <= 0) or (M.Height <= 0) or (M.Ascent <> pango_font_metrics_get_ascent(Metrics)) or
+      (M.Descent <> pango_font_metrics_get_descent(Metrics)) or (M.Height <> pango_font_metrics_get_height(Metrics)) or
+      (M.ApproximateCharWidth <> pango_font_metrics_get_approximate_char_width(Metrics)) or
+      (M.ApproximateDigitWidth <> pango_font_metrics_get_approximate_digit_width(Metrics)) or
+      (M.ApproximateCharWidth <> 0) then
+      Exit;
+    Sample := pango_language_get_sample_string(nil);
+    if Sample = nil then
+      Exit;
+    Cells := CellWidth(Sample);
+    if Cells <= 0 then
+      Exit;
+    Context := pango_font_map_create_context(GFontMap);
+    Layout := pango_layout_new(Context);
+    Desc := pango_font_describe_with_absolute_size(AFont);
+    pango_layout_set_font_description(Layout, Desc);
+    pango_font_description_free(Desc);
+    pango_layout_set_text(Layout, Sample, -1);
+    pango_layout_get_extents(Layout, nil, @Logical);
+    g_object_unref(Layout);
+    g_object_unref(Context);
+    if Logical.Width <= 0 then
+      Exit;
+    M.ApproximateCharWidth := Logical.Width div Cells;
+    Result := M.ApproximateCharWidth > 0;
+  finally
+    pango_font_metrics_unref(Metrics);
+  end;
 end;
 
 /// <summary>AText in UTF-8 (lone surrogates as U+FFFD, nul characters as spaces: the byte offsets stay Pango's),
@@ -1461,8 +1600,9 @@ end;
 
 /// <summary>Runs, decorations and ink of FLayout, moved by Dx, Dy (under the Pango lock). False, with AScaled (the
 /// PangoLayout is not in the layout's font sizes), when a font of it is another one at another size (TPangoFontInfo.
-/// SizeBound): nothing is taken from it, the caller lays the text out at its own size.</summary>
-function TFastPangoLayoutData.Analyse(const AScaled: Boolean): Boolean;
+/// SizeBound): nothing is taken from it, the caller lays the text out at its own size. ANoAdvance: the PangoFont of
+/// a character no font has that got no advance (MendCharWidth), nil without one.</summary>
+function TFastPangoLayoutData.Analyse(const AScaled: Boolean; out ANoAdvance: Pointer): Boolean;
 var
   RunList: TList<TFastGlyphRun>;
   DecoList: TList<TFastTextDecoration>;
@@ -1481,6 +1621,7 @@ var
   Face: TPangoFace;
 begin
   Result := True;
+  ANoAdvance := nil;
   ColorGlyphs := False;
   RunList := TList<TFastGlyphRun>.Create;
   DecoList := TList<TFastTextDecoration>.Create;
@@ -1527,7 +1668,11 @@ begin
         if G.Glyph <> PANGO_GLYPH_EMPTY then
         begin
           if G.Glyph and PANGO_GLYPH_UNKNOWN_FLAG <> 0 then
-            R.Glyphs[N] := 0
+          begin
+            R.Glyphs[N] := 0;
+            if G.Width <= 0 then
+              ANoAdvance := Run.Item.Analysis.Font;
+          end
           else
             R.Glyphs[N] := Word(G.Glyph);
           R.X[N] := (Pen + G.XOffset) * FUnit;
@@ -1861,7 +2006,8 @@ var
   D: TFastPangoLayoutData;
   W, H, HAlign, Size: Single;
   Scale, Exact, BoxW, BoxH: Double;
-  Done: Boolean;
+  Again, Mended: Boolean;
+  NoAdvance: Pointer;
   I, J, K: Integer;
   Attr: TTextAttributedRange;
   S: TFastPangoStyle;
@@ -1954,6 +2100,7 @@ begin
     Scale := Size / LayoutFontSize(Size, False);
     Exact := Size / LayoutFontSize(Size, True);
     D.SetScale(Scale, BoxW, BoxH);
+    Mended := False;
     TMonitor.Enter(GPangoLock);
     try
       repeat
@@ -1981,18 +2128,26 @@ begin
           D.Dy := 0;
         end;
         D.Dy := D.Dy - Logical.Y * D.FUnit;
-        Done := D.Analyse(D.FScale <> Exact);
+        Again := not D.Analyse(D.FScale <> Exact, NoAdvance);
+        if Again then
+          // A font of the text is another one at another size: the text is laid out at its own size.
+          D.SetScale(Exact, BoxW, BoxH)
+        else if (NoAdvance <> nil) and not Mended then
+        begin
+          // A character no font has lies on the next one: once more with the font's character width measured.
+          Mended := True;
+          Again := MendCharWidth(NoAdvance);
+        end;
         // Made again for hit testing: cached layouts do not keep it.
         g_object_unref(D.FLayout);
         D.FLayout := nil;
-        if not Done then
+        if Again then
         begin
-          // A font of the text is another one at another size: the text as it was, laid out at its own size.
+          // The text as it was (trimming has shortened it).
           D.FMap := nil;
           D.SetText(Text, CharStyles);
-          D.SetScale(Exact, BoxW, BoxH);
         end;
-      until Done;
+      until not Again;
     finally
       TMonitor.Exit(GPangoLock);
     end;

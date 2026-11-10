@@ -229,6 +229,17 @@ asserted by size at compile time.
   strikeout rectangles from the font's metrics and the ink of the layout as the overhang. The PangoLayout is released
   then and made again for hit testing (`pango_layout_xy_to_index`, `pango_layout_index_to_pos` for carets,
   `pango_layout_line_get_x_ranges` and the lines' y ranges for regions).
+- **Characters no font has**: drawn as the font's box (glyph 0), advancing by the font's approximate character width
+  (Pango's FT2 fonts; FMX's canvas, on Pango's cairo fonts, draws a box with the code, about 1 em wide). Pango
+  measures that width on a sample text when a font's metrics are first asked for, but not when they are first asked
+  for while it measures another font (the font is a fallback font of that font's sample text, and since Pango 1.50
+  the heights of lines take the metrics of their fonts): the width stays 0 for the font's life, and the character lay
+  on the next one (after text of mixed scripts, in a font that is a fallback for their fonts' Latin letters, such as
+  Noto Sans). Such a font gets the width as Pango measures it (the sample text of the default language in the font,
+  by its width in character cells), written into the metrics the font keeps (`PangoFontMetrics` of `pango-font.h`,
+  the same from Pango 1.44 to 1.57, only when its fields are what its getters tell), and the text is laid out again.
+  Nonspacing marks of such characters (Devanagari's, Thai's where no font has them) have no advance, as HarfBuzz
+  gives them.
 - **Faces**: the fontconfig pattern of a run's PangoFont (`pango_fc_font_get_pattern`) names its file and face index,
   synthetic emboldening and the slant matrix; each such face is one object (the glyph cache's key) with an `FT_Face`
   of the engine's own `FT_Library`, used under a lock of its own (glyphs are made on the render thread). The em size of
