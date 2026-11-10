@@ -28,6 +28,8 @@ unit FastCanvas.TextPango;
   vertical alignment moves the layout in the box. Fonts added through FMX's TFontManager are found: FMX's GTK library
   (FMUX) adds them to fontconfig's configuration, and the font map looks at it again when their number changed.
   Lines are as high as their fonts' ascent and descent (HarfBuzz's metrics: hhea, or OS/2 with USE_TYPO_METRICS).
+  A character no font has is the font's box for a missing glyph, or with FastPangoHexBoxes a box with its code in
+  hexadecimal as FMX's canvas draws it (laid out again with an object as wide as the box for each).
 
   Libraries, loaded at run time (dlopen) on first use; GTK 3, which FMX needs on Linux, brings them:
   libpango-1.0.so.0 and libpangoft2-1.0.so.0 (Pango 1.44 or later), libgobject-2.0.so.0, libglib-2.0.so.0,
@@ -62,6 +64,14 @@ type
     Color: TAlphaColor;
   end;
 
+  /// <summary>A character no font has, drawn as a box with its code (FastPangoHexBoxes): its index in the layout's
+  /// text, its code, and the size, ascent and descent of its font, pixels.</summary>
+  TFastPangoHexChar = record
+    Index: Integer;
+    Code: Cardinal;
+    Size, Ascent, Descent: Single;
+  end;
+
   /// <summary>Layout data of Pango: what its PangoLayout is made of (made again for hit testing), the runs, and where
   /// the layout sits in the layout box.</summary>
   TFastPangoLayoutData = class(TFastLayoutData)
@@ -90,6 +100,11 @@ type
     FEllipsize: Boolean;
     /// <summary>The PangoLayout (used under the Pango lock); nil until asked for again.</summary>
     FLayout: Pointer;
+    /// <summary>FastPangoHexBoxes: the characters no font has that Analyse found, and those the PangoLayout has as
+    /// objects as wide as their boxes (MakeLayout; nil: none).</summary>
+    FHexFound, FHex: TArray<TFastPangoHexChar>;
+    /// <summary>The character of FHex at an index of the layout's text.</summary>
+    function HexChar(const AIndex: Integer; out AChar: TFastPangoHexChar): Boolean;
     procedure SetText(const AText: string; const ACharStyles: TArray<Integer>);
     /// <summary>The scale of the PangoLayout, and the width and height of its box from those of the layout's in
     /// pixels (negative: none).</summary>
@@ -146,6 +161,11 @@ var
   /// pixel grid; the look of GTK's text with fontconfig's default hintslight). False: unhinted outlines, as
   /// FastCanvas.TextSkia rasterizes. Set before the first text is drawn (glyphs stay in the atlas).</summary>
   FastPangoLightHinting: Boolean = False;
+  /// <summary>A character no font has is drawn as FMX's own canvas on Linux draws it (Pango's cairo renderer): a box
+  /// with the character's code in hexadecimal, two rows of small digits of the monospace font, and as wide as that box
+  /// (1.15 em at 13 px). False: the font's box for a missing glyph (glyph 0), as wide as the font's approximate
+  /// character width (about half an em). Set before the first text is laid out (layouts are cached).</summary>
+  FastPangoHexBoxes: Boolean = False;
 
 /// <summary>The versions of Pango and FreeType the engine runs on ('Pango 1.57.0, FreeType 2.14.2'), loading the
 /// libraries; the reason when it cannot.</summary>
@@ -439,6 +459,8 @@ var
   pango_attr_foreground_alpha_new: function(AAlpha: Word): Pointer; cdecl;
   pango_attr_underline_new: function(AUnderline: Integer): Pointer; cdecl;
   pango_attr_strikethrough_new: function(AStrikethrough: Integer): Pointer; cdecl;
+  // FastPangoHexBoxes (optional: without them a character no font has is the font's box, as without the option).
+  pango_attr_shape_new: function(AInk, ALogical: Pointer): Pointer; cdecl;
   pango_font_get_metrics: function(AFont, ALanguage: Pointer): Pointer; cdecl;
   pango_font_metrics_unref: procedure(AMetrics: Pointer); cdecl;
   pango_font_metrics_get_underline_position: function(AMetrics: Pointer): Integer; cdecl;
@@ -531,6 +553,26 @@ type
     SizeBound: Boolean;
   end;
 
+  /// <summary>The digits of the boxes of characters no font has at a size (FastPangoHexBoxes): the face of the
+  /// monospace font, its pixels per em, the ink of its widest and of its highest digit lightly hinted (whole pixels),
+  /// and the glyph of every hexadecimal digit.</summary>
+  THexDigits = record
+    Face: IInterface;
+    EmSize, CellWidth, CellHeight: Single;
+    Glyphs: array[0..15] of Word;
+  end;
+
+  /// <summary>The box of a character no font has, relative to the character's origin on the baseline (y downwards),
+  /// pixels: its advance and the room it takes above and below the baseline, the frame (the middle of its line) and
+  /// the line's width, the first digit of the lower row and the steps to the next digit and to the row above.
+  /// </summary>
+  THexBox = record
+    Advance, Above, Below, Line, DigitX, DigitY, StepX, StepY: Single;
+    Frame: TRectF;
+    Rows, Cols: Integer;
+    Digits: THexDigits;
+  end;
+
 var
   /// <summary>Guards every Pango call and the tables of fonts and faces.</summary>
   GPangoLock: TObject;
@@ -548,6 +590,8 @@ var
   GFonts: TDictionary<Pointer, TPangoFontInfo>;
   /// <summary>The faces by file, index and synthesis.</summary>
   GFaces: TDictionary<string, IInterface>;
+  /// <summary>The digits of the boxes of characters no font has by size in pixels (HexDigits).</summary>
+  GHexDigits: TDictionary<Integer, THexDigits>;
 
 /// <summary>Loads the libraries and makes the font map and contexts (under GPangoLock). False when something is
 /// missing (GLoadError).</summary>
@@ -644,6 +688,7 @@ begin
   @pango_attr_foreground_alpha_new := Sym(Pango, 'pango_attr_foreground_alpha_new');
   @pango_attr_underline_new := Sym(Pango, 'pango_attr_underline_new');
   @pango_attr_strikethrough_new := Sym(Pango, 'pango_attr_strikethrough_new');
+  @pango_attr_shape_new := Sym(Pango, 'pango_attr_shape_new', True);
   @pango_font_get_metrics := Sym(Pango, 'pango_font_get_metrics');
   @pango_font_metrics_unref := Sym(Pango, 'pango_font_metrics_unref');
   @pango_font_metrics_get_underline_position := Sym(Pango, 'pango_font_metrics_get_underline_position');
@@ -708,6 +753,7 @@ begin
   pango_context_set_round_glyph_positions(GContextRtl, 0);
   GFonts := TDictionary<Pointer, TPangoFontInfo>.Create;
   GFaces := TDictionary<string, IInterface>.Create;
+  GHexDigits := TDictionary<Integer, THexDigits>.Create;
   GLoaded := 1;
   Result := True;
 end;
@@ -730,6 +776,8 @@ begin
       // The configuration may be another one now; the font map's caches go either way.
       pango_fc_font_map_set_config(GFontMap, FcConfigGetCurrent);
       pango_fc_font_map_config_changed(GFontMap);
+      // The monospace font may be another one now.
+      GHexDigits.Clear;
     end;
   finally
     TMonitor.Exit(GPangoLock);
@@ -1195,6 +1243,193 @@ begin
     Result := 2 * Result;
 end;
 
+/// <summary>A space: no box for it (Pango's cairo renderer draws none either).</summary>
+function IsSpaceCode(const ACode: Cardinal): Boolean;
+begin
+  Result := (ACode = $20) or (ACode = $A0) or (ACode = $1680) or ((ACode >= $2000) and (ACode <= $200A)) or
+    (ACode = $202F) or (ACode = $205F) or (ACode = $3000);
+end;
+
+/// <summary>The digits of the boxes of characters no font has at ASize pixels: those of the monospace font
+/// (fontconfig's alias), laid out as the engine lays out text, their ink as cairo's hinted extents give it (FreeType's
+/// lightly hinted metrics, whole pixels; under the Pango lock). False when they cannot be had.</summary>
+function HexDigits(const ASize: Integer; out ADigits: THexDigits): Boolean;
+const
+  Hex: array[0..16] of AnsiChar = '0123456789ABCDEF'#0;
+var
+  Desc, Layout, Iter: Pointer;
+  Run: PPangoGlyphItem;
+  G: PPangoGlyphInfo;
+  Info: TPangoFontInfo;
+  Face: TPangoFace;
+  Size, Scale: Single;
+  Exact: Boolean;
+  I: Integer;
+begin
+  if GHexDigits.TryGetValue(ASize, ADigits) then
+    Exit(True);
+  Result := False;
+  ADigits := Default(THexDigits);
+  for Exact := False to True do
+  begin
+    // In a size of a few, scaled (LayoutFontSize), unless the font is another one at another size.
+    Size := LayoutFontSize(ASize, Exact);
+    Scale := ASize / Size;
+    Desc := pango_font_description_new;
+    pango_font_description_set_family(Desc, 'monospace');
+    pango_font_description_set_absolute_size(Desc, Size * PANGO_SCALE);
+    Layout := pango_layout_new(GContextLtr);
+    pango_layout_set_font_description(Layout, Desc);
+    pango_font_description_free(Desc);
+    pango_layout_set_text(Layout, @Hex[0], 16);
+    Iter := pango_layout_get_iter(Layout);
+    try
+      Run := pango_layout_iter_get_run_readonly(Iter);
+      if (Run = nil) or (Run.Glyphs.NumGlyphs <> 16) then
+        Exit;
+      Info := FontInfo(Run.Item.Analysis.Font);
+      Face := FaceObject(Info.Face);
+      if Face = nil then
+        Exit;
+      if Info.SizeBound and not Exact then
+        Continue;
+      ADigits.Face := Info.Face;
+      ADigits.EmSize := Info.EmSize * Scale;
+      G := Run.Glyphs.Glyphs;
+      TMonitor.Enter(GFtLock);
+      try
+        for I := 0 to 15 do
+        begin
+          if G.Glyph and PANGO_GLYPH_UNKNOWN_FLAG <> 0 then
+            Exit;
+          ADigits.Glyphs[I] := Word(G.Glyph);
+          if Face.Load(G.Glyph, ADigits.EmSize, 0, FT_LOAD_TARGET_LIGHT or FT_LOAD_NO_BITMAP) then
+          begin
+            ADigits.CellWidth := Max(ADigits.CellWidth, Face.Slot.Metrics.Width / 64);
+            ADigits.CellHeight := Max(ADigits.CellHeight, Face.Slot.Metrics.Height / 64);
+          end;
+          Inc(G);
+        end;
+      finally
+        TMonitor.Exit(GFtLock);
+      end;
+    finally
+      pango_layout_iter_free(Iter);
+      g_object_unref(Layout);
+    end;
+    if GHexDigits.Count >= 64 then
+      GHexDigits.Clear;
+    GHexDigits.Add(ASize, ADigits);
+    Exit(True);
+  end;
+end;
+
+/// <summary>The box of a character no font has, as FMX's own canvas on Linux draws it: the code's hexadecimal
+/// digits in two rows (two a row, three above U+FFFF) in the monospace font at a 2.2nd of the font's size, a frame
+/// around them a pad away, the pad a 43rd of the font's height; in whole pixels, as cairo hints it. False when the
+/// digits cannot be had (under the Pango lock).</summary>
+function HexBox(const AChar: TFastPangoHexChar; out ABox: THexBox): Boolean;
+var
+  Mini: Integer;
+  Above, Below, Pad, DigitW, DigitH, BoxH, BoxBelow, Inner: Single;
+begin
+  ABox := Default(THexBox);
+  Mini := Max(Ceil(AChar.Size / 2.2 - 1E-5), 1);
+  Result := HexDigits(Mini, ABox.Digits);
+  if not Result then
+    Exit;
+  // The font's room above and below the baseline in whole pixels, as cairo's hinted metrics have it.
+  Above := Ceil(AChar.Ascent - 1E-5);
+  Below := Ceil(AChar.Descent - 1E-5);
+  if Above + Below <= 0 then
+  begin
+    Above := AChar.Size;
+    Below := 0;
+  end;
+  Pad := Min(Max(Ceil((Above + Below) / 43 - 1E-5), 1), Mini);
+  DigitW := Max(Ceil(ABox.Digits.CellWidth - 1E-5), 1);
+  DigitH := Max(Ceil(ABox.Digits.CellHeight - 1E-5), 1);
+  ABox.Rows := 2;
+  if AChar.Code > $FFFF then
+    ABox.Cols := 3
+  else
+    ABox.Cols := 2;
+  BoxH := 3 * Pad + ABox.Rows * (Pad + DigitH);
+  // How far the box reaches below the baseline: a little where it fits above it, else as far as the font's room
+  // below the baseline allows, else as the font's descent shares its height.
+  if BoxH <= Above then
+    BoxBelow := 2 * Pad
+  else if BoxH <= Above + Below - 2 * Pad then
+    BoxBelow := 2 * Pad + BoxH - Above
+  else
+    BoxBelow := Ceil(Below * BoxH / (Above + Below) - 1E-5);
+  Inner := 3 * Pad + ABox.Cols * (DigitW + Pad);
+  ABox.Advance := Inner + 2 * Pad;
+  ABox.Above := BoxH + Pad - BoxBelow;
+  ABox.Below := BoxBelow + Pad;
+  ABox.Line := Pad;
+  ABox.Frame := TRectF.Create(2.5 * Pad, BoxBelow - BoxH + 0.5 * Pad, 1.5 * Pad + Inner,
+    BoxBelow - 0.5 * Pad);
+  ABox.DigitX := 4 * Pad;
+  ABox.DigitY := BoxBelow - 2 * Pad;
+  ABox.StepX := DigitW + Pad;
+  ABox.StepY := DigitH + Pad;
+end;
+
+/// <summary>The box of a character no font has into the runs and decorations of a layout, AX, AY the character's
+/// origin on the baseline: the frame as four rectangles, the code as a run of the monospace font's digits, in the
+/// color of the character's style; on whole pixels of the layout, so that the lines of the frame are sharp where the
+/// layout is (as the canvas puts the baselines of glyphs on whole pixels).</summary>
+procedure AddHexBox(const ARuns: TList<TFastGlyphRun>; const ADecorations: TList<TFastTextDecoration>;
+  const ABox: THexBox; const ACode: Cardinal; const AX, AY: Single; const AHasColor: Boolean;
+  const AColor: TAlphaColor);
+const
+  HexChars = '0123456789ABCDEF';
+var
+  R: TFastGlyphRun;
+  D: TFastTextDecoration;
+  F: TRectF;
+  W: Single;
+  Code: string;
+  Row, Col, K: Integer;
+begin
+  D.Color := AColor;
+  D.HasColor := AHasColor;
+  W := ABox.Line / 2;
+  F := ABox.Frame;
+  F.Offset(Round(AX), Round(AY));
+  D.Rect := TRectF.Create(F.Left - W, F.Top - W, F.Right + W, F.Top + W);
+  ADecorations.Add(D);
+  D.Rect := TRectF.Create(F.Left - W, F.Bottom - W, F.Right + W, F.Bottom + W);
+  ADecorations.Add(D);
+  D.Rect := TRectF.Create(F.Left - W, F.Top + W, F.Left + W, F.Bottom - W);
+  ADecorations.Add(D);
+  D.Rect := TRectF.Create(F.Right - W, F.Top + W, F.Right + W, F.Bottom - W);
+  ADecorations.Add(D);
+  // The code row by row, from the upper row on.
+  Code := IntToHex(ACode, ABox.Rows * ABox.Cols);
+  R := Default(TFastGlyphRun);
+  R.FontFace := ABox.Digits.Face;
+  R.EmSize := ABox.Digits.EmSize;
+  R.OriginX := Round(AX) + ABox.DigitX;
+  R.OriginY := Round(AY) + ABox.DigitY;
+  R.HasColor := AHasColor;
+  R.Color := AColor;
+  SetLength(R.Glyphs, ABox.Rows * ABox.Cols);
+  SetLength(R.X, ABox.Rows * ABox.Cols);
+  SetLength(R.Y, ABox.Rows * ABox.Cols);
+  K := 0;
+  for Row := 0 to ABox.Rows - 1 do
+    for Col := 0 to ABox.Cols - 1 do
+    begin
+      R.Glyphs[K] := ABox.Digits.Glyphs[Max(Pos(Code.Chars[K], HexChars) - 1, 0)];
+      R.X[K] := Col * ABox.StepX;
+      R.Y[K] := -(ABox.Rows - 1 - Row) * ABox.StepY;
+      Inc(K);
+    end;
+  ARuns.Add(R);
+end;
+
 function PangoStyle(const ASlant: TFontSlant): Integer;
 begin
   case ASlant of
@@ -1292,14 +1527,31 @@ begin
   Result := FontSizeOf(ASize) / FUnit;
 end;
 
+function TFastPangoLayoutData.HexChar(const AIndex: Integer; out AChar: TFastPangoHexChar): Boolean;
+var
+  C: TFastPangoHexChar;
+begin
+  for C in FHex do
+    if C.Index = AIndex then
+    begin
+      AChar := C;
+      Exit(True);
+    end;
+  Result := False;
+end;
+
 /// <summary>A PangoLayout of the text with the layout's parameters (under the Pango lock).</summary>
 function TFastPangoLayoutData.MakeLayout: Pointer;
 var
   Desc, Attrs: Pointer;
   Base, S: TFastPangoStyle;
-  Start, I, B0, B1: Integer;
+  Start, I, B0, B1, N: Integer;
   Family: UTF8String;
   C: TAlphaColorRec;
+  Code: Cardinal;
+  Hex: TFastPangoHexChar;
+  Box: THexBox;
+  InkBox, LogicalBox: TPangoRectangle;
 begin
   if FRtl then
     Result := pango_layout_new(GContextRtl)
@@ -1359,6 +1611,37 @@ begin
       end;
     end;
     Start := I;
+  end;
+  // FastPangoHexBoxes: a character no font has is an object as wide as its box (Analyse draws the box). The code
+  // tells it from an ellipsis that trimming put where it was.
+  if FHex <> nil then
+  begin
+    I := 0;
+    while I < Length(FText) do
+    begin
+      N := 1;
+      Code := Ord(FText.Chars[I]);
+      if IsHighSurrogate(FText.Chars[I]) and (I + 1 < Length(FText)) and IsLowSurrogate(FText.Chars[I + 1]) then
+      begin
+        N := 2;
+        Code := $10000 + ((Code - $D800) shl 10) + (Cardinal(Ord(FText.Chars[I + 1])) - $DC00);
+      end;
+      if HexChar(TextIndex(I), Hex) and (Hex.Code = Code) and HexBox(Hex, Box) then
+      begin
+        if Attrs = nil then
+          Attrs := pango_attr_list_new;
+        LogicalBox.X := 0;
+        LogicalBox.Y := -Round(Box.Above / FUnit);
+        LogicalBox.Width := Round(Box.Advance / FUnit);
+        LogicalBox.Height := Round((Box.Above + Box.Below) / FUnit);
+        InkBox.X := Round((Box.Frame.Left - Box.Line / 2) / FUnit);
+        InkBox.Y := Round((Box.Frame.Top - Box.Line / 2) / FUnit);
+        InkBox.Width := Round((Box.Frame.Width + Box.Line) / FUnit);
+        InkBox.Height := Round((Box.Frame.Height + Box.Line) / FUnit);
+        InsertAttr(Attrs, pango_attr_shape_new(@InkBox, @LogicalBox), FCharToByte[I], FCharToByte[I + N]);
+      end;
+      Inc(I, N);
+    end;
   end;
   if Attrs <> nil then
   begin
@@ -1601,7 +1884,9 @@ end;
 /// <summary>Runs, decorations and ink of FLayout, moved by Dx, Dy (under the Pango lock). False, with AScaled (the
 /// PangoLayout is not in the layout's font sizes), when a font of it is another one at another size (TPangoFontInfo.
 /// SizeBound): nothing is taken from it, the caller lays the text out at its own size. ANoAdvance: the PangoFont of
-/// a character no font has that got no advance (MendCharWidth), nil without one.</summary>
+/// a character no font has that got no advance (MendCharWidth), nil without one. With FastPangoHexBoxes the
+/// characters no font has into FHexFound, and the boxes of those of FHex drawn where the PangoLayout has them.
+/// </summary>
 function TFastPangoLayoutData.Analyse(const AScaled: Boolean; out ANoAdvance: Pointer): Boolean;
 var
   RunList: TList<TFastGlyphRun>;
@@ -1617,12 +1902,18 @@ var
   Pen, I, N, Index, Left, Right: Integer;
   X0, X1, Pos, Thickness: Single;
   Ink: TRectF;
-  HasInk: Boolean;
+  HasInk, HexBoxes: Boolean;
   Face: TPangoFace;
+  Hex: TFastPangoHexChar;
+  Box: THexBox;
+  HexMetrics: Pointer;
 begin
   Result := True;
   ANoAdvance := nil;
   ColorGlyphs := False;
+  FHexFound := nil;
+  HexBoxes := FastPangoHexBoxes and Assigned(pango_attr_shape_new) and Assigned(pango_font_metrics_get_ascent) and
+    Assigned(pango_font_metrics_get_descent);
   RunList := TList<TFastGlyphRun>.Create;
   DecoList := TList<TFastTextDecoration>.Create;
   try
@@ -1672,13 +1963,31 @@ begin
             R.Glyphs[N] := 0;
             if G.Width <= 0 then
               ANoAdvance := Run.Item.Analysis.Font;
+            if HexBoxes and not IsSpaceCode(G.Glyph and not PANGO_GLYPH_UNKNOWN_FLAG) then
+            begin
+              // To be laid out again as its box: where it is, its code, the size and room of its font.
+              Hex.Index := TextIndex(FByteToChar[EnsureRange(Run.Item.Offset + Run.Glyphs.LogClusters[I], 0,
+                High(FByteToChar))]);
+              Hex.Code := G.Glyph and not PANGO_GLYPH_UNKNOWN_FLAG;
+              Hex.Size := R.EmSize;
+              HexMetrics := pango_font_get_metrics(Run.Item.Analysis.Font, nil);
+              Hex.Ascent := pango_font_metrics_get_ascent(HexMetrics) * FUnit;
+              Hex.Descent := pango_font_metrics_get_descent(HexMetrics) * FUnit;
+              pango_font_metrics_unref(HexMetrics);
+              FHexFound := FHexFound + [Hex];
+            end;
           end
           else
             R.Glyphs[N] := Word(G.Glyph);
           R.X[N] := (Pen + G.XOffset) * FUnit;
           R.Y[N] := G.YOffset * FUnit;
           Inc(N);
-        end;
+        end
+        else if (FHex <> nil) and HexChar(TextIndex(FByteToChar[EnsureRange(Run.Item.Offset +
+          Run.Glyphs.LogClusters[I], 0, High(FByteToChar))]), Hex) and HexBox(Hex, Box) then
+          // A character no font has, an object as wide as its box (MakeLayout): the box.
+          AddHexBox(RunList, DecoList, Box, Hex.Code, R.OriginX + (Pen + G.XOffset) * FUnit,
+            R.OriginY + G.YOffset * FUnit, Style.HasColor, Style.Color);
         Inc(Pen, G.Width);
         Inc(G);
       end;
@@ -2132,6 +2441,12 @@ begin
         if Again then
           // A font of the text is another one at another size: the text is laid out at its own size.
           D.SetScale(Exact, BoxW, BoxH)
+        else if (D.FHexFound <> nil) and (D.FHex = nil) then
+        begin
+          // FastPangoHexBoxes: once more with the characters no font has as objects as wide as their boxes.
+          D.FHex := D.FHexFound;
+          Again := True;
+        end
         else if (NoAdvance <> nil) and not Mended then
         begin
           // A character no font has lies on the next one: once more with the font's character width measured.
@@ -2148,6 +2463,7 @@ begin
           D.SetText(Text, CharStyles);
         end;
       until not Again;
+      D.FHexFound := nil;
     finally
       TMonitor.Exit(GPangoLock);
     end;
@@ -2542,6 +2858,7 @@ begin
       // The faces go with their last reference (FT_Done_Face).
       FreeAndNil(GFonts);
       FreeAndNil(GFaces);
+      FreeAndNil(GHexDigits);
     end;
     // Layouts that are left hold their context and font map.
     if GContextLtr <> nil then

@@ -107,6 +107,7 @@ All settings are global variables, set before `Application.Initialize` unless no
 | `FastCanvasGeometryEngine` | `Native` (Windows), `Own` | Paths, their fill edges and stroke outlines: `Native` is Direct2D (Windows only; elsewhere it stands for `Own`), `Own` is FastCanvas's own engine (`FastCanvas.GeometryOwn`: no library; the default on Android and Linux), `Skia` is Skia (`FastCanvas.GeometrySkia`). Read when the first canvas is made. |
 | `FastCanvasTextEngine` | `Native` (Windows, Linux), `Skia` (Android) | Text layout and glyphs: `Native` is DirectWrite on Windows and Pango with FreeType on Linux (`FastCanvas.TextPango`, see "Android and Linux"), `Skia` is Skia's paragraphs (`FastCanvas.TextSkia`: HarfBuzz shaping, the platform's font fallback; the only one on Android). `Own` is no text engine (on Linux it stands for `Native`). Read by `InstallFastCanvas`. |
 | `FastPangoLightHinting` (`FastCanvas.TextPango`) | `False` | Linux: glyphs of the Pango engine hinted lightly (FreeType's light hinting, vertically only: the look of GTK's text with fontconfig's default `hintslight`); `False`: unhinted outlines, as Skia's. Set before the first text is drawn. |
+| `FastPangoHexBoxes` (`FastCanvas.TextPango`) | `False` | Linux: a character no font has is drawn as FMX's own canvas on Linux draws it, a frame around its code in hexadecimal (two rows of small digits of the monospace font), as wide as that box (1.15 em at 13 px); `False`: the font's box for a missing glyph, half an em wide. A text with such characters is laid out twice. Set before the first text is laid out. |
 
 On Windows and Linux the other engines are linked only when the program uses their units (`FastCanvas.GeometryOwn`,
 `FastCanvas.GeometrySkia`, `FastCanvas.TextSkia`); the Skia ones then need `sk4d.dll` (`libsk4d.so`) next to the
@@ -650,7 +651,8 @@ Linux:
   power of two at or below the font's) and scaled, since Pango asks fontconfig for the fonts of every size (1.5 to
   2.5 ms each on the main thread: a zoom that changes the font sizes was slow by them). Text in bitmap fonts, in
   variable fonts with an optical size axis and in fonts with a tracking table is laid out at its own size, at that
-  cost (`ARCHITECTURE.md`, "Text on Linux").
+  cost (`ARCHITECTURE.md`, "Text on Linux"). A character no font has is the font's box, half an em wide;
+  `FastPangoHexBoxes` draws it as FMX's canvas does, a box with its code in hexadecimal.
 - **Without Skia**: a Linux program that leaves the Skia units out runs without `libsk4d.so`
   (`tools\build-linux.ps1 -Define FASTCANVAS_NOSKIA` builds the probes so and does not copy it). PortProbe: 15.5 MB
   alone; with the Skia engines linked 16.0 MB and `libsk4d.so` (26.7 MB) next to it (MB of 2^20 bytes).

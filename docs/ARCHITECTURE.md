@@ -239,7 +239,14 @@ asserted by size at compile time.
   by its width in character cells), written into the metrics the font keeps (`PangoFontMetrics` of `pango-font.h`,
   the same from Pango 1.44 to 1.57, only when its fields are what its getters tell), and the text is laid out again.
   Nonspacing marks of such characters (Devanagari's, Thai's where no font has them) have no advance, as HarfBuzz
-  gives them.
+  gives them. With `FastPangoHexBoxes` such a character is drawn as FMX's canvas draws it: a frame around its code in
+  hexadecimal, two rows of two digits (three above U+FFFF) of the monospace font at a 2.2nd of the font's size, a
+  pad of a 43rd of the font's height, in whole pixels as cairo hints them (the digits' ink from FreeType's light
+  hinting, the font's ascent and descent rounded up). Pango does not know the box, so the text is laid out again when
+  it has such characters, each of them a shape attribute (`pango_attr_shape_new`, an object with the box's extents);
+  the box is drawn where the PangoLayout puts the object, as four rectangles and a run of the digits, on whole pixels
+  of the layout. Its widths are those of FMX's canvas from 9 to 100 pixels but at sizes whose 2.2nd is a whole
+  number of pixels (11, 22, 33, 44) and some 0.3 % below them, where FMX's digits are a pixel wider.
 - **Faces**: the fontconfig pattern of a run's PangoFont (`pango_fc_font_get_pattern`) names its file and face index,
   synthetic emboldening and the slant matrix; each such face is one object (the glyph cache's key) with an `FT_Face`
   of the engine's own `FT_Library`, used under a lock of its own (glyphs are made on the render thread). The em size of
