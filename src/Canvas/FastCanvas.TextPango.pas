@@ -1782,7 +1782,7 @@ var
 begin
   if Text.IsEmpty then
   begin
-    SetData(nil);
+    RenderEmpty;
     Exit;
   end;
   Cached := AttributesCount = 0;
@@ -1898,7 +1898,8 @@ var
 begin
   if ALayout.Data = nil then
   begin
-    ARect := TRectF.Empty;
+    // No layout was made, or the layout has no text: the room of a line without characters.
+    ARect := ALayout.EmptyRect;
     Exit;
   end;
   // As the DirectWrite layout reports it: from the text's top-left (not before the box), at most the box's size.
@@ -1981,8 +1982,10 @@ var
   List: TList<TRectF>;
 begin
   Result := nil;
+  if Text.IsEmpty then
+    Exit(EmptyRegion(ARange));
   D := TFastPangoLayoutData(Data);
-  if (D = nil) or Text.IsEmpty then
+  if D = nil then
     Exit;
   O := LayoutOrigin + TPointF.Create(D.Dx, D.Dy);
   TMonitor.Enter(GPangoLock);

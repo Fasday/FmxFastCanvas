@@ -739,7 +739,7 @@ begin
   FTextRect := TRectF.Empty;
   if Text.IsEmpty then
   begin
-    SetData(nil);
+    RenderEmpty;
     Exit;
   end;
   TFastDevice.Ensure;
@@ -833,7 +833,8 @@ var
 begin
   if ALayout.Data = nil then
   begin
-    ARect := TRectF.Empty;
+    // No layout was made, or the layout has no text: the room of a line without characters.
+    ARect := ALayout.EmptyRect;
     Exit;
   end;
   M := TFastDWriteLayoutData(ALayout.Data).Metrics;
@@ -907,8 +908,10 @@ var
   D: TFastDWriteLayoutData;
 begin
   Result := nil;
+  if Text.IsEmpty then
+    Exit(EmptyRegion(ARange));
   D := TFastDWriteLayoutData(Data);
-  if (D = nil) or (D.Layout = nil) or Text.IsEmpty then
+  if (D = nil) or (D.Layout = nil) then
     Exit;
   O := LayoutOrigin;
   D.Lock;

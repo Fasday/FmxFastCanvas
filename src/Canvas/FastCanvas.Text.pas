@@ -104,8 +104,21 @@ type
   TFastTextLayout = class(TTextLayout)
   private
     FData: TFastLayoutData;
+    FEmptyRect: TRectF;
   protected
     procedure SetData(const AData: TFastLayoutData);
+    /// <summary>A layout without text: no data (nothing is drawn), and the room of a line without characters, as the
+    /// layouts of the stock canvases give it: no width, the height of a line of the font, where the alignments put
+    /// the line in the box (the caret of an empty edit is that high, an empty line of a memo takes that much room;
+    /// with no height the caret was not seen and the empty lines of a memo fell on one another). The engines call it
+    /// from DoRenderLayout when the text is empty.</summary>
+    procedure RenderEmpty;
+    /// <summary>The rectangle of the layout while it has no data, relative to LayoutOrigin: the one of RenderEmpty,
+    /// or empty (no layout was made).</summary>
+    property EmptyRect: TRectF read FEmptyRect;
+    /// <summary>DoRegionForRange of a layout without text: the place of its caret, the rectangle of the layout.
+    /// </summary>
+    function EmptyRegion(const ARange: TTextRange): TRegion;
     function LayoutOrigin: TPointF;
     /// <summary>The cached data of AKey becomes the layout's: True; False when there is none.</summary>
     function UseCached(const AKey: string): Boolean;
@@ -241,6 +254,8 @@ var
   GCache, GCacheOld: TDictionary<string, TFastLayoutData>;
   GEvicted: TList<TFastLayoutData>;
   GCacheLock: TObject;
+  /// <summary>The height of a line by layout class and font (LineHeightOf), under GCacheLock.</summary>
+  GLineHeights: TDictionary<string, Single>;
   GEngines: array[TFastCanvasEngine] of TFastTextEngineClass;
 
 procedure FastRegisterTextEngine(const AKind: TFastCanvasEngine; const AClass: TFastTextEngineClass);
@@ -341,6 +356,93 @@ begin
   if FData <> nil then
     FData.Release;
   FData := AData;
+  FEmptyRect := TRectF.Empty;
+end;
+
+/// <summary>The height of a line of text in the font of a layout: the height of a layout of its class with a space
+/// in that font and nothing else set (kept by class and font). 0 after the shutdown.</summary>
+function LineHeightOf(const ALayout: TFastTextLayout): Single;
+var
+  H: packed record
+    Size: Single;
+    Weight, Slant, Stretch, Unused: Byte;
+  end;
+  Key: string;
+  L: TTextLayout;
+  Found: Boolean;
+begin
+  Result := 0;
+  if GCacheLock = nil then
+    Exit;
+  H.Size := ALayout.Font.Size;
+  H.Weight := Ord(ALayout.Font.StyleExt.Weight);
+  H.Slant := Ord(ALayout.Font.StyleExt.Slant);
+  H.Stretch := Ord(ALayout.Font.StyleExt.Stretch);
+  H.Unused := 0;
+  SetString(Key, PChar(@H), SizeOf(H) div SizeOf(Char));
+  Key := ALayout.ClassName + #0 + Key + ALayout.Font.Family;
+  TMonitor.Enter(GCacheLock);
+  try
+    Found := (GLineHeights <> nil) and GLineHeights.TryGetValue(Key, Result);
+  finally
+    TMonitor.Exit(GCacheLock);
+  end;
+  if Found then
+    Exit;
+  L := TTextLayoutClass(ALayout.ClassType).Create(nil);
+  try
+    L.BeginUpdate;
+    L.Font := ALayout.Font;
+    L.Text := ' ';
+    L.EndUpdate;
+    Result := L.TextHeight;
+  finally
+    L.Free;
+  end;
+  TMonitor.Enter(GCacheLock);
+  try
+    if GLineHeights = nil then
+      GLineHeights := TDictionary<string, Single>.Create;
+    // Fonts of ever new sizes (a zoom): started over, not grown without end.
+    if GLineHeights.Count >= CacheGeneration then
+      GLineHeights.Clear;
+    GLineHeights.AddOrSetValue(Key, Result);
+  finally
+    TMonitor.Exit(GCacheLock);
+  end;
+end;
+
+procedure TFastTextLayout.RenderEmpty;
+var
+  W, H, X, Y, Line: Single;
+begin
+  SetData(nil);
+  Line := LineHeightOf(Self);
+  // The box the text is laid out in, and where a line without characters comes to lie in it, as the engines place
+  // and report a line with characters (not before the box, at most as high as the box).
+  W := Max(MaxSize.X - Padding.Left - Padding.Right, 0);
+  H := Max(MaxSize.Y - Padding.Top - Padding.Bottom, 0);
+  X := 0;
+  case HorizontalAlign of
+    TTextAlign.Center: X := W / 2;
+    TTextAlign.Trailing: X := W;
+  end;
+  if RightToLeft then
+    X := W - X;
+  Y := 0;
+  case VerticalAlign of
+    TTextAlign.Center: Y := (H - Line) / 2;
+    TTextAlign.Trailing: Y := H - Line;
+  end;
+  Y := Max(Y, 0);
+  FEmptyRect := TRectF.Create(X, Y, X, Y + Min(Min(Line, H), MaxSize.Y));
+end;
+
+function TFastTextLayout.EmptyRegion(const ARange: TTextRange): TRegion;
+begin
+  Result := nil;
+  if (ARange.Pos >= 0) and (ARange.Length >= 0) then
+    Result := [TextRect];
 end;
 
 function TFastTextLayout.LayoutOrigin: TPointF;
@@ -621,6 +723,7 @@ begin
       FreeAndNil(GCacheOld);
       FreeAndNil(GEvicted);
     end;
+    FreeAndNil(GLineHeights);
     for E := Low(TFastCanvasEngine) to High(TFastCanvasEngine) do
       if GEngines[E] <> nil then
         GEngines[E].Shutdown;
