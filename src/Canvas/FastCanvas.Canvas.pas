@@ -215,6 +215,8 @@ type
     FAccess: TMapAccess;
     /// <summary>Pixels last written by the CPU (FastCanvasKeepBitmapCopies), nil when the GPU wrote it since.</summary>
     FCopy: TBytes;
+    /// <summary>Scenes of canvases drawing into it that are open (the thread that holds the canvas lock).</summary>
+    FScenes: Integer;
     /// <summary>HDR content (made on first use) and whether the content is there (render thread, in stream order).
     /// </summary>
     FHdr: TGpuSurface;
@@ -329,6 +331,8 @@ type
     /// <summary>The canvas whose region was in force when this one's began (a bitmap scene in a partial window
     /// frame), in force again after this scene.</summary>
     FOuterRegion: TFastCanvas;
+    /// <summary>Bitmap scene in progress: its bitmap, referenced until the scene ends (TFastBitmap.FScenes).</summary>
+    FSceneBitmap: TFastBitmap;
     /// <summary>The bitmap of the paint PaintOf made last (bitmap brushes), taken by the next AddInstance.</summary>
     FPaintTexture: TFastBitmap;
 {$IFDEF MSWINDOWS}
@@ -1930,6 +1934,12 @@ begin
     Queue.SetThreaded(FastCanvasRenderThread);
   end;
   Inc(GSceneDepth);
+  if B <> nil then
+  begin
+    Inc(B.FScenes);
+    B._AddRef;
+    FSceneBitmap := B;
+  end;
   FClip.Clip.Box := TRectF.Create(0, 0, FPixelW, FPixelH);
   FClip.Clip.Count := 0;
   FClip.Index := 0;
@@ -2133,6 +2143,12 @@ begin
 {$ENDIF}
   inherited;
   Dec(GSceneDepth);
+  if FSceneBitmap <> nil then
+  begin
+    Dec(FSceneBitmap.FScenes);
+    FSceneBitmap._Release;
+    FSceneBitmap := nil;
+  end;
   Q := GQueue;
   if FTarget.Kind <> TTargetKind.Bitmap then
   begin
@@ -3053,6 +3069,10 @@ begin
   TFastDevice.Lock;
   try
     B.FSurface.Unmap(B.FAccess <> TMapAccess.Read);
+    // A scene of the bitmap is open and goes on drawing into it: what the CPU read or wrote is not its content for
+    // long, so the next Map reads the texture again (it returned these pixels, without what was drawn after them).
+    if B.FScenes > 0 then
+      B.GpuWritten;
   finally
     TFastDevice.Unlock;
   end;
