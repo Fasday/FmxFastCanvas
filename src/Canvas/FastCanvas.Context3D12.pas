@@ -2557,6 +2557,13 @@ begin
     FFormat := Ord(DXGI_FORMAT_B8G8R8A8_UNORM);
   if FFormat = 0 then
     FFormat := Ord(DXGI_FORMAT_B8G8R8A8_UNORM);
+  // A texture without pixels (a TViewport3D of no width or height) gets no buffers: Direct3D makes no texture of that
+  // size (the context raised here, when it was made or resized), and without a target no scene begins (DrawTarget).
+  if (Texture <> nil) and ((Px.Width <= 0) or (Px.Height <= 0)) then
+  begin
+    FSamples := 1;
+    Exit;
+  end;
   if (FHdr and (Texture <> nil)) or FWindowHdr then
   begin
     // HDR: the scene ends in a texture of its own, RGBA16F: copied into the viewport's bitmap as its HDR content, or

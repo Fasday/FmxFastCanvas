@@ -754,6 +754,10 @@ begin
     end;
     Wanted := Wanted div 2;
   end;
+  // A texture without pixels (a TViewport3D of no width or height) gets no buffers: Direct3D makes no texture of that
+  // size (the context raised here, when it was made or resized), and without a target no scene begins (TargetView).
+  if (Px.Width <= 0) or (Px.Height <= 0) then
+    Exit;
   if Texture = nil then
   begin
     // A window (TForm3D): flip-model swap chain on the canvas device.
