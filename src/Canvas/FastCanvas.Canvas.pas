@@ -4607,7 +4607,8 @@ begin
   Inst.V0 := 0;
   Inst.U1 := 1;
   Inst.V1 := 1;
-  Inst.Color := OpacityColor(C.Opacity);
+  // The image is rendered in the opaque text color: the color's own alpha goes here, with the opacity.
+  Inst.Color := OpacityColor(C.Opacity * (C.Color shr 24) / 255);
   Inst.Flags := Flags;
   Inst.Clip := C.Clip;
 end;
