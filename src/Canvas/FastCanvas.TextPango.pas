@@ -7,8 +7,8 @@ unit FastCanvas.TextPango;
   HarfBuzz shaping, line breaking, bidi, ellipsizing) with absolute font sizes (FMX's sizes are pixels) and glyph
   positions that are not rounded. The PangoLayout is in one of ten font sizes, the power of two at or below the font's,
   and what it tells is scaled to the font's size (LayoutFontSize: Pango asks fontconfig for the fonts of every size it
-  has not seen); text in a font that is another one at another size (bitmap strikes, an optical size axis) is laid out
-  at its own size. The layout's runs become the glyph runs right away; the PangoFont of a run is told
+  has not seen); text in a font that is another one at another size (bitmap strikes, an optical size axis, a tracking
+  table) is laid out at its own size. The layout's runs become the glyph runs right away; the PangoFont of a run is told
   by its fontconfig pattern (font file, face index, synthetic emboldening and slant) and the position of its HarfBuzz
   font on the axes of a variable font, and gets an FT_Face of this unit's own FreeType library at that position,
   which makes the glyph coverage (unhinted outlines rendered at the canvas's subpixel positions: plain coverage, which
@@ -443,6 +443,8 @@ var
   hb_font_get_face: function(AFont: Pointer): Pointer; cdecl;
   /// <summary>HarfBuzz 2.2 and later; AInfo: hb_ot_var_axis_info_t (32 bytes).</summary>
   hb_ot_var_find_axis_info: function(AFace: Pointer; ATag: Cardinal; AInfo: Pointer): Integer; cdecl;
+  /// <summary>HarfBuzz 2.3 and later.</summary>
+  hb_aat_layout_has_tracking: function(AFace: Pointer): Integer; cdecl;
   // fontconfig.
   FcPatternGetString: function(APattern: Pointer; AObject: PAnsiChar; AN: Integer; out AValue: PAnsiChar): Integer;
     cdecl;
@@ -503,7 +505,8 @@ type
     Face: IInterface;
     EmSize: Single;
     /// <summary>The font is not the same at another size, scaled: the strike of a bitmap font (drawn as large as it
-    /// is), or a variable font with an optical size axis (fontconfig puts it at the font's size). Text in it is
+    /// is), a variable font with an optical size axis (Pango and fontconfig put it at the font's size), or a font
+    /// with a tracking table (HarfBuzz spaces its glyphs by the font's size, which Pango tells it). Text in it is
     /// laid out at its own size.</summary>
     SizeBound: Boolean;
   end;
@@ -633,6 +636,7 @@ begin
   @hb_font_get_var_coords_normalized := Sym(HarfBuzz, 'hb_font_get_var_coords_normalized');
   @hb_font_get_face := Sym(HarfBuzz, 'hb_font_get_face', True);
   @hb_ot_var_find_axis_info := Sym(HarfBuzz, 'hb_ot_var_find_axis_info', True);
+  @hb_aat_layout_has_tracking := Sym(HarfBuzz, 'hb_aat_layout_has_tracking', True);
   @FcPatternGetString := Sym(Fc, 'FcPatternGetString');
   @FcPatternGetInteger := Sym(Fc, 'FcPatternGetInteger');
   @FcPatternGetBool := Sym(Fc, 'FcPatternGetBool');
@@ -877,6 +881,9 @@ begin
     else
       // HarfBuzz before 2.2 does not tell: any variable font may have the axis.
       Result.SizeBound := (Coords <> nil) and (CoordCount > 0);
+    if Assigned(hb_font_get_face) and Assigned(hb_aat_layout_has_tracking) and
+      (hb_aat_layout_has_tracking(hb_font_get_face(Hb)) <> 0) then
+      Result.SizeBound := True;
   end;
   Result.EmSize := Abs(Sy) / PANGO_SCALE;
   FileName := nil;

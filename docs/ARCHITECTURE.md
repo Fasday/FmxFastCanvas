@@ -216,12 +216,14 @@ asserted by size at compile time.
   the centering to a whole pixel when the widths of the box and of the line both are whole pixels, which happens to
   other lines now), and a character no font has takes Pango's approximate character width of the layout size, scaled
   (it is not proportional to the size: up to 0.08 em apart). A font that is another one at another size is laid out
-  at its own size as before, at that cost: a bitmap font (its strikes are drawn as large as they are) and a variable
-  font with an optical size axis (`opsz`, which fontconfig sets from the size; HarfBuzz tells, before 2.2 every
-  variable font counts); a layout is made again at the size itself when a run turns out to be in such a font (Terminus
-  and Inter: the same numbers as before). Families whose files are for ranges of sizes (the optical sizes of OS/2) get
-  the file of the layout size. 2000 labels laid out in 64 font sizes never seen before took 98 ms and take 12, as in
-  one size.
+  at its own size as before, at that cost: a bitmap font (its strikes are drawn as large as they are), a variable
+  font with an optical size axis (`opsz`, which Pango and fontconfig set from the size; HarfBuzz tells, before 2.2
+  every variable font counts) and a font with a tracking table (`trak`: HarfBuzz spaces the glyphs by the point size
+  Pango tells it; with HarfBuzz 2.7 the text of its test font is 16.0 em wide at 1 pixel and 10.2 em at 256, HarfBuzz
+  12.3 does not apply the table here); a layout is made again at the size itself when a run turns out to be in such a
+  font (Terminus, Inter and HarfBuzz's TestTRAK: the same numbers as before). Families whose files are for ranges of
+  sizes (the optical sizes of OS/2) get the file of the layout size. 2000 labels laid out in 64 font sizes never seen
+  before took 98 ms and take 12, as in one size.
 - **Runs**: the layout iterator's runs, in visual order, become the glyph runs at once (origin: the run's logical x
   and the line's baseline; glyph x from the advances and offsets, y offsets downwards), with the underline and
   strikeout rectangles from the font's metrics and the ink of the layout as the overhang. The PangoLayout is released
