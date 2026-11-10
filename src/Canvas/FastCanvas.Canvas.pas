@@ -4155,11 +4155,10 @@ begin
   else
     Done := FGeometry.Widen(Geometry, StrokeOf(C), FSink);
   Geometry := nil;
-  if not Done then
-    Exit(False);
   AEdges := Default(TPathEdges);
   AEdges.Frame := -1;
-  if FSink.Count > 0 then
+  N := 0;
+  if Done and (FSink.Count > 0) then
   begin
     // Cells where paths are drawn as pieces (tilers: every pixel of a piece counts; elsewhere the GPU shades the bands
     // fast enough), for the paths that last (seen in an earlier frame: cells take longer to make), unless the table
@@ -4169,8 +4168,22 @@ begin
     // Cells take more entries than bands: whole bands where they would not fit.
     if N > GpuEdgesLimit div 4 then
       N := BandEdges(FSink, Power(2, (BucketMin - 0.5) / 4), FGpu.BandPixels, False, FBanded, Bands);
-    if N > GpuEdgesLimit div 4 then
-      Exit(False);
+    Done := N <= GpuEdgesLimit div 4;
+  end;
+  if not Done then
+  begin
+    // An outline the engine did not make, or one of more entries than a path may take: nothing is drawn, and that is
+    // kept as the outline of a path is (not found out again at every frame: a stroke of a hundred thousand dashes
+    // takes milliseconds to be outlined and found too large). Seen for the first time, it is kept as such paths are.
+    if not Persistent then
+    begin
+      AEdges.Frame := FFrame;
+      AEdges.TransGen := FTransGen;
+      AddTransient(Key);
+    end;
+  end
+  else if FSink.Count > 0 then
+  begin
     if not Persistent and (N > FGpu.EdgeCapacity div 4) then
       Persistent := True;
     Start := AllocEdges(N, Persistent);
