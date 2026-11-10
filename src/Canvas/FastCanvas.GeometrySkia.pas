@@ -246,10 +246,13 @@ end;
 function TFastGeometrySkia.RoundedRectangle(const R: TRectF; const ARx, ARy: Single): IFastGeometry;
 var
   B: ISkPathBuilder;
+  Rounded: ISkRoundRect;
 begin
   B := TSkPathBuilder.Create;
+  // A reference of its own: made in the call, the object went to a const parameter uncounted and was never freed.
+  Rounded := TSkRoundRect.Create(R, ARx, ARy);
   // Clockwise from the top of the left side, as Direct2D: dash patterns start where its rounded rectangles do.
-  B.AddRoundRect(TSkRoundRect.Create(R, ARx, ARy), TSkPathDirection.CW, 7);
+  B.AddRoundRect(Rounded, TSkPathDirection.CW, 7);
   Result := Wrap(B.Detach);
 end;
 
