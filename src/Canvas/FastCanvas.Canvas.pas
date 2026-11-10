@@ -186,6 +186,9 @@ const
   /// <summary>Pixels per em up to which text is drawn from the glyph atlas.</summary>
   MaxAtlasEm = 160;
   MaxRecordedPaths = 1024;
+  /// <summary>Rectangles of a scene that updates part of its target, each tested per pixel (TFastCanvas.RegionOf).
+  /// </summary>
+  MaxRegionRects = 32;
   /// <summary>Paths kept in the GPU edge table (render thread).</summary>
   MaxEdgePaths = 4096;
   /// <summary>Horizontal bands of a path in the edge table (shader PathCoverage).</summary>
@@ -1820,7 +1823,7 @@ begin
     Exit;
   if GClipCount + Length(FRegion) > GpuMaxClips then
   begin
-    // Never twice in a row: a reset leaves room for any region (at most 20 rectangles each). It records the regions
+    // Never twice in a row: a reset leaves room for any region (at most MaxRegionRects rectangles each). It records the regions
     // this one is drawn in; this one follows.
     GRegionCanvas := FOuterRegion;
     ResetTables;
@@ -2060,17 +2063,23 @@ begin
   RegionOf(ARects);
 end;
 
-/// <summary>FRegion := the rectangles, in pixels (whole pixels around them, inside the target); nil when there are
-/// none or one of them is the whole target.</summary>
+/// <summary>FRegion := the rectangles, in pixels (whole pixels around them, inside the target), without the empty
+/// ones and those inside another; nil when there are none or one of them is the whole target. FMX may list any
+/// number (TBufferedLayout adds one at every repaint of a child until it is painted itself: thousands of the same
+/// rectangle, which overflowed the clip table): more than MaxRegionRects different ones become their bounds, as FMX
+/// does with the rectangles of a form.</summary>
 procedure TFastCanvas.RegionOf(const ARects: TClipRects);
 var
-  I, N: Integer;
+  I, J, N, Count: Integer;
   R: TRectF;
+  Listed, Bounds: Boolean;
 begin
   N := Length(ARects);
   if N = 0 then
     Exit;
-  SetLength(FRegion, N);
+  SetLength(FRegion, Min(N, MaxRegionRects));
+  Count := 0;
+  Bounds := False;
   for I := 0 to N - 1 do
   begin
     // FMX gives them in logical units.
@@ -2079,14 +2088,43 @@ begin
     R := TRectF.Create(Floor(R.Left), Floor(R.Top), Ceil(R.Right), Ceil(R.Bottom));
     R.Intersect(TRectF.Create(0, 0, FPixelW, FPixelH));
     if R.IsEmpty then
-      R := TRectF.Empty;
-    FRegion[I] := R;
+      Continue;
     if (R.Left <= 0) and (R.Top <= 0) and (R.Right >= FPixelW) and (R.Bottom >= FPixelH) then
     begin
       FRegion := nil;
       Exit;
     end;
+    Listed := False;
+    for J := 0 to Count - 1 do
+      if FRegion[J].Contains(R) then
+      begin
+        Listed := True;
+        Break;
+      end;
+    if Listed then
+      Continue;
+    if Bounds or (Count = MaxRegionRects) then
+    begin
+      if not Bounds then
+        for J := 1 to Count - 1 do
+          FRegion[0] := TRectF.Union(FRegion[0], FRegion[J]);
+      Bounds := True;
+      FRegion[0] := TRectF.Union(FRegion[0], R);
+      Count := 1;
+    end
+    else
+    begin
+      FRegion[Count] := R;
+      Inc(Count);
+    end;
   end;
+  // Nothing but empty rectangles: nothing is updated.
+  if Count = 0 then
+  begin
+    FRegion[0] := TRectF.Empty;
+    Count := 1;
+  end;
+  SetLength(FRegion, Count);
 end;
 
 procedure TFastCanvas.DoEndScene;
