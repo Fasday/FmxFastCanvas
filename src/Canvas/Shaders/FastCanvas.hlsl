@@ -568,7 +568,15 @@ float PathCoverage(float2 l, float w, float4 rect, uint header, uint bands, bool
             float slope = (b.x - a.x) / (b.y - a.y);
             float fa = a.x + (y0 - a.y) * slope;
             float fb = a.x + (y1 - a.y) * slope;
-            float avg = abs(fb - fa) < 1e-4 ? saturate(0.5 * (fa + fb)) : (RampIntegral(fb) - RampIntegral(fa)) / (fb - fa);
+            // An edge right of the square adds its height in full: said outright, not left to the quotient, which far
+            // from the square is the difference of two large numbers over a small one. The ends of a row of dashes
+            // right of a pixel cancel only when each adds exactly its height (a Vulkan driver that rearranges the
+            // arithmetic left streaks along dotted lines that are not level). The quotient is taken of the smaller
+            // and the larger of the two, which keeps its difference the one of the numbers it is computed from.
+            float lo = min(fa, fb);
+            float hi = max(fa, fb);
+            float avg = lo >= 1 ? 1 : (hi - lo < 1e-4 ? saturate(0.5 * (lo + hi)) :
+                (RampIntegral(hi) - RampIntegral(lo)) / (hi - lo));
             acc += (b.y > a.y ? 1 : -1) * (y1 - y0) * avg;
         }
     }
