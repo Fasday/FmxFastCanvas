@@ -3644,8 +3644,9 @@ end;
 /// most that many pixels tall (TGpuRenderer.BandPixels; a pixel goes through every edge of its band, and those that
 /// do not reach its row add nothing, so the band count does not change the result). ACellsAllowed: a band of many
 /// edges (a dashed outline puts the ends of a whole side's dashes into one band) is cut into cells, columns of the
-/// bounds (count BandCells or the number of cells; start: their headers, pairs as the bands'). Returns the number
-/// of entries used.</summary>
+/// bounds (count BandCells or the number of cells; start: their headers, pairs as the bands'); the bands of a thin
+/// path of very many edges are in any case. Returns the number of entries used (MaxInt: the path is not drawn).
+/// </summary>
 function BandEdges(const ASink: TFastEdgeSink; const AMinScale, ABandPixels: Single; const ACellsAllowed: Boolean;
   var AOut: TArray<TEdge>; out ABands: Integer): Integer;
 const
@@ -3653,9 +3654,14 @@ const
   CellEdges = 16;
   CellPixels = 8;
   MaxCells = 64;
+  /// <summary>Thin paths (see below): edges of a band from which it is cut into cells whether they are allowed or
+  /// not, and the most a band left whole may hold (every pixel of it goes through all of them).</summary>
+  ThinCellEdges = 2048;
+  ThinBandEdges = 16384;
 var
   H, InvH, Margin: Single;
-  B, I, Headers, Total, Bands, Cells, First, Last: Integer;
+  B, I, Headers, Total, Bands, Cells, CellsFrom, First, Last: Integer;
+  Thin: Boolean;
   Counts, Next: array[0..MaxPathBands - 1] of Integer;
   EF, EL: TArray<Integer>;
 
@@ -3723,7 +3729,7 @@ var
     Ys: TArray<Single>;
     E: TEdge;
     InvCW, X, BY0, BY1, Lo, Hi: Single;
-    B, I, C, J, K, N, M, Start, W, A, Act, Ptr, Budget, CellAt, PseudoAt, PseudoCount: Integer;
+    B, I, C, J, K, N, M, Start, W, A, Act, Ptr, Budget, CellAt, PseudoAt, PseudoCount, Upto: Integer;
     Changed: Boolean;
 
     procedure Put(const AX0, AY0, AX1, AY1: Single);
@@ -3921,14 +3927,21 @@ var
         begin
           PseudoAt := Result;
           W := 0;
-          for J := 0 to K - 2 do
+          J := 0;
+          while J < K - 1 do
           begin
             Inc(W, D[J]);
+            // One edge for the heights the winding stays the same over (a dotted line that is not level has a
+            // height of its own for every dot: an edge for each of them took more than the table's room).
+            Upto := J + 1;
+            while (Upto < K - 1) and (D[Upto] = 0) do
+              Inc(Upto);
             for A := 1 to Abs(W) do
               if W > 0 then
-                Put(X, Ys[J], X, Ys[J + 1])
+                Put(X, Ys[J], X, Ys[Upto])
               else
-                Put(X, Ys[J + 1], X, Ys[J]);
+                Put(X, Ys[Upto], X, Ys[J]);
+            J := Upto;
           end;
           PseudoCount := Result - PseudoAt;
           Changed := False;
@@ -3951,11 +3964,21 @@ var
   end;
 
 begin
+  Margin := 0.75 / Max(AMinScale, 1E-3);
   Bands := ASink.Count div 6;
   if ABandPixels > 0 then
     Bands := Max(Bands, Trunc((ASink.MaxY - ASink.MinY) * AMinScale / ABandPixels));
   Bands := EnsureRange(Bands, 1, MaxPathBands);
   H := (ASink.MaxY - ASink.MinY) / Bands;
+  // A band lists the edges within the margin around it: bands far thinner than the margin list every edge again and
+  // again. A long dotted hairline (thousands of edges in a path a pixel tall) took 256 times its edges, more than a
+  // path may take, and was not drawn at all. Such a path gets bands of twice the margin.
+  Thin := (H > 1E-6) and (H < Margin / 8);
+  if Thin then
+  begin
+    Bands := Max(1, Trunc((ASink.MaxY - ASink.MinY) / (2 * Margin)));
+    H := (ASink.MaxY - ASink.MinY) / Bands;
+  end;
   if H <= 1E-6 then
   begin
     Bands := 1;
@@ -3965,9 +3988,13 @@ begin
   InvH := 0;
   if H > 0 then
     InvH := 1 / H;
-  Margin := 0.75 / Max(AMinScale, 1E-3);
   FillChar(Counts, SizeOf(Counts), 0);
-  if ACellsAllowed then
+  // Cells where they are allowed, and wherever it is drawn for a thin path with a band of very many edges (a long
+  // dotted line: its few bands hold all its edges, and every pixel of a band goes through every edge of it).
+  CellsFrom := CellEdges;
+  if not ACellsAllowed then
+    CellsFrom := ThinCellEdges;
+  if ACellsAllowed or (Thin and (ASink.Count >= ThinCellEdges)) then
   begin
     // The bands of every edge, kept for the cells (bands alone compute them twice: the render thread allocates
     // nothing per path then).
@@ -3984,7 +4011,7 @@ begin
     Cells := Min(Trunc((ASink.MaxX - ASink.MinX) * AMinScale / CellPixels), MaxCells);
     if Cells > 1 then
       for B := 0 to Bands - 1 do
-        if Counts[B] >= CellEdges then
+        if Counts[B] >= CellsFrom then
         begin
           Result := Mixed;
           if Result > 0 then
@@ -3999,6 +4026,12 @@ begin
       for B := First to Last do
         Inc(Counts[B]);
     end;
+  // Whole bands (no room for cells, or a path too narrow for them) with too many edges for the pixels of one band:
+  // not drawn, as a path of more entries than a path may take.
+  if Thin then
+    for B := 0 to Bands - 1 do
+      if Counts[B] > ThinBandEdges then
+        Exit(MaxInt);
   Headers := (Bands + 1) div 2;
   Result := Headers;
   for B := 0 to Bands - 1 do
